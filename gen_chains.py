@@ -4,15 +4,14 @@ This is the first script that loads the model, so it only runs inside the GPU
 job (gen_chains_job.sh) on a compute node -- never on a login node.
 
 Pure-logic helpers come from mc_common (build_messages, parse_answer_confidence,
-is_correct). The helpers that need the tokenizer/torch live here, because this
-is the first step where those are available:
+find_answer_token, is_correct). find_answer_token is pure over the decoded token
+strings -- no torch, no tokenizer -- so it lives in mc_common too, anchoring on
+the shared ANSWER_RE. The helpers that need the tokenizer/torch live here,
+because this is the first step where those are available:
   - token_entropy        : entropy (nats) of one raw logit row
   - split_think          : split generated ids into reasoning / post-</think>
   - get_letter_token_ids : resolve the 4 A-D token ids matching what the model
                            actually emits after "Answer: " (leading space or not)
-  - find_answer_token    : locate the answer-letter token by anchoring to the
-                           LAST "Answer:" marker (text space), then mapping to a
-                           token index (exact token space) for logit alignment
 
 Scaled version: all 20 questions, greedy, one run each. Per-question failures
 are recorded and skipped (one bad question won't sink the batch). Sampling and
@@ -21,17 +20,18 @@ per-token storage come later.
 
 import json
 import os
-import re
 
 import torch
 from datasets import load_from_disk
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from mc_common import LETTERS, build_messages, parse_answer_confidence, is_correct
-
-# Same anchor the parser uses (last "Answer:"), tolerant of whitespace / the
-# marker spanning multiple tokens.
-ANSWER_MARKER_RE = re.compile(r"Answer\s*:\s*([ABCD])", re.IGNORECASE)
+from mc_common import (
+    LETTERS,
+    build_messages,
+    parse_answer_confidence,
+    find_answer_token,
+    is_correct,
+)
 
 
 # --- deferred helpers (need tokenizer / torch, so they live in the GPU step) ---
@@ -99,34 +99,6 @@ def get_letter_token_ids(tok, emitted_id):
         if all(len(v) == 1 for v in enc.values()):
             return {k: v[0] for k, v in enc.items()}, ls, False, diagnostics
     return None, None, False, diagnostics
-
-
-def find_answer_token(decoded_tokens):
-    """Locate the answer-letter token by anchoring to the LAST "Answer:" marker.
-
-    Two spaces, kept separate: a fuzzy TEXT match finds the marker (it may span
-    several tokens or fuse with whitespace), then an EXACT char->token map --
-    built from the SAME joined pieces we matched against, so there is no
-    whole-vs-piecewise spacing mismatch -- recovers the token index whose logits
-    produced the letter. Not gated on </think>, so an answer committed inside the
-    think block is found too. Returns (token_index_or_None, located_letter_or_None).
-    """
-    spans = []
-    pos = 0
-    for s in decoded_tokens:
-        spans.append((pos, pos + len(s)))
-        pos += len(s)
-    recon = "".join(decoded_tokens)
-    matches = list(ANSWER_MARKER_RE.finditer(recon))
-    if not matches:
-        return None, None
-    m = matches[-1]
-    cpos = m.start(1)                 # char index of the letter itself
-    located_letter = m.group(1).upper()
-    for i, (a, b) in enumerate(spans):
-        if a <= cpos < b:
-            return i, located_letter
-    return None, located_letter
 
 
 # --- model load (unchanged from the verified single-question version) ---
