@@ -1,0 +1,77 @@
+{
+  "qid": 0,
+  "subject": "abstract_algebra",
+  "gold_letter": "B",
+  "natural_pred_letter": "B",
+  "natural_confidence": 95,
+  "think_closed": true,
+  "n_think_tokens": 1553,
+  "force_close": true,
+  "inducer_version": "v1",
+  "inducer_text": "</think>\nAnswer:",
+  "fractions": [
+    0.0,
+    0.25,
+    0.5,
+    0.75,
+    1.0
+  ],
+  "checkpoints": [
+    {
+      "fraction": 0.0,
+      "k": 0,
+      "intervention": "no_reasoning_baseline",
+      "correct": true,
+      "forced_letter": "B",
+      "forced_confidence": 85,
+      "answer_letter_entropy": 0.8400512933731079,
+      "answer_fullvocab_entropy": 0.8424392938613892,
+      "letters_matched": true
+    },
+    {
+      "fraction": 0.25,
+      "k": 388,
+      "intervention": "partial_reasoning",
+      "correct": true,
+      "forced_letter": "B",
+      "forced_confidence": 85,
+      "answer_letter_entropy": 0.8031455278396606,
+      "answer_fullvocab_entropy": 0.987655758857727,
+      "letters_matched": true
+    },
+    {
+      "fraction": 0.5,
+      "k": 776,
+      "intervention": "partial_reasoning",
+      "correct": true,
+      "forced_letter": "B",
+      "forced_confidence": 85,
+      "answer_letter_entropy": 0.8071091175079346,
+      "answer_fullvocab_entropy": 0.9460671544075012,
+      "letters_matched": true
+    },
+    {
+      "fraction": 0.75,
+      "k": 1165,
+      "intervention": "partial_reasoning",
+      "correct": true,
+      "forced_letter": "B",
+      "forced_confidence": 95,
+      "answer_letter_entropy": 0.7839926481246948,
+      "answer_fullvocab_entropy": 0.7936939001083374,
+      "letters_matched": true
+    },
+    {
+      "fraction": 1.0,
+      "k": 1553,
+      "intervention": "full_chain",
+      "correct": true,
+      "forced_letter": "B",
+      "forced_confidence": 95,
+      "answer_letter_entropy": 0.042480964213609695,
+      "answer_fullvocab_entropy": 0.044110946357250214,
+      "letters_matched": true
+    }
+  ],
+  "checkpoint_full_agrees_natural": true
+}
