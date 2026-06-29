@@ -1,76 +1,59 @@
 # Resume notes
 
-## Session 2026-06-26 — Checkpoint experiment (Step 5), smallest version
+## State as of this session
 
-### 🚧 BLOCKER — scaling is gated, do not skip
-**Scaling the checkpoint experiment to deciles × 20 questions is BLOCKED until
-`checkpoints.py` and `gen_chains.py` share their torch helpers via a new
-`gpu_common.py` (move `token_entropy`, `split_think`, `get_letter_token_ids` there;
-repoint both scripts; re-verify gen_chains).** `checkpoints.py` currently MIRRORS
-those three helpers verbatim (tagged `# mirrored from gen_chains.py`). Duplicated
-code drifts — we were already bitten by the `ANSWER_MARKER_RE` parser drift — so the
-duplication must NOT reach the scaled run. Factor `gpu_common.py` first, THEN scale.
+The checkpoint experiment is working and has produced a real, paper-worthy signal.
+Cluster work is paused at a clean, committed point. Next session starts with a
+read-only investigation (no generation), so the gpu_common gate does NOT block it.
 
-### Status (this session)
-- Parser hardening (prior session, steps 1–3) is DONE and committed (shared
-  markdown-tolerant `ANSWER_RE`/`CONF_RE`, `find_answer_token` moved to `mc_common`,
-  `test_mc_common.py` 18/18 green).
-- `checkpoints.py` + `checkpoints_job.sh` written: ONE question (QID=0), fractions
-  [0,.25,.5,.75,1.0], `FORCE_CLOSE=True` (locked v1 in-distribution commit-probe),
-  `MIN_THINK_TOKENS=8` drop guard, `checkpoint_full_agrees_natural` 1.0 invariant,
-  `fraction=0.0` labelled `no_reasoning_baseline` (distinct intervention).
-- Next: run the single-question job, eyeball the trajectory table + invariant, then
-  confirm before scaling (and before scaling, clear the BLOCKER above).
+## What exists and is verified
+- mc_common.py: torch-free helpers; ONE shared markdown-tolerant ANSWER_RE/CONF_RE;
+  owns find_answer_token. Login-safe pytest suite green.
+- gen_chains.py: original endpoint-generation script. main()-guarded? (CHECK — this is
+  part of the retire/refactor question below.)
+- checkpoints.py: the live experiment. main()-guarded, self-contained (computes
+  correctness/natural_pred/n_think from its OWN regenerated chain, never joins to
+  chains.jsonl — the greedy determinism gap makes that join invalid). Mirrors 3 torch
+  helpers from gen_chains VERBATIM (token_entropy, split_think, get_letter_token_ids),
+  still debt-tagged.
+- results/checkpoints_20q.jsonl: 220 rows = 20 questions x 11 deciles, FORCE_CLOSE=True,
+  inducer v1. Invariant 19 Y / 0 N / 1 NA (qid14 unclosed). One letters_matched=False
+  (qid15 @ 0.5). All abstract_algebra (no-shuffle limitation), 13/19 closed correct.
 
-## Session 2026-06-23 — Harden answer/confidence parsing (DONE — see above; kept for history)
+## The finding (exploratory, suggestive not significant)
+- Answer-letter entropy SEPARATES correct from incorrect by CONVERGENCE TIMING, not
+  level: correct answers' entropy collapses earlier (mid-chain, ~frac 0.5-0.9);
+  incorrect stay high until ~0.9; BOTH collapse to ~0.04 nats at frac 1.0 (endpoint is
+  flat — invisible if you only measure the committed answer, which is why checkpoints
+  matter).
+- Verbalized confidence does NOT separate (85-95 both groups throughout). Token entropy
+  is the live signal; verbalized confidence is the dead one here.
+- 14/19 questions flip their committed answer at least once across deciles — reasoning
+  does real work, not just ratifying a prior.
+- CAVEATS: single subject, n=19 usable, n=6 incorrect (no p-values), 1 greedy run/q,
+  exploratory off mirrored helpers. CONFOUND to check: incorrect chains are longer, so
+  "fraction of chain" != same token position across groups — re-check timing vs ABSOLUTE
+  token position (k_keep) on the next run.
 
-**Status: nothing implemented. Working tree is clean. No code was changed.**
-The whole session stayed in plan mode; I never reached implementation (ExitPlanMode
-was rejected, then you stopped). The only artifact written is the plan file:
-`~/.claude/plans/context-comp-400-llm-uncertainty-stateful-sloth.md`.
+## BLOCKER status: gpu_common refactor — UNDER REVIEW
+The gate was to prevent drift between two live scripts sharing the 3 mirrored helpers.
+BUT checkpoints.py may SUBSUME gen_chains.py (same generation + checkpoints), making
+gen_chains retire-able rather than refactor-needed. If only one script is live, no drift
+is possible and the gate is moot.
 
-### What was changed this session
-- Nothing in the repo. `mc_common.py`, `gen_chains.py` are untouched; no
-  `test_mc_common.py` was created. Only the (out-of-repo) plan file exists.
+## NEXT ACTION (read-only investigation, no generation, login-safe)
+Confirm or refute subsumption before deciding retire-vs-refactor. Check:
+1. Does checkpoints output cover every field chains.jsonl has?
+2. Does anything actually read chains.jsonl?
+3. Is the NATURAL chain's per-token entropy (gen_chains' unique capability; checkpoints
+   sets output_logits=False on the natural pass) needed by any planned experiment?
+4. Are the 3 helpers byte-identical, and is gen_chains imported anywhere?
+Then: RETIRE gen_chains (if fully subsumed + nothing needs its unique output) OR do the
+gpu_common.py refactor properly (if a genuine 2nd consumer / natural-trajectory need
+exists). Decide with GK-level rigor; the answer to #3 is the deciding factor.
 
-### What was left unfinished (the agreed plan, not yet done)
-1. **`mc_common.py`** — replace `_ANSWER_RE`/`_CONF_RE` with ONE shared, markdown-
-   tolerant compiled object plus a confidence regex:
-   ```python
-   _EMPH = r"[*_`]*"   # optional markdown run: ** * _ `
-   ANSWER_RE = re.compile(rf"{_EMPH}Answer{_EMPH}\s*:\s*{_EMPH}\s*([ABCD])", re.IGNORECASE)
-   CONF_RE   = re.compile(rf"{_EMPH}Confidence{_EMPH}\s*:\s*{_EMPH}\s*(\d{{1,3}})", re.IGNORECASE)
-   ```
-   Keep `findall(...)[-1]` (last-match) and the [0,100] clamp. Group 1 stays JUST
-   `([ABCD])` so `m.start(1)` still lands on the letter.
-   Then **move `find_answer_token` here whole** (verified pure: operates only on
-   `decoded_tokens` strings, no torch/tokenizer), changing its regex ref to the
-   shared `ANSWER_RE`. mc_common must stay torch-free / tokenizer-free.
-2. **`gen_chains.py`** — import `ANSWER_RE` + `find_answer_token` from mc_common;
-   delete the duplicate `ANSWER_MARKER_RE` (line 34) and the local
-   `find_answer_token` (lines 104-129); remove now-unused `import re`; update the
-   module docstring. Do NOT touch model/generation/tensor logic.
-3. **`test_mc_common.py`** (NEW, login-safe, pytest) — per-shape parser tests
-   (`**Answer:** B`, `*Answer:* C`, `**Answer: D**`, `Answer : A`, ` answer: b `,
-   backticked) asserting BOTH letter+confidence; baseline `Answer: C`; decoy test;
-   combined q06 (`decoy + **Answer:** B / **Confidence:** 95` -> B/95); failure
-   discipline (no match -> None); and direct `find_answer_token` tests landing the
-   index on the letter for bare `Answer: B`, drift `Answer : B`, markdown
-   `**Answer:** B`, plus decoy + no-match.
-
-### Why (key findings to recall cold)
-- Bug: `**Answer:** B` is missed because `\s*` can't consume the `*` after the colon.
-- The anchor is **duplicated and already drifting**: parser used `Answer:` (no space
-  before colon) while locator used `Answer\s*:` — so `Answer : B` is located but not
-  parsed today. Fix = ONE shared compiled object imported by both.
-- There is **no existing test file** (despite the task wording); pytest is the
-  dev-dep convention.
-
-### Test status
-Tests do **not exist yet** — `test_mc_common.py` was never created, so there is
-nothing to run. The code is **not mid-edit**; it is simply not started. Once
-implemented, verify with: `uv run pytest -q test_mc_common.py`.
-
-### Next action on resume
-Re-enter the plan (above / plan file), implement steps 1-3, run the tests, show
-output, and do NOT commit until confirmed.
+## Still pending before any FINDINGS run (subject-diverse, larger, multi-run)
+- Resolve gpu_common gate (retire or refactor — above).
+- Fix dataset diversity: data/mmlu_20 is all abstract_algebra (fetch_mmlu.py used
+  .take(20) no shuffle). Re-fetch shuffled/diverse; discuss dataset choice with GK.
+- Bring the entropy-timing finding + this chart to GK as the "signal + scaling plan."

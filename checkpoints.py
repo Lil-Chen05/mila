@@ -1,23 +1,26 @@
-"""Step 5 (smallest version): CHECKPOINT probes along ONE reasoning chain.
+"""Step 5 (exploratory scale): CHECKPOINT probes over ALL 20 questions, deciles.
 
-CHECKPOINTS, not early-exit: we never halt generation. We generate one full greedy
-reasoning chain once, then re-probe the committed answer at fractions ALONG that
-same chain. GPU step -> runs inside checkpoints_job.sh on a compute node, never on a
-login node.
+CHECKPOINTS, not early-exit: we never halt generation. For each question we generate
+one full greedy reasoning chain once, then re-probe the committed answer at decile
+fractions ALONG that same chain. GPU step -> runs inside checkpoints_job.sh on a
+compute node, never on a login node.
+
+FULLY SELF-CONTAINED: the only thing read from disk is the MMLU dataset (question +
+gold). natural_pred, n_think, think_closed and correctness are ALL computed from the
+in-run regenerated chain -- we never join to results/chains.jsonl (the greedy
+determinism gap means that stored chain is a DIFFERENT chain; joining to it would be
+invalid).
 
 Torch-free helpers come from mc_common (build_messages, parse_answer_confidence,
 find_answer_token, is_correct). The three torch/tokenizer helpers below are MIRRORED
-VERBATIM from gen_chains.py (see the debt tag): unify into a shared gpu_common module
-BEFORE scaling to deciles x 20 -- that gate is recorded in NOTES_resume.md so the
-duplication cannot reach the scaled run (we were already bitten by ANSWER_MARKER_RE
-drift).
+VERBATIM from gen_chains.py (still tagged). The gpu_common.py refactor is DEFERRED for
+THIS exploratory single-greedy-pass run; the BLOCKER in NOTES_resume.md still gates the
+real scale-up (deciles x 20 x multiple runs / findings run) on that refactor.
 
-Smallest version: ONE question (QID env, default 0), fractions [0,.25,.5,.75,1.0],
-FORCE_CLOSE=True (in-distribution commit-probe: the model is trained to answer after
-</think>). Prints a config header + trajectory table and checks the
-checkpoint_full_agrees_natural invariant. No scaling, no sampling, no plots. The
-model load and run live under main() so this module is import-safe (pure helpers can
-be unit-tested later without loading weights).
+This run: 20 questions, deciles [0.0..1.0] (11 points), FORCE_CLOSE=True, inducer v1.
+Deliverable is results/checkpoints_20q.jsonl (long format, ONE ROW PER (qid,
+checkpoint)); a per-question summary is also printed to stdout. Model load + run live
+under main() so this module stays import-safe.
 """
 
 import json
@@ -36,7 +39,7 @@ from mc_common import (
 )
 
 # --- config ---
-FRACTIONS = (0.0, 0.25, 0.5, 0.75, 1.0)
+FRACTIONS = tuple(round(0.1 * i, 1) for i in range(11))   # deciles: 0.0, 0.1, ..., 1.0
 FORCE_CLOSE = True            # v1 (locked): close </think> before forcing the answer
 INDUCER_VERSION = "v1"
 MIN_THINK_TOKENS = 8          # below this a think-block is too short to slice; drop+log
@@ -63,7 +66,7 @@ def checkpoint_indices(think_token_count, strategy="fraction", fractions=FRACTIO
 
 
 # --- helpers MIRRORED VERBATIM from gen_chains.py -------------------------------
-# unify into a shared gpu_common module before scaling (gated in NOTES_resume.md)
+# unify into a shared gpu_common module before the real scale-up (gated in NOTES_resume.md)
 def token_entropy(logit_row):
     """Entropy in nats of one raw, unprocessed logit row [vocab]."""
     return torch.distributions.Categorical(logits=logit_row.float()).entropy().item()
@@ -186,26 +189,15 @@ def probe_checkpoint(model, tok, device, prompt_ids, reasoning_ids, inducer_ids,
     }
 
 
-def main():
-    print(f"PyTorch: {torch.__version__}")
-    print(f"CUDA available: {torch.cuda.is_available()}")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cuda":
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
+def process_question(model, tok, device, qid, row, inducer_ids):
+    """Generate one chain for a question and probe every decile checkpoint.
 
-    model_name = os.environ.get("MODEL_NAME", "HuggingFaceTB/SmolLM3-3B")
-    qid = int(os.environ.get("QID", "0"))
-    print(f"Loading model: {model_name}")
-    tok = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.bfloat16).to(device)
-    model.eval()
-
-    ds = load_from_disk("data/mmlu_20")
-    row = ds[qid]
+    Returns a dict with status "dropped" (min-length guard) or "ok" + the long-format
+    rows. Raises on unexpected failure; the caller records and continues.
+    """
     question, choices, gold_idx = row["question"], row["choices"], row["answer"]
     gold_letter = LETTERS[gold_idx]
 
-    # --- generate the full chain ONCE (greedy), exactly like gen_chains ---------
     messages = build_messages(question, choices)
     prompt = tok.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True, enable_thinking=True
@@ -219,17 +211,79 @@ def main():
             max_new_tokens=4096,
             do_sample=False,
             return_dict_in_generate=True,
-            output_logits=False,   # smallest version reads entropy at FORCED tokens only
+            output_logits=False,   # entropy is read at FORCED tokens only
             pad_token_id=tok.eos_token_id,
         )
     gen_ids = out.sequences[0, prompt_len:]
     full_text = tok.decode(gen_ids, skip_special_tokens=False)
     natural_letter, natural_conf = parse_answer_confidence(full_text)
-
-    reasoning_ids, post_ids, think_closed = split_think(gen_ids, tok)
+    reasoning_ids, _post_ids, think_closed = split_think(gen_ids, tok)
     n_think = len(reasoning_ids)
+    del out
+    if device == "cuda":
+        torch.cuda.empty_cache()
 
-    # --- build the version-stamped inducer in token-id space --------------------
+    if n_think < MIN_THINK_TOKENS:
+        return {"status": "dropped", "qid": qid, "subject": row["subject"],
+                "n_think": n_think, "rows": []}
+
+    # checkpoint k's + which fraction(s) produced each (for the frac field + collapse log)
+    k_to_fracs = {}
+    for f in FRACTIONS:
+        k = max(0, min(n_think, int(round(f * n_think))))
+        k_to_fracs.setdefault(k, []).append(f)
+    ks = checkpoint_indices(n_think, "fraction", FRACTIONS)
+    collapsed = {k: fr for k, fr in k_to_fracs.items() if len(fr) > 1}
+
+    rows = []
+    forced_letter_full = None
+    for k in ks:
+        frac = min(k_to_fracs[k])
+        res = probe_checkpoint(model, tok, device, prompt_ids, reasoning_ids, inducer_ids, k)
+        if k >= n_think:
+            forced_letter_full = res["forced_letter"]
+        rows.append({
+            "qid": qid, "subject": row["subject"], "gold": gold_letter,
+            "natural_pred": natural_letter, "frac": frac, "k_keep": k,
+            "n_think": n_think, "think_closed": think_closed,
+            "forced_letter": res["forced_letter"],
+            "H_letter": res["answer_letter_entropy"],
+            "H_full": res["answer_fullvocab_entropy"],
+            "confidence": res["forced_confidence"],
+            "correct": is_correct(res["forced_letter"], gold_idx),
+            "letters_matched": res["letters_matched"],
+            "intervention": intervention_label(k, n_think),
+            "force_close": FORCE_CLOSE, "inducer_version": INDUCER_VERSION,
+        })
+
+    # 1.0 invariant: full-chain checkpoint must reproduce the natural answer.
+    if not think_closed or forced_letter_full is None or natural_letter is None:
+        inv = None
+    else:
+        inv = (forced_letter_full == natural_letter)
+    for r in rows:
+        r["checkpoint_full_agrees_natural"] = inv
+
+    return {"status": "ok", "qid": qid, "subject": row["subject"],
+            "gold": gold_letter, "natural_pred": natural_letter,
+            "n_think": n_think, "think_closed": think_closed,
+            "invariant": inv, "collapsed": collapsed, "rows": rows}
+
+
+def main():
+    print(f"PyTorch: {torch.__version__}")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda":
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+
+    model_name = os.environ.get("MODEL_NAME", "HuggingFaceTB/SmolLM3-3B")
+    print(f"Loading model: {model_name}")
+    tok = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.bfloat16).to(device)
+    model.eval()
+
+    # version-stamped inducer, built once in token-id space
     close_id = tok.convert_tokens_to_ids("</think>")
     answer_inducer_ids = tok.encode("\nAnswer:", add_special_tokens=False)
     if FORCE_CLOSE:
@@ -240,93 +294,75 @@ def main():
         inducer_ids = list(answer_inducer_ids)
         inducer_text = "\nAnswer:"
 
-    # --- config header ----------------------------------------------------------
-    print("=" * 72)
-    print("CHECKPOINT PROBE (smallest version: 1 question)")
-    print("=" * 72)
-    print(f"model               : {model_name}")
-    print(f"QID                 : {qid}   subject={row['subject']}")
-    print(f"gold letter         : {gold_letter}")
-    print(f"natural pred letter : {natural_letter}   (verbalized conf={natural_conf})")
-    print(f"think_closed        : {think_closed}")
-    print(f"n_think tokens      : {n_think}")
-    print(f"FORCE_CLOSE         : {FORCE_CLOSE}   (inducer {INDUCER_VERSION})")
-    print(f"inducer text / ids  : {inducer_text!r}  ids={inducer_ids}")
-    # natural post-</think> leading tokens -- logged so a 1.0 disagreement is
-    # diagnosable (benign whitespace vs real apparatus bug).
-    print(f"natural post-</think>: {[tok.decode([t]) for t in post_ids[:6]]}")
-    print(f"fractions           : {list(FRACTIONS)}")
-    print("=" * 72)
+    ds = load_from_disk("data/mmlu_20")
 
-    # --- min-length guard (visible drop, no silent skip) ------------------------
-    if n_think < MIN_THINK_TOKENS:
-        print(f"q{qid} DROPPED: think-block too short to slice "
-              f"(n_think={n_think} < MIN_THINK_TOKENS={MIN_THINK_TOKENS}). "
-              f"Pick a longer-chain QID.")
-        return
+    print("=" * 84)
+    print("CHECKPOINT PROBE — 20 questions, decile resolution (exploratory single greedy pass)")
+    print("=" * 84)
+    print(f"model            : {model_name}")
+    print(f"questions        : {len(ds)}")
+    print(f"fractions        : {list(FRACTIONS)}")
+    print(f"FORCE_CLOSE      : {FORCE_CLOSE}   inducer {INDUCER_VERSION} {inducer_text!r} ids={inducer_ids}")
+    print(f"MIN_THINK_TOKENS : {MIN_THINK_TOKENS}")
+    print("=" * 84)
+    print(f"{'q':>3} {'subject':<18} {'gold':>4} {'nat':>3} {'clsd':>4} {'n_think':>7} "
+          f"{'H@0.0':>6} {'H@1.0':>6} {'c@0.0':>5} {'c@1.0':>5} {'inv':>3} {'ckpts':>5}")
 
-    # checkpoint k's + which fraction(s) produced each (for the frac column + collapse log)
-    k_to_fracs = {}
-    for f in FRACTIONS:
-        k = max(0, min(n_think, int(round(f * n_think))))
-        k_to_fracs.setdefault(k, []).append(f)
-    ks = checkpoint_indices(n_think, "fraction", FRACTIONS)
-    collapsed = {k: fr for k, fr in k_to_fracs.items() if len(fr) > 1}
+    all_rows = []
+    n_proc = n_drop = n_err = 0
+    inv_y = inv_n = inv_na = 0
 
-    # --- probe each checkpoint --------------------------------------------------
-    print(f"{'frac':>5} {'kkeep':>6} {'forced':>6} {'Hletter':>8} {'Hfull':>6} "
-          f"{'conf':>4} {'corr':>4} {'match':>5}  intervention")
-    rows_out = []
-    forced_letter_full = None
-    for k in ks:
-        frac = min(k_to_fracs[k])
-        res = probe_checkpoint(model, tok, device, prompt_ids, reasoning_ids, inducer_ids, k)
-        interv = intervention_label(k, n_think)
-        correct = is_correct(res["forced_letter"], gold_idx)
-        if k >= n_think:
-            forced_letter_full = res["forced_letter"]
+    for qid in range(len(ds)):
+        row = ds[qid]
+        try:
+            result = process_question(model, tok, device, qid, row, inducer_ids)
+        except Exception as e:  # record-and-continue: one failure won't sink the batch
+            print(f"{qid:>3} {row.get('subject', '?'):<18} FAIL: {e!r}")
+            n_err += 1
+            continue
 
-        h4 = res["answer_letter_entropy"]
-        hful = res["answer_fullvocab_entropy"]
-        h4s = f"{h4:.3f}" if h4 is not None else "  -  "
-        hfuls = f"{hful:.2f}" if hful is not None else " -  "
-        corr = "Y" if correct is True else ("N" if correct is False else "?")
-        confv = res["forced_confidence"]
-        print(f"{frac:5.2f} {k:6d} {str(res['forced_letter'] or '-'):>6} {h4s:>8} {hfuls:>6} "
-              f"{str(confv if confv is not None else '-'):>4} {corr:>4} "
-              f"{'Y' if res['letters_matched'] else 'N':>5}  {interv}")
-        rows_out.append({"fraction": frac, "k": k, "intervention": interv,
-                         "correct": correct, **res})
+        if result["status"] == "dropped":
+            print(f"{qid:>3} {result['subject']:<18} DROPPED: think-block too short "
+                  f"(n_think={result['n_think']} < {MIN_THINK_TOKENS})")
+            n_drop += 1
+            continue
 
-    # --- 1.0 invariant: full-chain checkpoint must reproduce the natural answer --
-    if not think_closed:
-        inv = None
-        inv_str = "NA (think_closed=False: no natural committed answer)"
-    elif forced_letter_full is None or natural_letter is None:
-        inv = None
-        inv_str = f"NA (forced@1.0={forced_letter_full}, natural={natural_letter})"
-    else:
-        inv = (forced_letter_full == natural_letter)
-        inv_str = f"{'Y' if inv else 'N'} (forced@1.0={forced_letter_full} vs natural={natural_letter})"
-    print("-" * 72)
-    print(f"checkpoint_full_agrees_natural: {inv_str}")
-    if collapsed:
-        print(f"fraction collapse (deduped): {collapsed}")
+        n_proc += 1
+        all_rows.extend(result["rows"])
+        inv = result["invariant"]
+        inv_y += inv is True
+        inv_n += inv is False
+        inv_na += inv is None
 
-    # --- save a small, deterministic record (commit-able) -----------------------
+        rows = result["rows"]
+        r0, r1 = rows[0], rows[-1]   # frac 0.0 ... frac 1.0 (ks sorted ascending)
+        hs = lambda v: f"{v:.2f}" if v is not None else "  - "
+        cs = lambda v: f"{v}" if v is not None else "-"
+        invs = "Y" if inv is True else ("N" if inv is False else "NA")
+        print(f"{qid:>3} {result['subject']:<18} {result['gold']:>4} "
+              f"{str(result['natural_pred'] or '-'):>3} "
+              f"{'Y' if result['think_closed'] else 'N':>4} {result['n_think']:>7} "
+              f"{hs(r0['H_letter']):>6} {hs(r1['H_letter']):>6} "
+              f"{cs(r0['confidence']):>5} {cs(r1['confidence']):>5} {invs:>3} {len(rows):>5}")
+        if result["collapsed"]:
+            print(f"     fraction collapse (deduped): {result['collapsed']}")
+
+    # --- deliverable: one long-format JSONL, one row per (qid, checkpoint) -------
     os.makedirs("results", exist_ok=True)
-    out_path = f"results/checkpoints_q{qid}.json"
+    out_path = "results/checkpoints_20q.jsonl"
     with open(out_path, "w") as fh:
-        json.dump({
-            "qid": qid, "subject": row["subject"], "gold_letter": gold_letter,
-            "natural_pred_letter": natural_letter, "natural_confidence": natural_conf,
-            "think_closed": think_closed, "n_think_tokens": n_think,
-            "force_close": FORCE_CLOSE, "inducer_version": INDUCER_VERSION,
-            "inducer_text": inducer_text, "fractions": list(FRACTIONS),
-            "checkpoints": rows_out,
-            "checkpoint_full_agrees_natural": inv,
-        }, fh, indent=2)
-    print(f"Saved {out_path}")
+        for r in all_rows:
+            fh.write(json.dumps(r) + "\n")
+
+    # --- aggregate (no silent drops) --------------------------------------------
+    print("=" * 84)
+    print(f"=== AGGREGATE ({len(ds)} questions) ===")
+    print(f"processed          : {n_proc}")
+    print(f"dropped (min-len)  : {n_drop}")
+    print(f"errors             : {n_err}")
+    print(f"invariant Y/N/NA   : {inv_y} / {inv_n} / {inv_na}   (NA = think_closed False or no natural answer)")
+    print(f"rows written       : {len(all_rows)}  -> {out_path}")
+    print(f"(expected rows = sum over processed questions of their checkpoint counts)")
 
 
 if __name__ == "__main__":
