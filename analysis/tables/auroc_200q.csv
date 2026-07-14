@@ -1,0 +1,7 @@
+signal,auroc,n
+verbalized confidence (end),0.6505929738196464,150
+-mean think-token entropy,0.6891922130230477,150
+-tail think-token entropy,0.5309912732154844,150
+-answer entropy @0.0 (prior),0.6343701051689415,150
+-answer entropy @0.5 (mid),0.6894159767285746,150
+-answer entropy @1.0 (end),0.5732826135600806,150
