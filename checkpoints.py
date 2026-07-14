@@ -1,4 +1,4 @@
-"""Step 5 (exploratory scale): CHECKPOINT probes over ALL 20 questions, deciles.
+"""Step 5: CHECKPOINT probes over all questions in DATA_DIR, deciles.
 
 CHECKPOINTS, not early-exit: we never halt generation. For each question we generate
 one full greedy reasoning chain once, then re-probe the committed answer at decile
@@ -17,10 +17,17 @@ split_think, get_letter_token_ids) live HERE as their only home: gen_chains.py i
 retired (this script subsumes it), so the gpu_common.py drift gate is moot -- there is
 exactly one live GPU script.
 
-This run: 20 questions, deciles [0.0..1.0] (11 points), FORCE_CLOSE=True, inducer v1.
-Deliverable is results/checkpoints_20q.jsonl (long format, ONE ROW PER (qid,
-checkpoint)); a per-question summary is also printed to stdout. Model load + run live
-under main() so this module stays import-safe.
+This run: deciles [0.0..1.0] (11 points), FORCE_CLOSE=True, inducer v1, over the
+dataset in DATA_DIR (env-overridable; default data/mmlu_200 = 200 seeded-random MMLU
+questions across subjects, fetched by fetch_mmlu.py). Deliverables (named by RUN_TAG):
+  - results/checkpoints_<RUN_TAG>.jsonl        (long format, ONE ROW PER (qid, checkpoint))
+  - results/chain_token_entropy_<RUN_TAG>.jsonl (ONE ROW PER qid: per-token entropy of
+    the NATURAL chain, reasoning + post-think; n_think marks the boundary). GK wants
+    this as a THIRD signal to correlate with answer-entropy and verbalized confidence;
+    it is valid to correlate precisely because it comes from the SAME regenerated chain
+    the probes slice (greedy determinism gap forbids joining across runs).
+A per-question summary is also printed to stdout. Model load + run live under main()
+so this module stays import-safe.
 """
 
 import json
@@ -39,6 +46,11 @@ from mc_common import (
 )
 
 # --- config ---
+# DATA_DIR/RUN_TAG are env-overridable so the job script picks the run; RUN_TAG
+# names the output files (results/checkpoints_<RUN_TAG>.jsonl etc.) so runs on
+# different datasets never overwrite each other.
+DATA_DIR = os.environ.get("DATA_DIR", "data/mmlu_200")
+RUN_TAG = os.environ.get("RUN_TAG", "200q")
 FRACTIONS = tuple(round(0.1 * i, 1) for i in range(11))   # deciles: 0.0, 0.1, ..., 1.0
 FORCE_CLOSE = True            # v1 (locked): close </think> before forcing the answer
 INDUCER_VERSION = "v1"
@@ -210,14 +222,23 @@ def process_question(model, tok, device, qid, row, inducer_ids):
             max_new_tokens=4096,
             do_sample=False,
             return_dict_in_generate=True,
-            output_logits=False,   # entropy is read at FORCED tokens only
+            output_logits=True,    # per-token entropy of the NATURAL chain
             pad_token_id=tok.eos_token_id,
         )
     gen_ids = out.sequences[0, prompt_len:]
+    # out.logits[t] is the raw distribution that produced gen_ids[t]. Reduce each
+    # row to one scalar NOW; `del out` below frees the logits before the probes,
+    # so they never accumulate across questions.
+    assert len(out.logits) == len(gen_ids), "logits/token count mismatch"
+    per_token_entropy = [token_entropy(out.logits[t][0]) for t in range(len(gen_ids))]
     full_text = tok.decode(gen_ids, skip_special_tokens=False)
     natural_letter, natural_conf = parse_answer_confidence(full_text)
     reasoning_ids, _post_ids, think_closed = split_think(gen_ids, tok)
     n_think = len(reasoning_ids)
+    # reasoning is a prefix of gen_ids, so [:n_think] is exactly the think slice
+    mean_think_entropy = (
+        sum(per_token_entropy[:n_think]) / n_think if n_think else None
+    )
     del out
     if device == "cuda":
         torch.cuda.empty_cache()
@@ -263,9 +284,23 @@ def process_question(model, tok, device, qid, row, inducer_ids):
     for r in rows:
         r["checkpoint_full_agrees_natural"] = inv
 
+    # one row per qid for chain_token_entropy_20q.jsonl; rounded to 4 decimals
+    # (1e-4 nats is far below any signal here) to keep the JSON small
+    entropy_record = {
+        "qid": qid, "subject": row["subject"], "gold": gold_letter,
+        "natural_pred": natural_letter, "natural_confidence": natural_conf,
+        "correct": is_correct(natural_letter, gold_idx),
+        "think_closed": think_closed, "n_think": n_think,
+        "n_gen": len(per_token_entropy),
+        "mean_think_entropy": mean_think_entropy,
+        "per_token_entropy": [round(h, 4) for h in per_token_entropy],
+    }
+
     return {"status": "ok", "qid": qid, "subject": row["subject"],
             "gold": gold_letter, "natural_pred": natural_letter,
             "n_think": n_think, "think_closed": think_closed,
+            "mean_think_entropy": mean_think_entropy,
+            "entropy_record": entropy_record,
             "invariant": inv, "collapsed": collapsed, "rows": rows}
 
 
@@ -293,21 +328,23 @@ def main():
         inducer_ids = list(answer_inducer_ids)
         inducer_text = "\nAnswer:"
 
-    ds = load_from_disk("data/mmlu_20")
+    ds = load_from_disk(DATA_DIR)
 
     print("=" * 84)
-    print("CHECKPOINT PROBE — 20 questions, decile resolution (exploratory single greedy pass)")
+    print(f"CHECKPOINT PROBE — {len(ds)} questions, decile resolution (single greedy pass)")
     print("=" * 84)
     print(f"model            : {model_name}")
+    print(f"data             : {DATA_DIR}   run tag: {RUN_TAG}")
     print(f"questions        : {len(ds)}")
     print(f"fractions        : {list(FRACTIONS)}")
     print(f"FORCE_CLOSE      : {FORCE_CLOSE}   inducer {INDUCER_VERSION} {inducer_text!r} ids={inducer_ids}")
     print(f"MIN_THINK_TOKENS : {MIN_THINK_TOKENS}")
     print("=" * 84)
     print(f"{'q':>3} {'subject':<18} {'gold':>4} {'nat':>3} {'clsd':>4} {'n_think':>7} "
-          f"{'H@0.0':>6} {'H@1.0':>6} {'c@0.0':>5} {'c@1.0':>5} {'inv':>3} {'ckpts':>5}")
+          f"{'Hthink':>6} {'H@0.0':>6} {'H@1.0':>6} {'c@0.0':>5} {'c@1.0':>5} {'inv':>3} {'ckpts':>5}")
 
     all_rows = []
+    entropy_records = []
     n_proc = n_drop = n_err = 0
     inv_y = inv_n = inv_na = 0
 
@@ -328,6 +365,7 @@ def main():
 
         n_proc += 1
         all_rows.extend(result["rows"])
+        entropy_records.append(result["entropy_record"])
         inv = result["invariant"]
         inv_y += inv is True
         inv_n += inv is False
@@ -341,16 +379,23 @@ def main():
         print(f"{qid:>3} {result['subject']:<18} {result['gold']:>4} "
               f"{str(result['natural_pred'] or '-'):>3} "
               f"{'Y' if result['think_closed'] else 'N':>4} {result['n_think']:>7} "
+              f"{hs(result['mean_think_entropy']):>6} "
               f"{hs(r0['H_letter']):>6} {hs(r1['H_letter']):>6} "
               f"{cs(r0['confidence']):>5} {cs(r1['confidence']):>5} {invs:>3} {len(rows):>5}")
         if result["collapsed"]:
             print(f"     fraction collapse (deduped): {result['collapsed']}")
 
-    # --- deliverable: one long-format JSONL, one row per (qid, checkpoint) -------
+    # --- deliverables ------------------------------------------------------------
+    # 1) long-format checkpoint rows, one per (qid, checkpoint)
+    # 2) natural-chain per-token entropy, one row per qid
     os.makedirs("results", exist_ok=True)
-    out_path = "results/checkpoints_20q.jsonl"
+    out_path = f"results/checkpoints_{RUN_TAG}.jsonl"
     with open(out_path, "w") as fh:
         for r in all_rows:
+            fh.write(json.dumps(r) + "\n")
+    entropy_path = f"results/chain_token_entropy_{RUN_TAG}.jsonl"
+    with open(entropy_path, "w") as fh:
+        for r in entropy_records:
             fh.write(json.dumps(r) + "\n")
 
     # --- aggregate (no silent drops) --------------------------------------------
@@ -361,6 +406,7 @@ def main():
     print(f"errors             : {n_err}")
     print(f"invariant Y/N/NA   : {inv_y} / {inv_n} / {inv_na}   (NA = think_closed False or no natural answer)")
     print(f"rows written       : {len(all_rows)}  -> {out_path}")
+    print(f"entropy records    : {len(entropy_records)}  -> {entropy_path}  (must equal processed)")
     print(f"(expected rows = sum over processed questions of their checkpoint counts)")
 
 
