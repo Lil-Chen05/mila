@@ -35,25 +35,25 @@ read-only investigation (no generation), so the gpu_common gate does NOT block i
   "fraction of chain" != same token position across groups — re-check timing vs ABSOLUTE
   token position (k_keep) on the next run.
 
-## BLOCKER status: gpu_common refactor — UNDER REVIEW
-The gate was to prevent drift between two live scripts sharing the 3 mirrored helpers.
-BUT checkpoints.py may SUBSUME gen_chains.py (same generation + checkpoints), making
-gen_chains retire-able rather than refactor-needed. If only one script is live, no drift
-is possible and the gate is moot.
+## RESOLVED: gpu_common gate — gen_chains.py RETIRED
+GK confirmed the natural chain's per-token entropy IS needed — but as an ADDITIONAL
+signal to correlate with answer-entropy and verbalized confidence, so it must be
+measured on the SAME chain the checkpoints probe (greedy determinism gap). That means
+it belongs in checkpoints.py's natural pass, which fully subsumes gen_chains.py:
+- gen_chains.py, gen_chains_job.sh, results/chains.jsonl removed (nothing imported or
+  read them; the 3 torch helpers now live solely in checkpoints.py — no drift possible).
+- The gpu_common refactor gate is moot: exactly one live GPU script.
 
-## NEXT ACTION (read-only investigation, no generation, login-safe)
-Confirm or refute subsumption before deciding retire-vs-refactor. Check:
-1. Does checkpoints output cover every field chains.jsonl has?
-2. Does anything actually read chains.jsonl?
-3. Is the NATURAL chain's per-token entropy (gen_chains' unique capability; checkpoints
-   sets output_logits=False on the natural pass) needed by any planned experiment?
-4. Are the 3 helpers byte-identical, and is gen_chains imported anywhere?
-Then: RETIRE gen_chains (if fully subsumed + nothing needs its unique output) OR do the
-gpu_common.py refactor properly (if a genuine 2nd consumer / natural-trajectory need
-exists). Decide with GK-level rigor; the answer to #3 is the deciding factor.
+## NEXT ACTION
+Add per-token entropy capture to checkpoints.py's natural pass (output_logits=True,
+reduce each logit row to an entropy scalar immediately, del out as before). New output:
+results/chain_token_entropy_20q.jsonl, one row per qid with the full per-token entropy
+array (reasoning + post-think; n_think marks the boundary). Sanity: assert
+len(entropies) == len(gen_ids); print mean reasoning entropy per question.
 
 ## Still pending before any FINDINGS run (subject-diverse, larger, multi-run)
-- Resolve gpu_common gate (retire or refactor — above).
 - Fix dataset diversity: data/mmlu_20 is all abstract_algebra (fetch_mmlu.py used
-  .take(20) no shuffle). Re-fetch shuffled/diverse; discuss dataset choice with GK.
-- Bring the entropy-timing finding + this chart to GK as the "signal + scaling plan."
+  .take(20) no shuffle). Re-fetch shuffled/diverse (~100 questions); discuss dataset
+  choice with GK.
+- GK wants ALL signals collected and correlated (reasoning-token entropy ~ verbalized
+  confidence ~ answer entropy), not a choice between them.

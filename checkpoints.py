@@ -12,10 +12,10 @@ determinism gap means that stored chain is a DIFFERENT chain; joining to it woul
 invalid).
 
 Torch-free helpers come from mc_common (build_messages, parse_answer_confidence,
-find_answer_token, is_correct). The three torch/tokenizer helpers below are MIRRORED
-VERBATIM from gen_chains.py (still tagged). The gpu_common.py refactor is DEFERRED for
-THIS exploratory single-greedy-pass run; the BLOCKER in NOTES_resume.md still gates the
-real scale-up (deciles x 20 x multiple runs / findings run) on that refactor.
+find_answer_token, is_correct). The three torch/tokenizer helpers below (token_entropy,
+split_think, get_letter_token_ids) live HERE as their only home: gen_chains.py is
+retired (this script subsumes it), so the gpu_common.py drift gate is moot -- there is
+exactly one live GPU script.
 
 This run: 20 questions, deciles [0.0..1.0] (11 points), FORCE_CLOSE=True, inducer v1.
 Deliverable is results/checkpoints_20q.jsonl (long format, ONE ROW PER (qid,
@@ -65,8 +65,7 @@ def checkpoint_indices(think_token_count, strategy="fraction", fractions=FRACTIO
     return sorted(set(ks))
 
 
-# --- helpers MIRRORED VERBATIM from gen_chains.py -------------------------------
-# unify into a shared gpu_common module before the real scale-up (gated in NOTES_resume.md)
+# --- torch/tokenizer helpers (sole home since gen_chains.py was retired) --------
 def token_entropy(logit_row):
     """Entropy in nats of one raw, unprocessed logit row [vocab]."""
     return torch.distributions.Categorical(logits=logit_row.float()).entropy().item()
