@@ -12,3 +12,4 @@ slurm-*.out
 
 # Datasets and experiment outputs (saved to disk, not version-controlled)
 data/
+results/*.shard*.jsonl

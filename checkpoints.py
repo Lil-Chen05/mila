@@ -26,6 +26,13 @@ questions across subjects, fetched by fetch_mmlu.py). Deliverables (named by RUN
     this as a THIRD signal to correlate with answer-entropy and verbalized confidence;
     it is valid to correlate precisely because it comes from the SAME regenerated chain
     the probes slice (greedy determinism gap forbids joining across runs).
+Scaling is DATA-PARALLEL via SLURM job arrays (NUM_SHARDS/SHARD_INDEX env): each array
+task is one single-GPU process running the identical verified per-question code path on
+qid % NUM_SHARDS == SHARD_INDEX, writing .shard<i>-suffixed outputs merged afterwards by
+merge_shards.py. Deliberately NO within-GPU batching: padded batches take different
+kernel paths, perturbing logits (and thus entropies, occasionally greedy argmaxes) --
+a batch-size confound this measurement experiment must not have.
+
 A per-question summary is also printed to stdout. Model load + run live under main()
 so this module stays import-safe.
 """
@@ -51,6 +58,20 @@ from mc_common import (
 # different datasets never overwrite each other.
 DATA_DIR = os.environ.get("DATA_DIR", "data/mmlu_200")
 RUN_TAG = os.environ.get("RUN_TAG", "200q")
+# Data-parallel sharding for SLURM job arrays: this process handles only qids
+# with qid % NUM_SHARDS == SHARD_INDEX and suffixes its outputs .shard<i>.
+# qid stays the GLOBAL dataset index, so merged shards are schema-identical to
+# a single-process run. Defaults (1 shard, index 0) reproduce unsharded behavior.
+NUM_SHARDS = int(os.environ.get("NUM_SHARDS", "1"))
+SHARD_INDEX = int(os.environ.get("SHARD_INDEX", "0"))
+assert NUM_SHARDS >= 1 and 0 <= SHARD_INDEX < NUM_SHARDS, \
+    f"bad shard config: SHARD_INDEX={SHARD_INDEX} NUM_SHARDS={NUM_SHARDS}"
+SHARD_SUFFIX = f".shard{SHARD_INDEX}" if NUM_SHARDS > 1 else ""
+# 16384 (vs the old 4096): truncation is NOT random -- it censors the hard,
+# long-rambling questions, biasing the correct-vs-incorrect comparison. Chains
+# that still truncate stay visible via think_closed=False, never silently rerun
+# (greedy would reproduce the same truncation anyway).
+MAX_NEW_TOKENS = int(os.environ.get("MAX_NEW_TOKENS", "16384"))
 FRACTIONS = tuple(round(0.1 * i, 1) for i in range(11))   # deciles: 0.0, 0.1, ..., 1.0
 FORCE_CLOSE = True            # v1 (locked): close </think> before forcing the answer
 INDUCER_VERSION = "v1"
@@ -219,7 +240,7 @@ def process_question(model, tok, device, qid, row, inducer_ids):
     with torch.no_grad():
         out = model.generate(
             **inputs,
-            max_new_tokens=4096,
+            max_new_tokens=MAX_NEW_TOKENS,
             do_sample=False,
             return_dict_in_generate=True,
             output_logits=True,    # per-token entropy of the NATURAL chain
@@ -329,13 +350,15 @@ def main():
         inducer_text = "\nAnswer:"
 
     ds = load_from_disk(DATA_DIR)
+    qids = [q for q in range(len(ds)) if q % NUM_SHARDS == SHARD_INDEX]
 
     print("=" * 84)
-    print(f"CHECKPOINT PROBE — {len(ds)} questions, decile resolution (single greedy pass)")
+    print(f"CHECKPOINT PROBE — {len(qids)}/{len(ds)} questions, decile resolution (single greedy pass)")
     print("=" * 84)
     print(f"model            : {model_name}")
     print(f"data             : {DATA_DIR}   run tag: {RUN_TAG}")
-    print(f"questions        : {len(ds)}")
+    print(f"shard            : {SHARD_INDEX} of {NUM_SHARDS}   ({len(qids)} questions this shard)")
+    print(f"max_new_tokens   : {MAX_NEW_TOKENS}")
     print(f"fractions        : {list(FRACTIONS)}")
     print(f"FORCE_CLOSE      : {FORCE_CLOSE}   inducer {INDUCER_VERSION} {inducer_text!r} ids={inducer_ids}")
     print(f"MIN_THINK_TOKENS : {MIN_THINK_TOKENS}")
@@ -348,7 +371,7 @@ def main():
     n_proc = n_drop = n_err = 0
     inv_y = inv_n = inv_na = 0
 
-    for qid in range(len(ds)):
+    for qid in qids:
         row = ds[qid]
         try:
             result = process_question(model, tok, device, qid, row, inducer_ids)
@@ -389,18 +412,18 @@ def main():
     # 1) long-format checkpoint rows, one per (qid, checkpoint)
     # 2) natural-chain per-token entropy, one row per qid
     os.makedirs("results", exist_ok=True)
-    out_path = f"results/checkpoints_{RUN_TAG}.jsonl"
+    out_path = f"results/checkpoints_{RUN_TAG}{SHARD_SUFFIX}.jsonl"
     with open(out_path, "w") as fh:
         for r in all_rows:
             fh.write(json.dumps(r) + "\n")
-    entropy_path = f"results/chain_token_entropy_{RUN_TAG}.jsonl"
+    entropy_path = f"results/chain_token_entropy_{RUN_TAG}{SHARD_SUFFIX}.jsonl"
     with open(entropy_path, "w") as fh:
         for r in entropy_records:
             fh.write(json.dumps(r) + "\n")
 
     # --- aggregate (no silent drops) --------------------------------------------
     print("=" * 84)
-    print(f"=== AGGREGATE ({len(ds)} questions) ===")
+    print(f"=== AGGREGATE (shard {SHARD_INDEX}/{NUM_SHARDS}: {len(qids)} of {len(ds)} questions) ===")
     print(f"processed          : {n_proc}")
     print(f"dropped (min-len)  : {n_drop}")
     print(f"errors             : {n_err}")
