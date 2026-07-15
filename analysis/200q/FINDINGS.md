@@ -6,12 +6,12 @@
 - **closed & answered: 150** (109 correct / 41 incorrect, acc=0.73)
 - truncated at 16k cap: 26 (runaway chains, forensics below)
 - skipped, model wrote NO reasoning (n_think=2): 24 — all long-passage
-  humanities/social subjects; see `tables/skipped_no_reasoning_200q.csv`
+  humanities/social subjects; see `tables/skipped_no_reasoning.csv`
 
 ## 1. Calibration (GK bullet 1+2 anchor)
 Stated confidence ~90 everywhere; actual accuracy 0.73. **ECE=0.18.**
-See `fig200q_calibration_curve.png`; the per-bin table is
-`tables/calibration_bins_200q.csv`.
+See `fig_calibration_curve.png`; the per-bin table is
+`tables/calibration_bins.csv`.
 
 ## 2. Which signal knows? (AUROC, higher = better ranks correct above incorrect)
 | signal | AUROC |
@@ -26,7 +26,7 @@ See `fig200q_calibration_curve.png`; the per-bin table is
 - think-token entropy ~ verbalized confidence: **-0.53**
 - think-token entropy ~ answer entropy (end): **0.01**
 - answer entropy (mid) ~ verbalized confidence: **-0.34**
-Full matrices: `tables/correlations_*_200q.csv`, heatmap figure.
+Full matrices: `tables/correlations_*.csv`, heatmap figure.
 
 ## 4. Timing replication (20q headline at n=150, 51 subjects)
 Gap (incorrect - correct mean answer entropy) peaks at frac 0.5
@@ -39,10 +39,10 @@ the 20q timing story.
 
 ## 5. Runaway chains (26 at the 16k cap)
 Mean fraction of final-1024 tokens with entropy < 0.05 nats: **1.00**
-(repetition-loop signature if high). Traces: `fig200q_runaway_traces.png`.
+(repetition-loop signature if high). Traces: `fig_runaway_traces.png`.
 
 ## 6. Outliers for manual inspection
-`OUTLIERS_200q.md` — top overconfident-wrong + signals-disagree galleries
+`OUTLIERS.md` — top overconfident-wrong + signals-disagree galleries
 with full question text.
 
 ---
