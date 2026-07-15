@@ -5,11 +5,16 @@ build/
 dist/
 wheels/
 *.egg-info
+.pytest_cache/
 
 # Virtual environments
 .venv
+
+# SLURM logs (jobs write to logs/ via #SBATCH --output; root pattern catches strays)
 slurm-*.out
+logs/*
+!logs/.gitkeep
 
 # Datasets and experiment outputs (saved to disk, not version-controlled)
 data/
-results/*.shard*.jsonl
+results/*/*.shard*.jsonl

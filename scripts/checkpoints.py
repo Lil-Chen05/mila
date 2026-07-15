@@ -2,7 +2,7 @@
 
 CHECKPOINTS, not early-exit: we never halt generation. For each question we generate
 one full greedy reasoning chain once, then re-probe the committed answer at decile
-fractions ALONG that same chain. GPU step -> runs inside checkpoints_job.sh on a
+fractions ALONG that same chain. GPU step -> runs inside jobs/checkpoints.sh on a
 compute node, never on a login node.
 
 FULLY SELF-CONTAINED: the only thing read from disk is the MMLU dataset (question +
@@ -20,8 +20,8 @@ exactly one live GPU script.
 This run: deciles [0.0..1.0] (11 points), FORCE_CLOSE=True, inducer v1, over the
 dataset in DATA_DIR (env-overridable; default data/mmlu_200 = 200 seeded-random MMLU
 questions across subjects, fetched by fetch_mmlu.py). Deliverables (named by RUN_TAG):
-  - results/checkpoints_<RUN_TAG>.jsonl        (long format, ONE ROW PER (qid, checkpoint))
-  - results/chain_token_entropy_<RUN_TAG>.jsonl (ONE ROW PER qid: per-token entropy of
+  - results/<RUN_TAG>/checkpoints.jsonl        (long format, ONE ROW PER (qid, checkpoint))
+  - results/<RUN_TAG>/chain_token_entropy.jsonl (ONE ROW PER qid: per-token entropy of
     the NATURAL chain, reasoning + post-think; n_think marks the boundary). GK wants
     this as a THIRD signal to correlate with answer-entropy and verbalized confidence;
     it is valid to correlate precisely because it comes from the SAME regenerated chain
@@ -54,8 +54,8 @@ from mc_common import (
 
 # --- config ---
 # DATA_DIR/RUN_TAG are env-overridable so the job script picks the run; RUN_TAG
-# names the output files (results/checkpoints_<RUN_TAG>.jsonl etc.) so runs on
-# different datasets never overwrite each other.
+# names the output directory (results/<RUN_TAG>/checkpoints.jsonl etc.) so runs
+# on different datasets never overwrite each other.
 DATA_DIR = os.environ.get("DATA_DIR", "data/mmlu_200")
 RUN_TAG = os.environ.get("RUN_TAG", "200q")
 # Data-parallel sharding for SLURM job arrays: this process handles only qids
@@ -305,7 +305,7 @@ def process_question(model, tok, device, qid, row, inducer_ids):
     for r in rows:
         r["checkpoint_full_agrees_natural"] = inv
 
-    # one row per qid for chain_token_entropy_20q.jsonl; rounded to 4 decimals
+    # one row per qid for chain_token_entropy.jsonl; rounded to 4 decimals
     # (1e-4 nats is far below any signal here) to keep the JSON small
     entropy_record = {
         "qid": qid, "subject": row["subject"], "gold": gold_letter,
@@ -411,12 +411,12 @@ def main():
     # --- deliverables ------------------------------------------------------------
     # 1) long-format checkpoint rows, one per (qid, checkpoint)
     # 2) natural-chain per-token entropy, one row per qid
-    os.makedirs("results", exist_ok=True)
-    out_path = f"results/checkpoints_{RUN_TAG}{SHARD_SUFFIX}.jsonl"
+    os.makedirs(f"results/{RUN_TAG}", exist_ok=True)
+    out_path = f"results/{RUN_TAG}/checkpoints{SHARD_SUFFIX}.jsonl"
     with open(out_path, "w") as fh:
         for r in all_rows:
             fh.write(json.dumps(r) + "\n")
-    entropy_path = f"results/chain_token_entropy_{RUN_TAG}{SHARD_SUFFIX}.jsonl"
+    entropy_path = f"results/{RUN_TAG}/chain_token_entropy{SHARD_SUFFIX}.jsonl"
     with open(entropy_path, "w") as fh:
         for r in entropy_records:
             fh.write(json.dumps(r) + "\n")

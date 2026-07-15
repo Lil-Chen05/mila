@@ -37,9 +37,15 @@ force an answer, watch entropy/confidence evolve).
 - Dependency manager is uv. Use `uv add <pkg>` to add dependencies. NEVER use
   pip. Never suggest `source .venv/bin/activate` — `uv run` handles the
   environment automatically.
-- Run scripts with `uv run python <file>.py`. In jobs: `srun uv run python <file>.py`.
-- File naming convention: each task is a pair, `<task>.py` + `<task>_job.sh`.
-  Shared helpers go in `mc_common.py` (imported, no job script).
+- Run scripts from the repo root with `uv run python scripts/<file>.py`. In
+  jobs: `srun uv run python scripts/<file>.py`.
+- File naming convention: each task is a pair, `scripts/<task>.py` +
+  `jobs/<task>.sh`. Shared helpers go in `scripts/mc_common.py` (imported, no
+  job script). Tests live in `tests/` (pytest; `pythonpath = ["scripts"]` in
+  pyproject.toml makes `import mc_common` work).
+- Outputs are namespaced per experiment run: `results/<RUN_TAG>/` and
+  `analysis/<RUN_TAG>/` (e.g. `20q`, `200q`) — no run suffixes in filenames.
+- Retired code is archived under `legacy/`, never left at the repo root.
 - Model downloads must be cached in scratch, not home. Assume
   `export HF_HOME=$SCRATCH/hf_cache` is set in job scripts before any HF load,
   so models download once and persist across jobs.
@@ -51,8 +57,9 @@ force an answer, watch entropy/confidence evolve).
 - Jobs load saved data with `load_from_disk(...)`; they do not re-download.
 
 ## GIT CONVENTIONS
-- `slurm-*.out` files are gitignored ON PURPOSE. Do NOT add them back or commit
-  them — they regenerate every run.
+- SLURM logs land in `logs/` (`#SBATCH --output=logs/slurm-%j.out`) and are
+  gitignored ON PURPOSE. Do NOT add them back or commit them — they regenerate
+  every run.
 - Commit code, small result files (JSON/CSV/PNG), and config. Do NOT commit
   datasets, model weights, or large parquet/arrow files.
 - Write clear, scoped commit messages describing the one step just completed.
@@ -66,17 +73,22 @@ Job scripts follow this shape (tune resources per step; CPU jobs omit the GPU li
     #SBATCH --gpus-per-task=l40s:1   # GPU steps only
     #SBATCH --mem=16G
     #SBATCH --time=1:00:00
+    #SBATCH --output=logs/slurm-%j.out   # %A_%a for array jobs; logs/ is tracked via .gitkeep
     export HF_HOME=$SCRATCH/hf_cache
-    srun uv run python <task>.py
+    srun uv run python scripts/<task>.py
 
-## STEP ORDER (one gate at a time)
-1. mc_common.py — shared helpers; test with plain string inputs (login-node OK).
-2. fetch_mmlu.py (+job) — CPU; stream+save 20 questions; then I inspect the data.
-3. gen_chains.py (+job) — GPU; run on ONE question first; I read the output to
-   confirm reasoning, entropy capture, and answer parsing before scaling.
-4. gen_chains scaled to 20 questions.
-5. early_exit.py (+job) — GPU; the core experiment.
-6. analyze.py (+job) — CPU; produces CSVs and figures.
+## PIPELINE ORDER (one gate at a time; current file names)
+1. scripts/mc_common.py — shared helpers; tests/ runs on the login node.
+2. scripts/fetch_mmlu.py (+ jobs/fetch_mmlu.sh) — CPU; stream+save questions
+   to data/; then I inspect the data.
+3. scripts/checkpoints.py (+ jobs/checkpoints.sh) — GPU; the core experiment
+   (subsumed the earlier gen_chains.py/early_exit.py, now in legacy history).
+   Sharded via SLURM job array; shards merged by scripts/merge_shards.py
+   (login-node safe, pure JSON).
+4. scripts/dump_questions.py (+ jobs/dump_questions.sh) — CPU; exports question
+   text so analysis stays login-safe.
+5. analysis/analyze_*.py — CPU job; produces CSVs/figures/findings into
+   analysis/<RUN_TAG>/.
 (The LLM-judge step is deferred and only added if the above works end to end.)
 
 ## WHEN UNSURE

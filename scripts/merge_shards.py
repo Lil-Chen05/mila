@@ -3,8 +3,8 @@
 Pure JSON file handling -- no torch, no datasets, no model -- so this is
 login-node safe and needs no job script. Reads the .shard<i> files written by
 the checkpoints.py job array and writes the merged, qid-sorted:
-  - results/checkpoints_<RUN_TAG>.jsonl
-  - results/chain_token_entropy_<RUN_TAG>.jsonl
+  - results/<RUN_TAG>/checkpoints.jsonl
+  - results/<RUN_TAG>/chain_token_entropy.jsonl
 
 Checks, loudly (nonzero exit on violation):
   - every expected shard file exists (a lost/failed array task must not become
@@ -13,7 +13,7 @@ Checks, loudly (nonzero exit on violation):
   - no qid appears in more than one shard.
 Missing qids are REPORTED but tolerated: checkpoints.py drops min-length think
 blocks and records per-question errors without emitting rows, so absences must
-be cross-checked against the slurm-<jobid>_<i>.out logs, not papered over.
+be cross-checked against the logs/slurm-<jobid>_<i>.out logs, not papered over.
 """
 
 import json
@@ -26,8 +26,8 @@ N_QUESTIONS = int(os.environ.get("N_QUESTIONS", "200"))
 
 FAMILIES = (
     # (basename, sort key, one row per qid?)
-    (f"results/checkpoints_{RUN_TAG}", lambda r: (r["qid"], r["k_keep"]), False),
-    (f"results/chain_token_entropy_{RUN_TAG}", lambda r: r["qid"], True),
+    (f"results/{RUN_TAG}/checkpoints", lambda r: (r["qid"], r["k_keep"]), False),
+    (f"results/{RUN_TAG}/chain_token_entropy", lambda r: r["qid"], True),
 )
 
 failed = False

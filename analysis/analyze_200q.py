@@ -1,9 +1,9 @@
 """Analysis of the 200q run: signal x signal correlations + outlier forensics.
 
 Inputs (all small local files -- LOGIN-NODE-SAFE, no model/HF dataset/GPU):
-  results/checkpoints_200q.jsonl         one row per (qid, decile checkpoint)
-  results/chain_token_entropy_200q.jsonl one row per qid, full per-token entropy trace
-  results/questions_200q.json            question text (exported by dump_questions.py)
+  results/200q/checkpoints.jsonl         one row per (qid, decile checkpoint)
+  results/200q/chain_token_entropy.jsonl one row per qid, full per-token entropy trace
+  results/200q/questions.json            question text (exported by dump_questions.py)
 
 GK's asks driving this script:
   1. lots of plots showing correlations between the signals
@@ -29,13 +29,13 @@ import numpy as np
 import pandas as pd
 
 RUN_TAG = "200q"
-CKPT_PATH = f"results/checkpoints_{RUN_TAG}.jsonl"
-ENT_PATH = f"results/chain_token_entropy_{RUN_TAG}.jsonl"
-Q_PATH = f"results/questions_{RUN_TAG}.json"
-TAB_DIR = "analysis/tables"
-FIG_DIR = "analysis/figures"
-FINDINGS = f"analysis/FINDINGS_{RUN_TAG}.md"
-OUTLIERS_MD = f"analysis/OUTLIERS_{RUN_TAG}.md"
+CKPT_PATH = f"results/{RUN_TAG}/checkpoints.jsonl"
+ENT_PATH = f"results/{RUN_TAG}/chain_token_entropy.jsonl"
+Q_PATH = f"results/{RUN_TAG}/questions.json"
+TAB_DIR = f"analysis/{RUN_TAG}/tables"
+FIG_DIR = f"analysis/{RUN_TAG}/figures"
+FINDINGS = f"analysis/{RUN_TAG}/FINDINGS.md"
+OUTLIERS_MD = f"analysis/{RUN_TAG}/OUTLIERS.md"
 
 N_QUESTIONS = 200
 N_PROFILE_BINS = 20          # normalized-position bins for token-entropy profiles
@@ -105,7 +105,7 @@ def main():
     skipped_qids = sorted(set(range(N_QUESTIONS)) - present)
     skipped = pd.DataFrame([{"qid": q, "subject": questions[q]["subject"],
                              "question": qsnippet(questions[q])} for q in skipped_qids])
-    skipped.to_csv(f"{TAB_DIR}/skipped_no_reasoning_{RUN_TAG}.csv", index=False)
+    skipped.to_csv(f"{TAB_DIR}/skipped_no_reasoning.csv", index=False)
 
     closed_qids = set(ent[ent["think_closed"]]["qid"])
     trunc_qids = sorted(present - closed_qids)
@@ -134,7 +134,7 @@ def main():
     sig["final_letter"] = sig["qid"].map(fl_end)
     sig["final_correct"] = np.where(sig["final_letter"].isna(), np.nan,
                                     sig["final_letter"] == sig["gold"])
-    sig.to_csv(f"{TAB_DIR}/signals_per_question_{RUN_TAG}.csv", index=False)
+    sig.to_csv(f"{TAB_DIR}/signals_per_question.csv", index=False)
 
     closed = sig[sig["think_closed"] & sig["final_correct"].notna()].copy()
     closed["final_correct"] = closed["final_correct"].astype(bool)
@@ -155,7 +155,7 @@ def main():
         n=("qid", "count"), accuracy=("final_correct", "mean"),
         conf_mean=("conf_end", "mean")).reset_index()
     cal_tbl["gap"] = cal_tbl["conf_mean"] / 100 - cal_tbl["accuracy"]
-    cal_tbl.to_csv(f"{TAB_DIR}/calibration_bins_{RUN_TAG}.csv", index=False)
+    cal_tbl.to_csv(f"{TAB_DIR}/calibration_bins.csv", index=False)
     ece = float((cal_tbl["gap"].abs() * cal_tbl["n"]).sum() / cal_tbl["n"].sum())
     print("\n--- calibration (endpoint verbalized confidence vs accuracy) ---")
     with pd.option_context("display.float_format", lambda v: f"{v:.3f}"):
@@ -178,7 +178,7 @@ def main():
     ax2.set(xticks=xs, xticklabels=cal_tbl["conf_bin"], xlabel="stated confidence bin",
             ylabel="n")
     fig.suptitle(CAVEATS, fontsize=7, y=1.0)
-    fig.tight_layout(); fig.savefig(f"{FIG_DIR}/fig{RUN_TAG}_calibration_curve.png", dpi=130)
+    fig.tight_layout(); fig.savefig(f"{FIG_DIR}/fig_calibration_curve.png", dpi=130)
     plt.close(fig)
 
     # ============================================================================
@@ -193,8 +193,8 @@ def main():
         for b in SIGNALS:
             corr_p.loc[a, b] = pearson(cnum[a], cnum[b])
             corr_s.loc[a, b] = spearman(cnum[a], cnum[b])
-    corr_p.to_csv(f"{TAB_DIR}/correlations_pearson_{RUN_TAG}.csv")
-    corr_s.to_csv(f"{TAB_DIR}/correlations_spearman_{RUN_TAG}.csv")
+    corr_p.to_csv(f"{TAB_DIR}/correlations_pearson.csv")
+    corr_s.to_csv(f"{TAB_DIR}/correlations_spearman.csv")
     print("\n--- Spearman correlation matrix (question level, closed cohort) ---")
     with pd.option_context("display.float_format", lambda v: f"{v:.2f}"):
         print(corr_s.to_string())
@@ -210,7 +210,7 @@ def main():
         ax.set_title(f"{name} (n={len(closed)})")
     fig.colorbar(im, ax=axes, shrink=0.8)
     fig.suptitle(f"Signal correlations — {CAVEATS}", fontsize=8)
-    fig.savefig(f"{FIG_DIR}/fig{RUN_TAG}_signal_correlation_heatmap.png", dpi=130,
+    fig.savefig(f"{FIG_DIR}/fig_signal_correlation_heatmap.png", dpi=130,
                 bbox_inches="tight")
     plt.close(fig)
 
@@ -229,7 +229,7 @@ def main():
     aur = pd.DataFrame([{"signal": name, "auroc": auroc(s, closed["final_correct"]),
                          "n": int(pd.DataFrame({"s": s}).dropna().shape[0])}
                         for name, s in auroc_specs])
-    aur.to_csv(f"{TAB_DIR}/auroc_{RUN_TAG}.csv", index=False)
+    aur.to_csv(f"{TAB_DIR}/auroc.csv", index=False)
     print("\n--- AUROC: P(signal ranks a correct question above an incorrect one) ---")
     with pd.option_context("display.float_format", lambda v: f"{v:.3f}"):
         print(aur.to_string(index=False))
@@ -240,7 +240,7 @@ def main():
     ax.set(xlabel="AUROC for predicting final correctness", xlim=(0.3, 1.0),
            title="Which uncertainty signal actually knows?")
     ax.legend(); fig.suptitle(CAVEATS, fontsize=7, y=1.0)
-    fig.tight_layout(); fig.savefig(f"{FIG_DIR}/fig{RUN_TAG}_auroc_bars.png", dpi=130)
+    fig.tight_layout(); fig.savefig(f"{FIG_DIR}/fig_auroc_bars.png", dpi=130)
     plt.close(fig)
 
     # ============================================================================
@@ -263,7 +263,7 @@ def main():
         rho = spearman(closed[xc], closed[yc])
         ax.set(xlabel=xl, ylabel=yl, title=f"{xl}  vs  {yl}   (Spearman {rho:.2f})")
         ax.legend(); fig.suptitle(CAVEATS, fontsize=7, y=1.0)
-        fig.tight_layout(); fig.savefig(f"{FIG_DIR}/fig{RUN_TAG}_scatter_{tag}.png", dpi=130)
+        fig.tight_layout(); fig.savefig(f"{FIG_DIR}/fig_scatter_{tag}.png", dpi=130)
         plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
@@ -275,7 +275,7 @@ def main():
     ax.set(xlabel="verbalized confidence (end)", ylabel="density",
            title="Stated confidence barely separates correct from incorrect")
     ax.legend(); fig.suptitle(CAVEATS, fontsize=7, y=1.0)
-    fig.tight_layout(); fig.savefig(f"{FIG_DIR}/fig{RUN_TAG}_confidence_hist.png", dpi=130)
+    fig.tight_layout(); fig.savefig(f"{FIG_DIR}/fig_confidence_hist.png", dpi=130)
     plt.close(fig)
 
     # ============================================================================
@@ -295,12 +295,12 @@ def main():
            title="Replication at n=150 / 51 subjects: does correct still converge earlier?")
     ax.legend(); fig.suptitle(CAVEATS, fontsize=7, y=1.0)
     fig.tight_layout()
-    fig.savefig(f"{FIG_DIR}/fig{RUN_TAG}_entropy_by_correctness_frac.png", dpi=130)
+    fig.savefig(f"{FIG_DIR}/fig_entropy_by_correctness_frac.png", dpi=130)
     plt.close(fig)
 
     gap_tbl = ck.groupby(["final_correct", "frac"])["H_letter"].mean().unstack(0)
     gap_tbl["gap"] = gap_tbl[False] - gap_tbl[True]
-    gap_tbl.to_csv(f"{TAB_DIR}/entropy_by_correctness_frac_{RUN_TAG}.csv")
+    gap_tbl.to_csv(f"{TAB_DIR}/entropy_by_correctness_frac.csv")
     max_gap_frac = float(gap_tbl["gap"].idxmax())
     max_gap = float(gap_tbl["gap"].max())
     end_gap = float(gap_tbl["gap"].loc[1.0])
@@ -330,7 +330,7 @@ def main():
                  f"{n_lower}/{len(survive)} shared bins")
     ax.legend(); fig.suptitle(CAVEATS, fontsize=7, y=1.0)
     fig.tight_layout()
-    fig.savefig(f"{FIG_DIR}/fig{RUN_TAG}_entropy_by_correctness_abs.png", dpi=130)
+    fig.savefig(f"{FIG_DIR}/fig_entropy_by_correctness_abs.png", dpi=130)
     plt.close(fig)
     print(f"absolute-position check: correct-lower-entropy in {n_lower}/{len(survive)} shared bins")
 
@@ -353,7 +353,7 @@ def main():
            title="Reasoning-token entropy along the chain (mean, IQR band)")
     ax.legend(); fig.suptitle(CAVEATS, fontsize=7, y=1.0)
     fig.tight_layout()
-    fig.savefig(f"{FIG_DIR}/fig{RUN_TAG}_token_entropy_profiles.png", dpi=130)
+    fig.savefig(f"{FIG_DIR}/fig_token_entropy_profiles.png", dpi=130)
     plt.close(fig)
 
     # ============================================================================
@@ -368,7 +368,7 @@ def main():
                          "tail_mean": tail.mean(),
                          "tail_frac_below_0.05": float((tail < 0.05).mean())})
     runaway = pd.DataFrame(run_rows)
-    runaway.to_csv(f"{TAB_DIR}/runaway_stats_{RUN_TAG}.csv", index=False)
+    runaway.to_csv(f"{TAB_DIR}/runaway_stats.csv", index=False)
     if len(runaway):
         print("\n--- runaway chains (hit 16k cap): head vs tail entropy ---")
         with pd.option_context("display.float_format", lambda v: f"{v:.3f}"):
@@ -385,7 +385,7 @@ def main():
         fig.suptitle(f"Runaway chains: rolling(±{W}) token entropy — loop = flat/periodic tail",
                      fontsize=10)
         fig.tight_layout()
-        fig.savefig(f"{FIG_DIR}/fig{RUN_TAG}_runaway_traces.png", dpi=130)
+        fig.savefig(f"{FIG_DIR}/fig_runaway_traces.png", dpi=130)
         plt.close(fig)
 
     # ============================================================================
@@ -394,11 +394,11 @@ def main():
     wrong = closed[~closed["final_correct"]].copy()
     over = wrong.sort_values(["conf_end", "H_ans_end"],
                              ascending=[False, True]).head(10)
-    over.to_csv(f"{TAB_DIR}/outliers_overconfident_wrong_{RUN_TAG}.csv", index=False)
+    over.to_csv(f"{TAB_DIR}/outliers_overconfident_wrong.csv", index=False)
 
     # signals disagree: stated certain but answer distribution NOT collapsed
     dis = closed[(closed["conf_end"] >= 90)].sort_values("H_ans_end", ascending=False).head(10)
-    dis.to_csv(f"{TAB_DIR}/outliers_signal_disagree_{RUN_TAG}.csv", index=False)
+    dis.to_csv(f"{TAB_DIR}/outliers_signal_disagree.csv", index=False)
 
     def gallery(df, title, why):
         parts = [f"## {title}\n\n{why}\n"]
@@ -445,12 +445,12 @@ def main():
 - **closed & answered: {len(closed)}** ({n_corr} correct / {n_inc} incorrect, acc={acc:.2f})
 - truncated at 16k cap: {len(trunc_qids)} (runaway chains, forensics below)
 - skipped, model wrote NO reasoning (n_think=2): {len(skipped_qids)} — all long-passage
-  humanities/social subjects; see `tables/skipped_no_reasoning_{RUN_TAG}.csv`
+  humanities/social subjects; see `tables/skipped_no_reasoning.csv`
 
 ## 1. Calibration (GK bullet 1+2 anchor)
 Stated confidence ~90 everywhere; actual accuracy {acc:.2f}. **ECE={ece:.2f}.**
-See `fig{RUN_TAG}_calibration_curve.png`; the per-bin table is
-`tables/calibration_bins_{RUN_TAG}.csv`.
+See `fig_calibration_curve.png`; the per-bin table is
+`tables/calibration_bins.csv`.
 
 ## 2. Which signal knows? (AUROC, higher = better ranks correct above incorrect)
 | signal | AUROC |
@@ -465,7 +465,7 @@ See `fig{RUN_TAG}_calibration_curve.png`; the per-bin table is
 - think-token entropy ~ verbalized confidence: **{corr_hthink_conf:.2f}**
 - think-token entropy ~ answer entropy (end): **{corr_hthink_hans:.2f}**
 - answer entropy (mid) ~ verbalized confidence: **{corr_hans_conf:.2f}**
-Full matrices: `tables/correlations_*_{RUN_TAG}.csv`, heatmap figure.
+Full matrices: `tables/correlations_*.csv`, heatmap figure.
 
 ## 4. Timing replication (20q headline at n={len(closed)}, 51 subjects)
 Gap (incorrect - correct mean answer entropy) peaks at frac {max_gap_frac:.1f}
@@ -478,10 +478,10 @@ the 20q timing story.
 
 ## 5. Runaway chains ({len(trunc_qids)} at the 16k cap)
 Mean fraction of final-1024 tokens with entropy < 0.05 nats: **{tail_loop:.2f}**
-(repetition-loop signature if high). Traces: `fig{RUN_TAG}_runaway_traces.png`.
+(repetition-loop signature if high). Traces: `fig_runaway_traces.png`.
 
 ## 6. Outliers for manual inspection
-`OUTLIERS_{RUN_TAG}.md` — top overconfident-wrong + signals-disagree galleries
+`OUTLIERS.md` — top overconfident-wrong + signals-disagree galleries
 with full question text.
 
 ---
@@ -490,7 +490,7 @@ with full question text.
     with open(FINDINGS, "w") as fh:
         fh.write(findings)
     print(f"wrote {FINDINGS}")
-    print(f"\nfigures -> {FIG_DIR}/fig{RUN_TAG}_*.png   tables -> {TAB_DIR}/*_{RUN_TAG}.csv")
+    print(f"\nfigures -> {FIG_DIR}/fig_*.png   tables -> {TAB_DIR}/*.csv")
 
 
 if __name__ == "__main__":
