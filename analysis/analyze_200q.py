@@ -83,6 +83,75 @@ def qsnippet(qrow, width=180):
     return text[:width] + ("..." if len(text) > width else "")
 
 
+def select_individual_trace_qids(signal_rows, per_group=5, seed=42):
+    """Select reproducible correct/incorrect examples, preferring unique subjects."""
+    selected = {}
+    for label in (True, False):
+        candidates = signal_rows[signal_rows["final_correct"] == label].sort_values("qid")
+        if len(candidates) < per_group:
+            raise ValueError(
+                f"need {per_group} examples for final_correct={label}, "
+                f"found {len(candidates)}"
+            )
+        shuffled = candidates.sample(
+            frac=1, random_state=seed + int(not label)
+        )
+        chosen = shuffled.drop_duplicates("subject").head(per_group)
+        if len(chosen) < per_group:
+            remaining = shuffled[~shuffled["qid"].isin(chosen["qid"])]
+            chosen = pd.concat([chosen, remaining.head(per_group - len(chosen))])
+        selected[label] = chosen["qid"].astype(int).tolist()
+    return selected
+
+
+def select_correlated_signal_pairs(corr, n_pairs=6, excluded_signals=None,
+                                   excluded_pairs=None):
+    """Return unique signal pairs ranked by absolute correlation."""
+    excluded_signals = set(excluded_signals or ())
+    excluded_pairs = {frozenset(pair) for pair in (excluded_pairs or ())}
+    candidates = []
+    signals = list(corr.index)
+    for i, left in enumerate(signals):
+        for right in signals[i + 1:]:
+            if left in excluded_signals or right in excluded_signals:
+                continue
+            if frozenset((left, right)) in excluded_pairs:
+                continue
+            rho = float(corr.loc[left, right])
+            if np.isfinite(rho):
+                candidates.append((left, right, rho))
+    candidates.sort(key=lambda pair: (-abs(pair[2]), pair[0], pair[1]))
+    return candidates[:n_pairs]
+
+
+def summarize_h_ans_distributions(signal_rows, signal_columns,
+                                  near_zero_threshold=0.05):
+    """Summarize answer-entropy distributions by final correctness."""
+    records = []
+    for signal in signal_columns:
+        for label in (True, False):
+            values = pd.to_numeric(
+                signal_rows.loc[signal_rows["final_correct"] == label, signal],
+                errors="coerce",
+            ).dropna()
+            records.append(
+                {
+                    "signal": signal,
+                    "final_correct": label,
+                    "n": len(values),
+                    "mean": values.mean(),
+                    "median": values.median(),
+                    "q25": values.quantile(0.25),
+                    "q75": values.quantile(0.75),
+                    "near_zero_frac": (
+                        (values <= near_zero_threshold).mean()
+                        if len(values) else float("nan")
+                    ),
+                }
+            )
+    return pd.DataFrame(records)
+
+
 def main():
     os.makedirs(TAB_DIR, exist_ok=True)
     os.makedirs(FIG_DIR, exist_ok=True)
@@ -266,6 +335,51 @@ def main():
         fig.tight_layout(); fig.savefig(f"{FIG_DIR}/fig_scatter_{tag}.png", dpi=130)
         plt.close(fig)
 
+    existing_scatter_pairs = {
+        frozenset((xc, yc)) for xc, yc, _, _, _ in scatters
+    }
+    strongest_pairs = select_correlated_signal_pairs(
+        corr_s,
+        n_pairs=6,
+        excluded_signals={"final_correct"},
+        excluded_pairs=existing_scatter_pairs,
+    )
+    signal_labels = {
+        "H_think_mean": "mean reasoning entropy (nats)",
+        "H_think_tail": "tail reasoning entropy (nats)",
+        "H_ans_prior": "answer entropy @0.0 (nats)",
+        "H_ans_mid": "answer entropy @0.5 (nats)",
+        "H_ans_end": "answer entropy @1.0 (nats)",
+        "conf_end": "verbalized confidence (end)",
+    }
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8.5))
+    for ax, (xc, yc, rho) in zip(axes.flat, strongest_pairs):
+        pair_data = closed[[xc, yc, "final_correct"]].dropna()
+        for val, color, label in ((True, "tab:blue", "correct"),
+                                  (False, "tab:orange", "incorrect")):
+            sub = pair_data[pair_data["final_correct"] == val]
+            ax.scatter(sub[xc], sub[yc], color=color, alpha=0.5, s=24,
+                       edgecolors="none", label=label)
+        ax.set(
+            xlabel=signal_labels[xc],
+            ylabel=signal_labels[yc],
+            title=f"Spearman $\\rho$={rho:.2f}, n={len(pair_data)}",
+        )
+        ax.grid(alpha=0.18)
+    handles, legend_labels = axes.flat[0].get_legend_handles_labels()
+    fig.legend(handles, legend_labels, loc="upper center", ncol=2,
+               bbox_to_anchor=(0.5, 0.955))
+    fig.suptitle("Strongest additional signal relationships from the Spearman heatmap",
+                 fontsize=14)
+    fig.text(0.5, 0.01, CAVEATS, ha="center", fontsize=7)
+    fig.tight_layout(rect=(0, 0.035, 1, 0.91))
+    fig.savefig(f"{FIG_DIR}/fig_scatter_top_correlated_signals.png",
+                dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    print("\n--- strongest additional continuous-signal pairs plotted ---")
+    for left, right, rho in strongest_pairs:
+        print(f"{left:>15} vs {right:<15}  Spearman={rho:+.3f}")
+
     fig, ax = plt.subplots(figsize=(7, 4.5))
     bins_c = np.arange(50, 105, 5)
     for val, color, lbl in ((True, "tab:blue", f"correct (n={n_corr})"),
@@ -277,6 +391,76 @@ def main():
     ax.legend(); fig.suptitle(CAVEATS, fontsize=7, y=1.0)
     fig.tight_layout(); fig.savefig(f"{FIG_DIR}/fig_confidence_hist.png", dpi=130)
     plt.close(fig)
+
+    h_ans_columns = ["H_ans_prior", "H_ans_mid", "H_ans_end"]
+    h_ans_titles = {
+        "H_ans_prior": "Before reasoning (fraction 0.0)",
+        "H_ans_mid": "Mid-reasoning (fraction 0.5)",
+        "H_ans_end": "End of reasoning (fraction 1.0)",
+    }
+    near_zero_threshold = 0.05
+    h_ans_summary = summarize_h_ans_distributions(
+        closed, h_ans_columns, near_zero_threshold=near_zero_threshold
+    )
+    h_ans_summary.to_csv(
+        f"{TAB_DIR}/h_ans_distribution_summary.csv", index=False
+    )
+
+    entropy_max = np.log(4)
+    entropy_bins = np.linspace(0, entropy_max, 21)
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.8), sharex=True, sharey=True)
+    for ax, signal in zip(axes, h_ans_columns):
+        for label, color, group_name in (
+            (True, "tab:blue", "correct"),
+            (False, "tab:orange", "incorrect"),
+        ):
+            values = closed.loc[closed["final_correct"] == label, signal].dropna()
+            if len(values):
+                ax.hist(
+                    values,
+                    bins=entropy_bins,
+                    weights=np.full(len(values), 1 / len(values)),
+                    alpha=0.48,
+                    color=color,
+                    label=group_name,
+                )
+            row = h_ans_summary[
+                (h_ans_summary["signal"] == signal)
+                & (h_ans_summary["final_correct"] == label)
+            ].iloc[0]
+            y = 0.94 if label else 0.80
+            ax.text(
+                0.97,
+                y,
+                f"{group_name}: n={int(row['n'])}, median={row['median']:.2f}, "
+                f"≤{near_zero_threshold:.2f}={row['near_zero_frac']:.0%}",
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                color=color,
+                fontsize=8,
+                bbox={"facecolor": "white", "alpha": 0.72, "edgecolor": "none"},
+            )
+        ax.set(
+            title=h_ans_titles[signal],
+            xlabel="answer entropy over A–D (nats)",
+            xlim=(0, entropy_max),
+        )
+        ax.grid(axis="y", alpha=0.18)
+    axes[0].set_ylabel("within-group proportion per bin")
+    handles, legend_labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, legend_labels, loc="upper center", ncol=2,
+               bbox_to_anchor=(0.5, 0.94))
+    fig.suptitle("Answer-entropy distributions across reasoning checkpoints",
+                 fontsize=14)
+    fig.text(0.5, 0.01, CAVEATS, ha="center", fontsize=7)
+    fig.tight_layout(rect=(0, 0.035, 1, 0.86))
+    fig.savefig(f"{FIG_DIR}/fig_h_ans_histograms.png", dpi=130,
+                bbox_inches="tight")
+    plt.close(fig)
+    print("\n--- H_ans distribution summaries ---")
+    with pd.option_context("display.float_format", lambda v: f"{v:.3f}"):
+        print(h_ans_summary.to_string(index=False))
 
     # ============================================================================
     # 5. TRAJECTORY REPLICATION at n=150: answer entropy by frac + abs position
@@ -355,6 +539,57 @@ def main():
     fig.tight_layout()
     fig.savefig(f"{FIG_DIR}/fig_token_entropy_profiles.png", dpi=130)
     plt.close(fig)
+
+    # Ten reproducibly selected individual traces: balanced by correctness and
+    # subject-diverse where the cohort permits. Raw entropy stays visible beneath
+    # a short rolling mean so local spikes and the broader trajectory are both clear.
+    selected = select_individual_trace_qids(closed, per_group=5, seed=42)
+    closed_idx = closed.set_index("qid")
+    fig, axes = plt.subplots(5, 2, figsize=(13, 15), sharey=True)
+    for col, (label, color, heading) in enumerate(
+        ((True, "tab:blue", "Correct at final checkpoint"),
+         (False, "tab:orange", "Incorrect at final checkpoint"))
+    ):
+        for row, qid in enumerate(selected[label]):
+            ax = axes[row, col]
+            meta = closed_idx.loc[qid]
+            trace = np.asarray(traces[qid][:int(meta["n_think"])], dtype=float)
+            rolling = pd.Series(trace).rolling(
+                window=25, center=True, min_periods=1
+            ).mean()
+            raw_label = "raw token entropy" if row == 0 and col == 0 else None
+            smooth_label = "25-token rolling mean" if row == 0 and col == 0 else None
+            ax.plot(trace, color=color, alpha=0.22, linewidth=0.55, label=raw_label)
+            ax.plot(rolling, color=color, linewidth=1.5, label=smooth_label)
+            ax.set_ylim(bottom=0)
+            ax.set_title(
+                f"qid {qid} · {meta['subject']} · n={len(trace)}",
+                fontsize=9,
+            )
+            if row == 0:
+                ax.text(
+                    0.5, 1.22, heading, transform=ax.transAxes,
+                    ha="center", va="bottom", fontsize=11, fontweight="bold"
+                )
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(
+        handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.955),
+        ncol=2, frameon=False
+    )
+    fig.supxlabel("reasoning-token index")
+    fig.supylabel("full-vocabulary next-token entropy (nats)")
+    fig.suptitle(
+        "Ten individual natural reasoning-token entropy traces",
+        fontsize=13, y=0.995,
+    )
+    fig.tight_layout(rect=(0.02, 0.02, 1, 0.89))
+    individual_path = f"{FIG_DIR}/fig_individual_token_entropy_10q.png"
+    fig.savefig(individual_path, dpi=150)
+    plt.close(fig)
+    print(
+        "\nindividual trace qids: "
+        f"correct={selected[True]}  incorrect={selected[False]}"
+    )
 
     # ============================================================================
     # 7. RUNAWAY (16k-cap) FORENSICS: repetition-loop signature?
