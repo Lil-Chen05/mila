@@ -39,6 +39,21 @@ def store(tmp_path: Path) -> Part1ShardStore:
     )
 
 
+def _write_synthetic_raw_terminal(shard: Part1ShardStore, result: dict) -> None:
+    """Bypass public publication only to construct explicitly corrupt disk state."""
+
+    shard.root.mkdir(parents=True, exist_ok=True)
+    path = (
+        shard.natural_results_path
+        if result["schema_name"] == "part1_natural_terminal_result"
+        else shard.checkpoint_results_path
+    )
+    path.write_text(
+        json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_separate_streams_durably_preserve_full_precision_and_alignment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -77,6 +92,7 @@ def test_separate_streams_durably_preserve_full_precision_and_alignment(
 def test_duplicate_conflict_and_premature_terminal_failure_are_rejected(tmp_path: Path) -> None:
     shard = store(tmp_path)
     result = natural_result()
+    shard.append_audit_event(attempt_event(result, "attempt_started", 0))
     shard.append_terminal_result(result)
     with pytest.raises(DuplicateTerminalResultError, match="already has a terminal result"):
         shard.append_terminal_result(result)
@@ -198,6 +214,7 @@ def test_partial_tail_recovery_quarantines_exact_bytes_and_preserves_valid_prefi
 ) -> None:
     shard = store(tmp_path)
     result = natural_result()
+    shard.append_audit_event(attempt_event(result, "attempt_started", 0))
     shard.append_terminal_result(result)
     valid_prefix = shard.natural_results_path.read_bytes()
     partial = b'{"schema_name":"part1_natural_terminal_result","raw_record_id":"cut'
@@ -304,7 +321,9 @@ def test_checkpoint_and_natural_indexes_remain_independent(tmp_path: Path) -> No
     shard = store(tmp_path)
     natural = natural_result()
     checkpoint = checkpoint_result()
+    shard.append_audit_event(attempt_event(natural, "attempt_started", 0))
     shard.append_terminal_result(natural)
+    shard.append_audit_event(attempt_event(checkpoint, "attempt_started", 0))
     shard.append_terminal_result(checkpoint)
     index = shard.build_index()
     assert len(index.natural_terminal_by_key) == 1
@@ -336,7 +355,7 @@ def test_valid_json_at_eof_without_newline_is_preserved_and_repaired(tmp_path: P
     assert shard.inspect().audit_events[-1]["event_type"] == "trailing_line_recovered"
 
 
-def test_commit_requires_started_attempt_and_validation_flags_raw_result_without_start(
+def test_public_terminal_append_requires_start_and_writes_no_authoritative_bytes(
     tmp_path: Path,
 ) -> None:
     shard = store(tmp_path)
@@ -344,17 +363,15 @@ def test_commit_requires_started_attempt_and_validation_flags_raw_result_without
     with pytest.raises(ValueError, match="attempt_started"):
         shard.commit_terminal_result(result, attempt_event(result, "attempt_completed", 1))
 
-    shard.append_terminal_result(result)
-    report = shard.validate_shard(
-        artifact_kind="natural_shard",
-        started_at="2026-07-31T00:00:00Z",
-        completed_at="2026-07-31T00:00:01Z",
-    )
-    assert report["is_valid"] is False
-    consistency = next(
-        check for check in report["checks"] if check["name"] == "terminal_event_consistency"
-    )
-    assert consistency["outcome"] == "failed"
+    with pytest.raises(ValueError, match="attempt_started"):
+        shard.append_terminal_result(result)
+    assert not shard.natural_results_path.exists()
+    assert shard.reconcile(
+        event_timestamp="2026-07-31T00:00:01Z",
+        execution_context={"hostname": "node", "pid": 123},
+    ) == []
+    assert shard.inspect().natural_results == ()
+    assert shard.inspect().audit_events == ()
 
 
 def test_commit_preflights_completion_before_writing_terminal_bytes(tmp_path: Path) -> None:
@@ -463,6 +480,7 @@ def test_result_tail_recovery_resumes_from_every_durable_boundary(
 ) -> None:
     shard = store(tmp_path)
     result = natural_result()
+    shard.append_audit_event(attempt_event(result, "attempt_started", 0))
     shard.append_terminal_result(result)
     valid_prefix = shard.natural_results_path.read_bytes()
     partial = b'{"schema_name":"part1_natural_terminal_result","cut"'
@@ -634,7 +652,7 @@ def test_failure_or_interruption_cannot_follow_an_existing_terminal_result(
 def test_start_cannot_be_appended_retroactively_after_a_terminal_result(tmp_path: Path) -> None:
     shard = store(tmp_path)
     result = natural_result()
-    shard.append_terminal_result(result)
+    _write_synthetic_raw_terminal(shard, result)
     with pytest.raises(ValueError, match="attempt_started.*terminal result|terminal result.*start"):
         shard.append_audit_event(attempt_event(result, "attempt_started", 0))
 

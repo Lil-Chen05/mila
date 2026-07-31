@@ -521,12 +521,20 @@ class Part1ShardStore:
                     f"logical key {logical_key!r} already has a terminal result"
                 )
         audit_records = self._assert_stream_appendable("audit_events").records
-        terminal_lifecycle_events = [
+        matching_attempt_events = [
             event
             for event in audit_records
             if event["event_scope"] == "attempt"
             and event["attempt_id"] == record["terminal_attempt_id"]
-            and event["event_type"]
+        ]
+        if not any(
+            event["event_type"] == "attempt_started" for event in matching_attempt_events
+        ):
+            raise ValueError("terminal publication requires durable matching attempt_started evidence")
+        terminal_lifecycle_events = [
+            event
+            for event in matching_attempt_events
+            if event["event_type"]
             in {
                 "attempt_failed",
                 "attempt_interrupted",
