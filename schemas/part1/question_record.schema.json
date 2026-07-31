@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mila.example/schemas/part1/question_record.schema.json",
+  "title": "Part 1 question record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_name", "schema_version", "question_id", "question_content_hash", "sample_index", "subject", "subject_selection_index", "source_repository", "source_revision", "source_config", "source_split", "source_row_identity", "question", "choices", "gold_index", "gold_letter"],
+  "properties": {
+    "schema_name": {"const": "part1_question_record"},
+    "schema_version": {"const": "1.0.0"},
+    "question_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "question_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sample_index": {"type": "integer", "minimum": 0, "maximum": 499},
+    "subject": {"enum": ["high_school_mathematics", "high_school_physics", "high_school_chemistry", "high_school_biology", "high_school_psychology"]},
+    "subject_selection_index": {"type": "integer", "minimum": 0, "maximum": 99},
+    "source_repository": {"const": "cais/mmlu"},
+    "source_revision": {"type": "string", "minLength": 1},
+    "source_config": {"type": "string", "minLength": 1},
+    "source_split": {"const": "test"},
+    "source_row_identity": {"type": "object", "minProperties": 1},
+    "question": {"type": "string", "minLength": 1},
+    "choices": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "string"}},
+    "gold_index": {"type": "integer", "minimum": 0, "maximum": 3},
+    "gold_letter": {"enum": ["A", "B", "C", "D"]}
+  }
+}

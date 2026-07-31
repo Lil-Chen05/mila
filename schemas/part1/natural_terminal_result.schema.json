@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mila.example/schemas/part1/natural_terminal_result.schema.json",
+  "title": "Part 1 immutable natural terminal result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_name", "schema_version", "raw_record_id", "study_id", "model_run_id", "model_run_manifest_hash", "question_manifest_hash", "question_id", "sample_index", "subject", "run_id", "generation_seed", "seed_algorithm_version", "terminal_attempt_number", "terminal_attempt_id", "infrastructure_failure_reference", "prompt_hash", "rendered_prompt", "prompt_token_ids", "generated_token_ids", "decoded_output", "reasoning_text", "reasoning_boundaries", "close_tag_information", "stop_reason", "generated_token_count", "reasoning_token_count", "per_token_entropy_nats", "mean_reasoning_entropy_nats", "tail_reasoning_entropy_nats", "terminal_answer_block_text", "terminal_answer_block_span", "natural_answer", "raw_confidence_text", "raw_parsed_confidence", "normalized_confidence", "natural_correct", "diagnostic_answer_like_text", "checkpoint_eligible", "checkpoint_ids", "natural_execution_outcome", "reasoning_status", "answer_parse_status", "confidence_parse_status", "component_versions", "terminal_error_details"],
+  "properties": {
+    "schema_name": {"const": "part1_natural_terminal_result"},
+    "schema_version": {"const": "1.0.0"},
+    "raw_record_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "study_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "model_run_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "model_run_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "question_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "question_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sample_index": {"type": "integer", "minimum": 0},
+    "subject": {"type": "string", "minLength": 1},
+    "run_id": {"type": "integer", "minimum": 0, "maximum": 9},
+    "generation_seed": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+    "seed_algorithm_version": {"const": "part1-seed-v1"},
+    "terminal_attempt_number": {"type": "integer", "minimum": 1, "maximum": 3},
+    "terminal_attempt_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "infrastructure_failure_reference": {"type": ["string", "null"]},
+    "prompt_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "rendered_prompt": {"type": ["string", "null"]},
+    "prompt_token_ids": {"type": ["array", "null"], "items": {"type": "integer", "minimum": 0}},
+    "generated_token_ids": {"type": ["array", "null"], "items": {"type": "integer", "minimum": 0}},
+    "decoded_output": {"type": ["string", "null"]},
+    "reasoning_text": {"type": ["string", "null"]},
+    "reasoning_boundaries": {"type": ["object", "null"]},
+    "close_tag_information": {"type": ["object", "null"]},
+    "stop_reason": {"enum": ["eos", "max_new_tokens", "stopping_criterion", "error", "other"]},
+    "generated_token_count": {"type": ["integer", "null"], "minimum": 0},
+    "reasoning_token_count": {"type": ["integer", "null"], "minimum": 0},
+    "per_token_entropy_nats": {"type": ["array", "null"], "items": {"type": "number", "minimum": 0}},
+    "mean_reasoning_entropy_nats": {"type": ["number", "null"], "minimum": 0},
+    "tail_reasoning_entropy_nats": {"type": ["number", "null"], "minimum": 0},
+    "terminal_answer_block_text": {"type": ["string", "null"]},
+    "terminal_answer_block_span": {"type": ["object", "null"]},
+    "natural_answer": {"enum": ["A", "B", "C", "D", null]},
+    "raw_confidence_text": {"type": ["string", "null"]},
+    "raw_parsed_confidence": {"type": ["integer", "null"]},
+    "normalized_confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "natural_correct": {"type": ["boolean", "null"]},
+    "diagnostic_answer_like_text": {"type": ["string", "null"]},
+    "checkpoint_eligible": {"type": "boolean"},
+    "checkpoint_ids": {"type": ["array", "null"], "minItems": 11, "maxItems": 11, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "natural_execution_outcome": {"enum": ["complete", "terminal_infrastructure_failure"]},
+    "reasoning_status": {"enum": ["closed", "missing_close", "no_reasoning", "malformed"]},
+    "answer_parse_status": {"enum": ["parsed", "missing", "malformed", "out_of_domain"]},
+    "confidence_parse_status": {"enum": ["parsed", "missing", "malformed", "out_of_range"]},
+    "component_versions": {"type": "object", "minProperties": 1},
+    "terminal_error_details": {"type": ["object", "null"]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"natural_execution_outcome": {"const": "terminal_infrastructure_failure"}}},
+      "then": {"properties": {
+        "stop_reason": {"const": "error"},
+        "rendered_prompt": {"type": "null"}, "prompt_token_ids": {"type": "null"},
+        "generated_token_ids": {"type": "null"}, "decoded_output": {"type": "null"},
+        "reasoning_text": {"type": "null"}, "reasoning_boundaries": {"type": "null"}, "close_tag_information": {"type": "null"},
+        "generated_token_count": {"type": "null"}, "reasoning_token_count": {"type": "null"}, "per_token_entropy_nats": {"type": "null"},
+        "mean_reasoning_entropy_nats": {"type": "null"}, "tail_reasoning_entropy_nats": {"type": "null"},
+        "terminal_answer_block_text": {"type": "null"}, "terminal_answer_block_span": {"type": "null"}, "natural_answer": {"type": "null"},
+        "raw_confidence_text": {"type": "null"}, "raw_parsed_confidence": {"type": "null"}, "normalized_confidence": {"type": "null"},
+        "natural_correct": {"type": "null"}, "checkpoint_eligible": {"const": false}, "checkpoint_ids": {"type": "null"},
+        "infrastructure_failure_reference": {"type": "string", "minLength": 1},
+        "reasoning_status": {"const": "malformed"}, "answer_parse_status": {"const": "missing"}, "confidence_parse_status": {"const": "missing"},
+        "terminal_error_details": {"type": "object", "minProperties": 1}
+      }}
+    },
+    {
+      "if": {"properties": {"natural_execution_outcome": {"const": "complete"}}},
+      "then": {"properties": {
+        "rendered_prompt": {"type": "string"}, "prompt_token_ids": {"type": "array"},
+        "generated_token_ids": {"type": "array"}, "decoded_output": {"type": "string"},
+        "reasoning_text": {"type": "string"}, "reasoning_boundaries": {"type": "object"}, "close_tag_information": {"type": "object"},
+        "generated_token_count": {"type": "integer"}, "reasoning_token_count": {"type": "integer"}, "per_token_entropy_nats": {"type": "array"},
+        "checkpoint_eligible": {"const": true}, "checkpoint_ids": {"type": "array", "minItems": 11, "maxItems": 11}, "infrastructure_failure_reference": {"type": "null"}, "terminal_error_details": {"type": "null"}
+      }}
+    },
+    {
+      "if": {"properties": {"answer_parse_status": {"const": "parsed"}}},
+      "then": {"properties": {"natural_answer": {"enum": ["A", "B", "C", "D"]}, "natural_correct": {"type": "boolean"}, "terminal_answer_block_text": {"type": "string"}, "terminal_answer_block_span": {"type": "object"}}},
+      "else": {"properties": {"natural_answer": {"type": "null"}, "natural_correct": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"confidence_parse_status": {"const": "parsed"}}},
+      "then": {"properties": {"raw_confidence_text": {"type": "string"}, "raw_parsed_confidence": {"type": "integer", "minimum": 0, "maximum": 100}, "normalized_confidence": {"type": "number", "minimum": 0, "maximum": 1}}},
+      "else": {"properties": {"normalized_confidence": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"confidence_parse_status": {"const": "out_of_range"}}},
+      "then": {"properties": {"raw_confidence_text": {"type": "string"}, "raw_parsed_confidence": {"type": "integer"}, "normalized_confidence": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"reasoning_status": {"const": "missing_close"}}},
+      "then": {"properties": {"answer_parse_status": {"not": {"const": "parsed"}}, "confidence_parse_status": {"not": {"const": "parsed"}}, "terminal_answer_block_text": {"type": "null"}, "terminal_answer_block_span": {"type": "null"}, "natural_answer": {"type": "null"}, "natural_correct": {"type": "null"}, "normalized_confidence": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"reasoning_status": {"const": "no_reasoning"}}},
+      "then": {"properties": {"reasoning_token_count": {"const": 0}, "mean_reasoning_entropy_nats": {"type": "null"}, "tail_reasoning_entropy_nats": {"type": "null"}}}
+    }
+  ]
+}

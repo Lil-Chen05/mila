@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mila.example/schemas/part1/checkpoint_terminal_result.schema.json",
+  "title": "Part 1 immutable checkpoint terminal result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_name", "schema_version", "checkpoint_record_id", "parent_raw_record_id", "study_id", "model_run_id", "model_run_manifest_hash", "question_manifest_hash", "question_id", "sample_index", "subject", "run_id", "checkpoint_id", "natural_seed", "terminal_attempt_number", "terminal_attempt_id", "infrastructure_failure_reference", "requested_checkpoint_index", "requested_fraction", "k_keep", "actual_fraction", "shared_probe_id", "is_alias", "alias_metadata", "prefix_hash", "inducer_version", "inducer_text", "forced_generated_token_ids", "decoded_forced_output", "terminal_answer_block_text", "forced_answer", "raw_confidence_text", "raw_parsed_confidence", "normalized_confidence", "checkpoint_local_correct", "answer_token_index", "answer_token_id", "token_convention", "ad_token_ids", "ad_logits_float32", "ad_probabilities_float32", "answer_entropy_nats", "full_vocabulary_answer_step_entropy_nats", "maximum_ad_probability", "agrees_with_natural_answer", "checkpoint_execution_outcome", "checkpoint_model_output_status", "answer_parse_status", "confidence_parse_status", "answer_token_status", "entropy_status", "component_versions", "terminal_error_details"],
+  "properties": {
+    "schema_name": {"const": "part1_checkpoint_terminal_result"},
+    "schema_version": {"const": "1.0.0"},
+    "checkpoint_record_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "parent_raw_record_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "study_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "model_run_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "model_run_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "question_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "question_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sample_index": {"type": "integer", "minimum": 0},
+    "subject": {"type": "string", "minLength": 1},
+    "run_id": {"type": "integer", "minimum": 0, "maximum": 9},
+    "checkpoint_id": {"type": "string", "minLength": 1},
+    "natural_seed": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+    "terminal_attempt_number": {"type": "integer", "minimum": 1, "maximum": 3},
+    "terminal_attempt_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "infrastructure_failure_reference": {"type": ["string", "null"]},
+    "requested_checkpoint_index": {"type": "integer", "minimum": 0, "maximum": 10},
+    "requested_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+    "k_keep": {"type": "integer", "minimum": 0},
+    "actual_fraction": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "shared_probe_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "is_alias": {"type": "boolean"},
+    "alias_metadata": {"type": "object", "required": ["owner_checkpoint_id", "members"], "properties": {"owner_checkpoint_id": {"type": "string"}, "members": {"type": "array", "minItems": 1, "items": {"type": "string"}}}},
+    "prefix_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "inducer_version": {"type": "string", "minLength": 1},
+    "inducer_text": {"type": "string"},
+    "forced_generated_token_ids": {"type": ["array", "null"], "items": {"type": "integer", "minimum": 0}},
+    "decoded_forced_output": {"type": ["string", "null"]},
+    "terminal_answer_block_text": {"type": ["string", "null"]},
+    "forced_answer": {"enum": ["A", "B", "C", "D", null]},
+    "raw_confidence_text": {"type": ["string", "null"]},
+    "raw_parsed_confidence": {"type": ["integer", "null"]},
+    "normalized_confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "checkpoint_local_correct": {"type": ["boolean", "null"]},
+    "answer_token_index": {"type": ["integer", "null"], "minimum": 0},
+    "answer_token_id": {"type": ["integer", "null"], "minimum": 0},
+    "token_convention": {"type": ["string", "null"]},
+    "ad_token_ids": {"type": ["array", "null"], "minItems": 4, "maxItems": 4, "items": {"type": "integer", "minimum": 0}},
+    "ad_logits_float32": {"type": ["array", "null"], "minItems": 4, "maxItems": 4, "items": {"type": "number"}},
+    "ad_probabilities_float32": {"type": ["array", "null"], "minItems": 4, "maxItems": 4, "items": {"type": "number", "minimum": 0, "maximum": 1}},
+    "answer_entropy_nats": {"type": ["number", "null"], "minimum": 0},
+    "full_vocabulary_answer_step_entropy_nats": {"type": ["number", "null"], "minimum": 0},
+    "maximum_ad_probability": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "agrees_with_natural_answer": {"type": ["boolean", "null"]},
+    "checkpoint_execution_outcome": {"enum": ["complete", "terminal_infrastructure_failure"]},
+    "checkpoint_model_output_status": {"enum": ["valid", "invalid"]},
+    "answer_parse_status": {"enum": ["parsed", "missing", "malformed", "out_of_domain"]},
+    "confidence_parse_status": {"enum": ["parsed", "missing", "malformed", "out_of_range"]},
+    "answer_token_status": {"enum": ["located", "missing", "ambiguous", "unsupported"]},
+    "entropy_status": {"enum": ["computed", "unavailable", "invalid"]},
+    "component_versions": {"type": "object", "minProperties": 1},
+    "terminal_error_details": {"type": ["object", "null"]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"checkpoint_execution_outcome": {"const": "terminal_infrastructure_failure"}}},
+      "then": {"properties": {
+        "checkpoint_model_output_status": {"const": "invalid"}, "answer_parse_status": {"const": "missing"}, "confidence_parse_status": {"const": "missing"}, "answer_token_status": {"const": "unsupported"}, "entropy_status": {"const": "unavailable"},
+        "forced_generated_token_ids": {"type": "null"}, "decoded_forced_output": {"type": "null"}, "terminal_answer_block_text": {"type": "null"}, "forced_answer": {"type": "null"},
+        "raw_confidence_text": {"type": "null"}, "raw_parsed_confidence": {"type": "null"}, "normalized_confidence": {"type": "null"}, "checkpoint_local_correct": {"type": "null"},
+        "answer_token_index": {"type": "null"}, "answer_token_id": {"type": "null"}, "token_convention": {"type": "null"}, "ad_token_ids": {"type": "null"}, "ad_logits_float32": {"type": "null"}, "ad_probabilities_float32": {"type": "null"},
+        "answer_entropy_nats": {"type": "null"}, "full_vocabulary_answer_step_entropy_nats": {"type": "null"}, "maximum_ad_probability": {"type": "null"}, "agrees_with_natural_answer": {"type": "null"},
+        "infrastructure_failure_reference": {"type": "string", "minLength": 1}, "terminal_error_details": {"type": "object", "minProperties": 1}
+      }}
+    },
+    {
+      "if": {"properties": {"checkpoint_execution_outcome": {"const": "complete"}}},
+      "then": {"properties": {"forced_generated_token_ids": {"type": "array"}, "decoded_forced_output": {"type": "string"}, "infrastructure_failure_reference": {"type": "null"}, "terminal_error_details": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"checkpoint_model_output_status": {"const": "valid"}}},
+      "then": {"properties": {"checkpoint_execution_outcome": {"const": "complete"}, "answer_parse_status": {"const": "parsed"}, "answer_token_status": {"const": "located"}, "entropy_status": {"const": "computed"}, "terminal_answer_block_text": {"type": "string"}}}
+    },
+    {
+      "if": {"properties": {"answer_parse_status": {"const": "parsed"}}},
+      "then": {"properties": {"forced_answer": {"enum": ["A", "B", "C", "D"]}, "checkpoint_local_correct": {"type": "boolean"}}},
+      "else": {"properties": {"forced_answer": {"type": "null"}, "checkpoint_local_correct": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"confidence_parse_status": {"const": "parsed"}}},
+      "then": {"properties": {"raw_confidence_text": {"type": "string"}, "raw_parsed_confidence": {"type": "integer", "minimum": 0, "maximum": 100}, "normalized_confidence": {"type": "number", "minimum": 0, "maximum": 1}}},
+      "else": {"properties": {"normalized_confidence": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"confidence_parse_status": {"const": "out_of_range"}}},
+      "then": {"properties": {"raw_confidence_text": {"type": "string"}, "raw_parsed_confidence": {"type": "integer"}, "normalized_confidence": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"answer_token_status": {"const": "located"}}},
+      "then": {"properties": {"answer_token_index": {"type": "integer"}, "answer_token_id": {"type": "integer"}, "token_convention": {"type": "string", "minLength": 1}, "ad_token_ids": {"type": "array"}}},
+      "else": {"properties": {"answer_token_index": {"type": "null"}, "answer_token_id": {"type": "null"}, "token_convention": {"type": "null"}, "ad_token_ids": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"entropy_status": {"const": "computed"}}},
+      "then": {"properties": {"answer_token_status": {"const": "located"}, "ad_logits_float32": {"type": "array"}, "ad_probabilities_float32": {"type": "array"}, "answer_entropy_nats": {"type": "number"}, "full_vocabulary_answer_step_entropy_nats": {"type": "number"}, "maximum_ad_probability": {"type": "number"}}},
+      "else": {"properties": {"ad_logits_float32": {"type": "null"}, "ad_probabilities_float32": {"type": "null"}, "answer_entropy_nats": {"type": "null"}, "full_vocabulary_answer_step_entropy_nats": {"type": "null"}, "maximum_ad_probability": {"type": "null"}}}
+    }
+  ]
+}

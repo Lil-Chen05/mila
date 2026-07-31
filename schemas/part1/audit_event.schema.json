@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mila.example/schemas/part1/audit_event.schema.json",
+  "title": "Part 1 append-only audit event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_name", "schema_version", "event_id", "study_id", "model_run_id", "question_id", "run_id", "checkpoint_id", "attempt_id", "attempt_number", "event_sequence", "event_type", "event_timestamp", "execution_context", "outcome_category", "error_details", "retry_classification", "retry_decision", "backoff_seconds", "related_lock_owner", "terminal_record_id", "operator_reason"],
+  "properties": {
+    "schema_name": {"const": "part1_audit_event"},
+    "schema_version": {"const": "1.0.0"},
+    "event_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "study_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "model_run_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "question_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "run_id": {"type": "integer", "minimum": 0},
+    "checkpoint_id": {"type": ["string", "null"]},
+    "attempt_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "attempt_number": {"type": "integer", "minimum": 1, "maximum": 3},
+    "event_sequence": {"type": "integer", "minimum": 0},
+    "event_type": {"enum": ["attempt_started", "attempt_failed", "attempt_interrupted", "attempt_completed", "terminal_result_recovered", "stale_lock_recovered", "trailing_line_recovered", "operator_unlock"]},
+    "event_timestamp": {"type": "string", "format": "date-time"},
+    "execution_context": {"type": "object"},
+    "outcome_category": {"type": ["string", "null"]},
+    "error_details": {"type": ["object", "null"]},
+    "retry_classification": {"enum": ["retryable", "terminal", null]},
+    "retry_decision": {"enum": ["retry", "do_not_retry", "exhausted", null]},
+    "backoff_seconds": {"type": ["number", "null"], "minimum": 0},
+    "related_lock_owner": {"type": ["object", "null"]},
+    "terminal_record_id": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "operator_reason": {"type": ["string", "null"]}
+  },
+  "allOf": [
+    {"if": {"properties": {"event_type": {"const": "operator_unlock"}}}, "then": {"properties": {"operator_reason": {"type": "string", "minLength": 1}}}}
+  ]
+}

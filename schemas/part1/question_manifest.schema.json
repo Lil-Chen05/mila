@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mila.example/schemas/part1/question_manifest.schema.json",
+  "title": "Part 1 question manifest sidecar",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_name", "schema_version", "question_manifest_hash", "manifest_format_version", "source_repository", "source_revision", "source_config", "source_split", "subjects", "quota_per_subject", "total_count", "question_sampling_seed", "selection_algorithm_version", "canonicalization_version", "ordered_record_aggregation", "logical_filename"],
+  "properties": {
+    "schema_name": {"const": "part1_question_manifest"},
+    "schema_version": {"const": "1.0.0"},
+    "question_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "manifest_format_version": {"type": "string", "minLength": 1},
+    "source_repository": {"const": "cais/mmlu"},
+    "source_revision": {"type": "string", "minLength": 1},
+    "source_config": {"type": "string", "minLength": 1},
+    "source_split": {"const": "test"},
+    "subjects": {"const": ["high_school_mathematics", "high_school_physics", "high_school_chemistry", "high_school_biology", "high_school_psychology"]},
+    "quota_per_subject": {"const": 100},
+    "total_count": {"const": 500},
+    "question_sampling_seed": {"const": 42},
+    "selection_algorithm_version": {"type": "string", "minLength": 1},
+    "canonicalization_version": {"const": "part1-canonical-json-v1"},
+    "ordered_record_aggregation": {"type": "string", "minLength": 1},
+    "logical_filename": {"type": "string", "minLength": 1}
+  }
+}

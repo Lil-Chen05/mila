@@ -1,0 +1,27 @@
+{
+  "schema_name": "part1_analysis_config",
+  "config_version": "1.0.0",
+  "analysis_contract_version": "part1-analysis-v1",
+  "primary_target": "natural_correct",
+  "primary_auroc_feature_registry": [
+    "negative_mean_reasoning_entropy",
+    "negative_tail_reasoning_entropy",
+    "negative_answer_entropy_fraction_0.0",
+    "negative_answer_entropy_fraction_0.5",
+    "negative_answer_entropy_fraction_1.0",
+    "natural_verbalized_confidence",
+    "maximum_ad_probability_fraction_0.0",
+    "maximum_ad_probability_fraction_0.5",
+    "maximum_ad_probability_fraction_1.0",
+    "negative_answer_switch_count",
+    "negative_stabilization_fraction"
+  ],
+  "bootstrap_seed": 42,
+  "development_bootstrap_replicates": 1000,
+  "final_bootstrap_replicates": 5000,
+  "confidence_interval_percent": 95,
+  "minimum_valid_bootstrap_fraction": 0.95,
+  "ece_bins": 10,
+  "main_checkpoint_fractions": [0.0, 0.5, 1.0],
+  "all_checkpoint_fractions": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+}

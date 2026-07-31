@@ -1,0 +1,15 @@
+{
+  "schema_name": "part1_storage_config",
+  "config_version": "1.0.0",
+  "phase1_production_allowed": false,
+  "persistent_root_required": true,
+  "smoke_root": "results/part1-smoke",
+  "production_root": "results/part1",
+  "natural_shard_filename": "natural_results.jsonl",
+  "checkpoint_shard_filename": "checkpoint_results.jsonl",
+  "audit_filename": "audit_events.jsonl",
+  "validation_report_directory": "validation_reports",
+  "active_shards_append_only": true,
+  "immutable_after_finalization": true,
+  "ephemeral_roots_forbidden": ["$SLURM_TMPDIR", "/tmp", "/private/tmp"]
+}

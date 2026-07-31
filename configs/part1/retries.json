@@ -1,0 +1,25 @@
+{
+  "schema_name": "part1_retries_config",
+  "config_version": "1.0.0",
+  "max_total_attempts": 3,
+  "attempt_numbers": [1, 2, 3],
+  "retryable_categories": [
+    "interrupted_process",
+    "temporary_filesystem_failure",
+    "transient_worker_failure",
+    "transient_cuda_runtime_failure"
+  ],
+  "terminal_categories": [
+    "invalid_configuration",
+    "schema_incompatibility",
+    "manifest_incompatibility",
+    "tokenizer_preflight_incompatibility",
+    "deterministic_context_overflow",
+    "reproducible_cuda_oom",
+    "unsupported_model_or_tokenizer_behaviour",
+    "corrupt_immutable_manifest"
+  ],
+  "cuda_retry_requires_fresh_process": true,
+  "preserve_seed_and_logical_identity": true,
+  "backoff_seconds": [0, 30, 120]
+}

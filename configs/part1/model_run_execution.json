@@ -1,0 +1,26 @@
+{
+  "schema_name": "part1_model_run_execution_config",
+  "config_version": "1.0.0",
+  "mode": "smoke",
+  "production": false,
+  "model_repository": "HuggingFaceTB/SmolLM3-3B",
+  "model_revision": null,
+  "tokenizer_revision": null,
+  "thinking_mode": true,
+  "dtype": "bfloat16",
+  "batch_size": 1,
+  "natural_generation": {
+    "do_sample": true,
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 50,
+    "max_new_tokens": 8192,
+    "return_dict_in_generate": true,
+    "output_logits": true
+  },
+  "checkpoint_generation": {
+    "do_sample": false,
+    "max_new_tokens": 32
+  },
+  "immutable_revision_required_before_execution": true
+}

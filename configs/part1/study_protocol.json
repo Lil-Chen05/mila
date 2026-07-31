@@ -1,0 +1,20 @@
+{
+  "schema_name": "part1_study_protocol_config",
+  "config_version": "1.0.0",
+  "scientific_protocol_version": "part1-science-v1",
+  "question_sampling_seed": 42,
+  "base_generation_seed": 42,
+  "bootstrap_seed": 42,
+  "subjects": [
+    "high_school_mathematics",
+    "high_school_physics",
+    "high_school_chemistry",
+    "high_school_biology",
+    "high_school_psychology"
+  ],
+  "quota_per_subject": 100,
+  "natural_runs_per_question": 10,
+  "run_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+  "checkpoint_fractions": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+  "primary_target": "natural_correct"
+}

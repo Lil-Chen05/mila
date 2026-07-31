@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mila.example/schemas/part1/validation_report.schema.json",
+  "title": "Part 1 machine-readable validation report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_name", "schema_version", "validation_report_id", "study_id", "model_run_id", "model_run_manifest_hash", "validated_artifact_kind", "validated_artifact_identity", "validation_started_at", "validation_completed_at", "validator_version", "is_valid", "checks", "error_count", "warning_count", "summary"],
+  "properties": {
+    "schema_name": {"const": "part1_validation_report"},
+    "schema_version": {"const": "1.0.0"},
+    "validation_report_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "study_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "model_run_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "model_run_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "validated_artifact_kind": {"enum": ["question_manifest", "study_manifest", "model_run_manifest", "natural_shard", "checkpoint_shard", "audit_shard", "merged_results"]},
+    "validated_artifact_identity": {"type": "string", "minLength": 1},
+    "validation_started_at": {"type": "string", "format": "date-time"},
+    "validation_completed_at": {"type": "string", "format": "date-time"},
+    "validator_version": {"type": "string", "minLength": 1},
+    "is_valid": {"type": "boolean"},
+    "checks": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["name", "outcome", "details"], "properties": {"name": {"type": "string"}, "outcome": {"enum": ["passed", "failed", "warning"]}, "details": {"type": "object"}}}},
+    "error_count": {"type": "integer", "minimum": 0},
+    "warning_count": {"type": "integer", "minimum": 0},
+    "summary": {"type": "object"}
+  }
+}
