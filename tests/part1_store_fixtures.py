@@ -10,6 +10,7 @@ from part1_contract import (
     checkpoint_record_id,
     natural_record_id,
 )
+from part1_failure_policy import classify_failure
 
 
 STUDY_ID = "b" * 64
@@ -157,6 +158,20 @@ def checkpoint_result(*, attempt_number: int = 1, checkpoint_id: str = "cp-05") 
 def attempt_event(record: dict, event_type: str, sequence: int) -> dict:
     is_checkpoint = record["schema_name"] == "part1_checkpoint_terminal_result"
     record_id = record["checkpoint_record_id"] if is_checkpoint else record["raw_record_id"]
+    is_failure = event_type in {"attempt_failed", "attempt_interrupted"}
+    attempt_number = record["terminal_attempt_number"]
+    execution_outcome = record.get(
+        "natural_execution_outcome", record.get("checkpoint_execution_outcome")
+    )
+    terminal_completion = event_type == "attempt_completed" and (
+        execution_outcome == "terminal_infrastructure_failure"
+    )
+    terminal_category = (
+        record["terminal_error_details"]["category"] if terminal_completion else None
+    )
+    terminal_policy = (
+        classify_failure(terminal_category, attempt_number) if terminal_category else None
+    )
     event = {
         "schema_name": "part1_audit_event",
         "schema_version": "1.0.0",
@@ -174,10 +189,26 @@ def attempt_event(record: dict, event_type: str, sequence: int) -> dict:
         "event_type": event_type,
         "event_timestamp": "2026-07-31T00:00:00Z",
         "execution_context": {"hostname": "node", "pid": 123},
-        "outcome_category": None,
+        "outcome_category": terminal_category or (
+            "interrupted_process"
+            if event_type == "attempt_interrupted"
+            else "temporary_filesystem_failure" if event_type == "attempt_failed" else None
+        ),
         "error_details": None,
-        "retry_classification": None,
-        "retry_decision": None,
+        "retry_classification": (
+            terminal_policy.classification
+            if terminal_policy
+            else "retryable" if is_failure else None
+        ),
+        "retry_decision": (
+            terminal_policy.retry_decision
+            if terminal_policy
+            else "exhausted"
+            if is_failure and attempt_number == 3
+            else "retry"
+            if is_failure
+            else None
+        ),
         "backoff_seconds": None,
         "related_lock_owner": None,
         "terminal_record_id": record_id if event_type == "attempt_completed" else None,

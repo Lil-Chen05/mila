@@ -106,8 +106,10 @@ def test_duplicate_conflict_and_premature_terminal_failure_are_rejected(tmp_path
     for attempt_number in (1, 2):
         attempt = natural_result(attempt_number=attempt_number)
         failure_store.append_audit_event(attempt_event(attempt, "attempt_started", 0))
+        if attempt_number == 1:
+            failure_store.append_audit_event(attempt_event(attempt, "attempt_failed", 1))
     failure = natural_result(attempt_number=2, outcome="terminal_infrastructure_failure")
-    with pytest.raises(ValueError, match="attempt exhaustion"):
+    with pytest.raises(ValueError, match="exhaustion"):
         failure_store.append_terminal_result(failure)
 
     exhausted = natural_result(attempt_number=3, outcome="terminal_infrastructure_failure")
@@ -115,7 +117,127 @@ def test_duplicate_conflict_and_premature_terminal_failure_are_rejected(tmp_path
     for attempt_number in (1, 2, 3):
         attempt = natural_result(attempt_number=attempt_number)
         exhausted_store.append_audit_event(attempt_event(attempt, "attempt_started", 0))
+        if attempt_number < 3:
+            exhausted_store.append_audit_event(attempt_event(attempt, "attempt_failed", 1))
     exhausted_store.append_terminal_result(exhausted)
+
+
+def test_nonretryable_failure_terminalizes_current_attempt_without_fabricated_retries(
+    tmp_path: Path,
+) -> None:
+    shard = store(tmp_path)
+    failure = natural_result(attempt_number=1, outcome="terminal_infrastructure_failure")
+    failure["terminal_error_details"]["category"] = "invalid_configuration"
+    shard.append_audit_event(attempt_event(failure, "attempt_started", 0))
+    completion = attempt_event(failure, "attempt_completed", 1)
+    shard.commit_terminal_result(failure, completion)
+    assert len(shard.inspect().natural_results) == 1
+    stored_completion = shard.inspect().audit_events[-1]
+    assert stored_completion["outcome_category"] == "invalid_configuration"
+    assert stored_completion["retry_classification"] == "terminal"
+    assert stored_completion["retry_decision"] == "do_not_retry"
+
+
+def test_retryable_terminal_failure_requires_real_sequential_exhaustion(tmp_path: Path) -> None:
+    shard = store(tmp_path)
+    first = natural_result(attempt_number=1)
+    shard.append_audit_event(attempt_event(first, "attempt_started", 0))
+    premature = natural_result(attempt_number=1, outcome="terminal_infrastructure_failure")
+    with pytest.raises(ValueError, match="retryable.*attempt 3|exhaustion"):
+        shard.append_terminal_result(premature)
+
+    failed = attempt_event(first, "attempt_failed", 1)
+    failed.update(
+        outcome_category="temporary_filesystem_failure",
+        retry_classification="retryable",
+        retry_decision="retry",
+    )
+    shard.append_audit_event(failed)
+    third = natural_result(attempt_number=3)
+    with pytest.raises(ValueError, match="sequential|attempt 2"):
+        shard.append_audit_event(attempt_event(third, "attempt_started", 0))
+
+
+def test_failure_event_rejects_policy_metadata_inconsistent_with_category(tmp_path: Path) -> None:
+    shard = store(tmp_path)
+    result = natural_result()
+    shard.append_audit_event(attempt_event(result, "attempt_started", 0))
+    failed = attempt_event(result, "attempt_failed", 1)
+    failed.update(
+        outcome_category="invalid_configuration",
+        retry_classification="retryable",
+        retry_decision="retry",
+    )
+    with pytest.raises(ValueError, match="retry classification|retry decision|policy"):
+        shard.append_audit_event(failed)
+
+
+def test_read_only_index_flags_persisted_failure_policy_mismatch(tmp_path: Path) -> None:
+    shard = store(tmp_path)
+    result = natural_result()
+    started = attempt_event(result, "attempt_started", 0)
+    failed = attempt_event(result, "attempt_failed", 1)
+    failed.update(
+        outcome_category="invalid_configuration",
+        retry_classification="retryable",
+        retry_decision="retry",
+    )
+    shard.root.mkdir(parents=True)
+    shard.audit_events_path.write_text(
+        "".join(
+            json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
+            for event in (started, failed)
+        ),
+        encoding="utf-8",
+    )
+    index = shard.build_index()
+    assert any("failure policy" in error for error in index.lifecycle_errors)
+    report = shard.validate_shard(
+        artifact_kind="natural_shard",
+        started_at="2026-07-31T00:00:00Z",
+        completed_at="2026-07-31T00:00:01Z",
+    )
+    assert report["is_valid"] is False
+
+
+def test_read_only_index_flags_terminal_completion_policy_mismatch(tmp_path: Path) -> None:
+    shard = store(tmp_path)
+    result = natural_result(attempt_number=1, outcome="terminal_infrastructure_failure")
+    result["terminal_error_details"]["category"] = "invalid_configuration"
+    started = attempt_event(result, "attempt_started", 0)
+    completion = attempt_event(result, "attempt_completed", 1)
+    completion.update(
+        outcome_category="temporary_filesystem_failure",
+        retry_classification="retryable",
+        retry_decision="retry",
+    )
+    _write_synthetic_raw_terminal(shard, result)
+    shard.audit_events_path.write_text(
+        "".join(
+            json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
+            for event in (started, completion)
+        ),
+        encoding="utf-8",
+    )
+    index = shard.build_index()
+    assert any("completion failure policy" in error for error in index.lifecycle_errors)
+
+
+def test_read_only_index_flags_nonsequential_persisted_attempt_numbers(tmp_path: Path) -> None:
+    shard = store(tmp_path)
+    third = natural_result(attempt_number=3)
+    shard.root.mkdir(parents=True)
+    shard.audit_events_path.write_text(
+        json.dumps(
+            attempt_event(third, "attempt_started", 0),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    index = shard.build_index()
+    assert any("nonsequential" in error for error in index.lifecycle_errors)
 
 
 @pytest.mark.parametrize(
@@ -185,13 +307,13 @@ def test_completion_without_result_and_orphan_started_attempt_are_interrupted_an
     shard.append_audit_event(attempt_event(missing_result, "attempt_started", 0))
     shard.append_audit_event(attempt_event(missing_result, "attempt_completed", 1))
 
-    checkpoint = checkpoint_result(attempt_number=2)
+    checkpoint = checkpoint_result(attempt_number=1)
     shard.append_audit_event(attempt_event(checkpoint, "attempt_started", 0))
     index = shard.build_index()
     natural_key = (STUDY_ID, MODEL_RUN_ID, QUESTION_ID, 0)
     checkpoint_key = (STUDY_ID, MODEL_RUN_ID, QUESTION_ID, 0, "cp-05")
     assert index.attempts_consumed[natural_key] == frozenset({1})
-    assert index.attempts_consumed[checkpoint_key] == frozenset({2})
+    assert index.attempts_consumed[checkpoint_key] == frozenset({1})
     assert len(index.inconsistent_completion_attempt_ids) == 1
     assert len(index.orphaned_attempt_ids) == 1
     assert natural_key not in index.completed_keys

@@ -14,7 +14,7 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from part1_contract import (
     attempt_id,
@@ -24,13 +24,17 @@ from part1_contract import (
     natural_record_id,
     validate_instance,
 )
+from part1_failure_policy import (
+    MAX_TOTAL_ATTEMPTS,
+    RETRYABLE_CATEGORIES,
+    classify_failure,
+    validate_failure_event_policy,
+)
 
 
 STORE_VERSION = "part1-store-v1"
 VALIDATOR_VERSION = "part1-shard-validator-v1"
 VALIDATION_REPORT_IDENTITY_VERSION = "part1-validation-report-identity-v1"
-MAX_TOTAL_ATTEMPTS = 3
-
 STREAM_FILES = {
     "natural_results": "natural_results.jsonl",
     "checkpoint_results": "checkpoint_results.jsonl",
@@ -197,12 +201,14 @@ class Part1ShardStore:
         study_id: str,
         model_run_id: str,
         model_run_manifest_hash: str,
+        mutation_guard: Callable[[], None] | None = None,
     ) -> None:
         self.root = Path(root)
         self.shard_id = shard_id
         self.study_id = study_id
         self.model_run_id = model_run_id
         self.model_run_manifest_hash = model_run_manifest_hash
+        self._mutation_guard = mutation_guard
         self.natural_results_path = self.root / STREAM_FILES["natural_results"]
         self.checkpoint_results_path = self.root / STREAM_FILES["checkpoint_results"]
         self.audit_events_path = self.root / STREAM_FILES["audit_events"]
@@ -217,6 +223,10 @@ class Part1ShardStore:
     def _assert_active(self) -> None:
         if self.finalization_path.exists():
             raise FinalizedShardError(f"shard {self.shard_id} is finalized and immutable")
+
+    def _assert_mutation_authorized(self) -> None:
+        if self._mutation_guard is not None:
+            self._mutation_guard()
 
     def _assert_provenance(self, record: Mapping[str, Any]) -> None:
         if record["study_id"] != self.study_id:
@@ -425,6 +435,7 @@ class Part1ShardStore:
             if existing != dict(event):
                 raise Part1StoreError("existing recovery journal has conflicting evidence")
             return path
+        self._assert_mutation_authorized()
         self._durable_create(path, payload)
         return path
 
@@ -484,6 +495,32 @@ class Part1ShardStore:
             ):
                 return record
         return None
+
+    @staticmethod
+    def _validate_completion_event_policy(
+        event: Mapping[str, Any], record: Mapping[str, Any]
+    ) -> None:
+        outcome = record.get(
+            "natural_execution_outcome", record.get("checkpoint_execution_outcome")
+        )
+        if outcome == "terminal_infrastructure_failure":
+            details = record.get("terminal_error_details")
+            category = details.get("category") if isinstance(details, Mapping) else None
+            if not isinstance(category, str):
+                raise ValueError("terminal completion requires a failure category")
+            expected = classify_failure(category, int(event["attempt_number"]))
+            if event.get("outcome_category") != category:
+                raise ValueError("completion failure category differs from terminal result")
+            if event.get("retry_classification") != expected.classification:
+                raise ValueError("completion failure policy classification is inconsistent")
+            if event.get("retry_decision") != expected.retry_decision:
+                raise ValueError("completion failure policy retry decision is inconsistent")
+            return
+        if any(
+            event.get(field) is not None
+            for field in ("outcome_category", "retry_classification", "retry_decision")
+        ):
+            raise ValueError("successful completion must not carry failure policy fields")
 
     def _consumed_attempts(self, logical_key: LogicalKey) -> set[int]:
         parsed = self._assert_stream_appendable("audit_events")
@@ -548,15 +585,49 @@ class Part1ShardStore:
             )
         if outcome == "terminal_infrastructure_failure":
             consumed = self._consumed_attempts(logical_key)
-            if consumed != set(range(1, MAX_TOTAL_ATTEMPTS + 1)):
+            terminal_attempt = int(record["terminal_attempt_number"])
+            expected_consumed = set(range(1, terminal_attempt + 1))
+            if consumed != expected_consumed:
                 raise ValueError(
-                    "terminal infrastructure failure requires actual attempt exhaustion "
-                    "with attempt_started events 1, 2, and 3"
+                    "terminal infrastructure failure requires sequential attempt_started "
+                    f"events 1 through {terminal_attempt}"
                 )
+            details = record.get("terminal_error_details")
+            category = details.get("category") if isinstance(details, Mapping) else None
+            if not isinstance(category, str):
+                raise ValueError("terminal infrastructure failure requires a failure category")
+            classify_failure(category, terminal_attempt)
+            if category in RETRYABLE_CATEGORIES and terminal_attempt != MAX_TOTAL_ATTEMPTS:
+                raise ValueError("retryable terminal failure requires exhaustion at attempt 3")
+
+            for earlier_number in range(1, terminal_attempt):
+                earlier_events = [
+                    event
+                    for event in audit_records
+                    if event["event_scope"] == "attempt"
+                    and _event_logical_key(event) == logical_key
+                    and event["attempt_number"] == earlier_number
+                ]
+                terminal_events = [
+                    event
+                    for event in earlier_events
+                    if event["event_type"] in {"attempt_failed", "attempt_interrupted"}
+                ]
+                if len(terminal_events) != 1:
+                    raise ValueError(
+                        f"attempt {earlier_number} must be coherently closed before terminalization"
+                    )
+                validate_failure_event_policy(terminal_events[0])
+                if terminal_events[0]["retry_decision"] != "retry":
+                    raise ValueError(
+                        f"attempt {earlier_number} did not authorize a subsequent retry"
+                    )
         return stream_name
 
     def append_terminal_result(self, record: Mapping[str, Any]) -> None:
+        self._assert_mutation_authorized()
         stream_name = self._preflight_terminal_result(record)
+        self._assert_mutation_authorized()
         self._durable_append(self.stream_paths[stream_name], _json_line_bytes(record))
 
     def _validate_audit_event_against_records(
@@ -610,10 +681,49 @@ class Part1ShardStore:
             if event_type == "attempt_started":
                 if attempt_has_terminal_result:
                     raise ValueError("attempt_started cannot be appended after a terminal result")
+                logical_key = _event_logical_key(event)
+                if any(_logical_key(record) == logical_key for record in candidate_records):
+                    raise ValueError("attempt_started cannot follow a terminal result for the key")
                 if same_attempt:
                     raise ValueError("attempt_started must be the first and only start event")
                 if event["event_sequence"] != 0:
                     raise ValueError("attempt_started must use event_sequence 0")
+                prior_attempts = {
+                    int(existing["attempt_number"])
+                    for existing in existing_records
+                    if existing["event_scope"] == "attempt"
+                    and _event_logical_key(existing) == logical_key
+                    and existing["event_type"] == "attempt_started"
+                }
+                expected_prior = set(range(1, int(event["attempt_number"])))
+                if prior_attempts != expected_prior:
+                    raise ValueError(
+                        "attempt_started numbers must be sequential; "
+                        f"attempt {event['attempt_number']} requires prior attempts "
+                        f"{sorted(expected_prior)}"
+                    )
+                for prior_number in sorted(prior_attempts):
+                    prior_events = [
+                        existing
+                        for existing in existing_records
+                        if existing["event_scope"] == "attempt"
+                        and _event_logical_key(existing) == logical_key
+                        and existing["attempt_number"] == prior_number
+                    ]
+                    closures = [
+                        existing
+                        for existing in prior_events
+                        if existing["event_type"] in {"attempt_failed", "attempt_interrupted"}
+                    ]
+                    if len(closures) != 1:
+                        raise ValueError(
+                            f"attempt {prior_number} must be coherently closed before retry"
+                        )
+                    validate_failure_event_policy(closures[0])
+                    if closures[0]["retry_decision"] != "retry":
+                        raise ValueError(
+                            f"attempt {prior_number} policy does not authorize retry"
+                        )
                 return
             if not started:
                 raise ValueError(f"{event_type} requires prior attempt_started evidence")
@@ -649,7 +759,10 @@ class Part1ShardStore:
                 # prospective_terminal and therefore requires an exact match.
                 if prospective_terminal is not None and matching_record is None:
                     raise ValueError("attempt_completed must match the proposed terminal result")
+                if matching_record is not None:
+                    self._validate_completion_event_policy(event, matching_record)
             elif event_type == "attempt_interrupted":
+                validate_failure_event_policy(dict(event))
                 if attempt_has_terminal_result:
                     raise ValueError("attempt interruption cannot follow a terminal result")
                 if prior_terminal:
@@ -662,6 +775,7 @@ class Part1ShardStore:
                     if not completion_without_result:
                         raise ValueError("attempt already has a conflicting terminal lifecycle event")
             elif event_type == "attempt_failed":
+                validate_failure_event_policy(dict(event))
                 if attempt_has_terminal_result:
                     raise ValueError("attempt failure cannot follow a terminal result")
                 if prior_terminal:
@@ -683,7 +797,9 @@ class Part1ShardStore:
         )
 
     def append_audit_event(self, event: Mapping[str, Any]) -> None:
+        self._assert_mutation_authorized()
         self._preflight_audit_event(event)
+        self._assert_mutation_authorized()
         self._durable_append(self.audit_events_path, _json_line_bytes(event))
 
     def _validate_commit_pair(
@@ -721,6 +837,7 @@ class Part1ShardStore:
     ) -> None:
         """Publish a terminal record before its completion event, fsyncing both."""
 
+        self._assert_mutation_authorized()
         if fault_at is not None and fault_at not in FAULT_BOUNDARIES:
             raise ValueError(f"unknown fault boundary: {fault_at}")
         self._assert_active()
@@ -734,6 +851,7 @@ class Part1ShardStore:
             else "checkpoint_results"
         )
         if fault_at == "during_result_append":
+            self._assert_mutation_authorized()
             self._durable_partial_append(self.stream_paths[result_stream], _json_line_bytes(record))
             raise InjectedCrash(fault_at)
 
@@ -743,6 +861,7 @@ class Part1ShardStore:
 
         if fault_at == "during_completion_event_append":
             self._assert_stream_appendable("audit_events")
+            self._assert_mutation_authorized()
             self._durable_partial_append(self.audit_events_path, _json_line_bytes(completion_event))
             raise InjectedCrash(fault_at)
 
@@ -790,9 +909,10 @@ class Part1ShardStore:
             if attempt_events and event["event_sequence"] <= attempt_events[-1]["event_sequence"]:
                 raise ValueError("event_sequence must increase in physical audit order")
             attempt_events.append(event)
-            attempts_consumed_sets.setdefault(_event_logical_key(event), set()).add(
-                event["attempt_number"]
-            )
+            if event["event_type"] == "attempt_started":
+                attempts_consumed_sets.setdefault(_event_logical_key(event), set()).add(
+                    event["attempt_number"]
+                )
 
         events_by_attempt = {
             attempt_id_value: tuple(sorted(events, key=lambda item: item["event_sequence"]))
@@ -826,6 +946,13 @@ class Part1ShardStore:
         inconsistent_completion: set[str] = set()
         orphaned: set[str] = set()
         lifecycle_errors: list[str] = []
+        for logical_key, attempt_numbers in attempts_consumed_sets.items():
+            expected = set(range(1, max(attempt_numbers) + 1))
+            if attempt_numbers != expected:
+                lifecycle_errors.append(
+                    f"logical key {logical_key!r} has nonsequential started attempts "
+                    f"{sorted(attempt_numbers)}"
+                )
         for attempt_id_value, events in events_by_attempt.items():
             event_types = {event["event_type"] for event in events}
             interrupted = "attempt_interrupted" in event_types
@@ -885,6 +1012,24 @@ class Part1ShardStore:
                         f"attempt {attempt_id_value} event {event['event_type']} "
                         "requires a terminal record reference"
                     )
+                if event["event_type"] in {"attempt_failed", "attempt_interrupted"}:
+                    try:
+                        validate_failure_event_policy(event)
+                    except ValueError as exc:
+                        lifecycle_errors.append(
+                            f"attempt {attempt_id_value} failure policy is inconsistent: {exc}"
+                        )
+                if (
+                    event["event_type"] == "attempt_completed"
+                    and attempt_record is not None
+                    and event_matches_terminal(event)
+                ):
+                    try:
+                        self._validate_completion_event_policy(event, attempt_record)
+                    except ValueError as exc:
+                        lifecycle_errors.append(
+                            f"attempt {attempt_id_value} completion failure policy is inconsistent: {exc}"
+                        )
             terminal_types_in_order = [event["event_type"] for event in terminals]
             matching_terminals = [event_matches_terminal(event) for event in terminals]
             coherent = False
@@ -943,8 +1088,13 @@ class Part1ShardStore:
         event_timestamp: str,
         execution_context: Mapping[str, Any],
         terminal_record_id: str | None,
-        outcome_category: str,
+        outcome_category: str | None,
     ) -> dict[str, Any]:
+        failure_policy = (
+            classify_failure("interrupted_process", int(source_event["attempt_number"]))
+            if event_type == "attempt_interrupted"
+            else None
+        )
         return {
             "schema_name": "part1_audit_event",
             "schema_version": "1.0.0",
@@ -962,10 +1112,12 @@ class Part1ShardStore:
             "event_type": event_type,
             "event_timestamp": event_timestamp,
             "execution_context": dict(execution_context),
-            "outcome_category": outcome_category,
-            "error_details": None,
-            "retry_classification": None,
-            "retry_decision": None,
+            "outcome_category": "interrupted_process" if failure_policy else outcome_category,
+            "error_details": {"interruption_reason": outcome_category}
+            if failure_policy
+            else None,
+            "retry_classification": failure_policy.classification if failure_policy else None,
+            "retry_decision": failure_policy.retry_decision if failure_policy else None,
             "backoff_seconds": None,
             "related_lock_owner": None,
             "terminal_record_id": terminal_record_id,
@@ -981,6 +1133,7 @@ class Part1ShardStore:
     ) -> list[dict[str, Any]]:
         """Append recovery evidence for authoritative results and interrupted attempts."""
 
+        self._assert_mutation_authorized()
         self._assert_active()
         index = self.build_index()
         appended: list[dict[str, Any]] = []
@@ -1011,8 +1164,19 @@ class Part1ShardStore:
                     event_timestamp=event_timestamp,
                     execution_context=execution_context,
                     terminal_record_id=record_id_value,
-                    outcome_category="recovered_completion",
+                    outcome_category=None,
                 )
+                outcome = record.get(
+                    "natural_execution_outcome", record.get("checkpoint_execution_outcome")
+                )
+                if outcome == "terminal_infrastructure_failure":
+                    category = record["terminal_error_details"]["category"]
+                    policy = classify_failure(category, int(record["terminal_attempt_number"]))
+                    completion.update(
+                        outcome_category=category,
+                        retry_classification=policy.classification,
+                        retry_decision=policy.retry_decision,
+                    )
                 self.append_audit_event(completion)
                 appended.append(completion)
 
@@ -1052,6 +1216,7 @@ class Part1ShardStore:
     ) -> Path | None:
         """Durably journal and idempotently finish one final-line repair."""
 
+        self._assert_mutation_authorized()
         self._assert_active()
         if fault_at is not None and fault_at not in RECOVERY_FAULT_BOUNDARIES:
             raise ValueError(f"unknown recovery fault boundary: {fault_at}")
@@ -1141,6 +1306,7 @@ class Part1ShardStore:
                     if quarantine_path.read_bytes() != tail:
                         raise Part1StoreError("existing quarantine artifact has conflicting bytes")
                 else:
+                    self._assert_mutation_authorized()
                     self._durable_create(quarantine_path, tail)
             if fault_at == "before_recovery_evidence":
                 raise InjectedCrash(fault_at)
@@ -1175,6 +1341,7 @@ class Part1ShardStore:
             if not prefix_matches:
                 raise Part1StoreError("raw stream valid prefix differs from recovery evidence")
             if current_bytes == prefix + quarantined:
+                self._assert_mutation_authorized()
                 with path.open("r+b") as handle:
                     handle.truncate(valid_prefix_size)
                     handle.flush()
@@ -1186,6 +1353,7 @@ class Part1ShardStore:
                 len(current_bytes) == valid_prefix_size
                 and hashlib.sha256(current_bytes).hexdigest() == valid_prefix_hash
             ):
+                self._assert_mutation_authorized()
                 self._durable_append(path, b"\n")
             elif not (
                 len(current_bytes) == valid_prefix_size + 1
@@ -1208,12 +1376,14 @@ class Part1ShardStore:
                 raise Part1StoreError("main audit recovery evidence conflicts with journal")
         else:
             self._validate_audit_event_against_records(event, audit_parsed.records)
+            self._assert_mutation_authorized()
             self._durable_append(self.audit_events_path, _json_line_bytes(event))
         return quarantine_path
 
     def finish_pending_recoveries(self) -> list[str]:
         """Idempotently finish every durable recovery journal not yet in main audit."""
 
+        self._assert_mutation_authorized()
         self._assert_active()
         finished: list[str] = []
         for event in self._load_recovery_journal_events():
@@ -1465,12 +1635,14 @@ class Part1ShardStore:
         started_at: str,
         completed_at: str,
     ) -> dict[str, Any]:
+        self._assert_mutation_authorized()
         report = self.validate_shard(
             artifact_kind=artifact_kind,
             started_at=started_at,
             completed_at=completed_at,
         )
         report_path = Path(path)
+        self._assert_mutation_authorized()
         report_path.parent.mkdir(parents=True, exist_ok=True)
         with report_path.open("xb") as handle:
             handle.write(_json_line_bytes(report)[:-1])
@@ -1479,6 +1651,7 @@ class Part1ShardStore:
         return report
 
     def finalize(self) -> None:
+        self._assert_mutation_authorized()
         self._assert_active()
         now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         report = self.validate_shard(
@@ -1503,6 +1676,7 @@ class Part1ShardStore:
             "model_run_id": self.model_run_id,
             "finalized_at": now,
         }
+        self._assert_mutation_authorized()
         with self.finalization_path.open("xb") as handle:
             handle.write(_json_line_bytes(marker)[:-1])
             handle.flush()
