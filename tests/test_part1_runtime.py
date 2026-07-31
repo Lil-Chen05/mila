@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -1152,6 +1153,154 @@ def test_every_takeover_claim_state_is_resumable(tmp_path: Path, boundary: str) 
     completed.close()
 
 
+def test_atomic_exclusive_create_never_publishes_partial_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from part1_runtime import _exclusive_create
+
+    target = tmp_path / "claim.json"
+    payload = b'{"complete":true}'
+
+    def crash_before_publish(source: Path, destination: Path) -> None:
+        assert destination == target
+        assert Path(source).read_bytes() == payload
+        raise OSError("synthetic publish crash")
+
+    monkeypatch.setattr("part1_runtime.os.link", crash_before_publish)
+    with pytest.raises(OSError, match="synthetic publish crash"):
+        _exclusive_create(target, payload)
+    assert not target.exists()
+    orphan_temps = list(tmp_path.glob(".claim.json.*.tmp"))
+    assert orphan_temps and all(path.read_bytes() == payload for path in orphan_temps)
+
+
+def test_pending_replacement_file_is_reused_after_crash(tmp_path: Path) -> None:
+    from part1_runtime import InjectedTakeoverCrash, Liveness, LockedShardSession
+
+    old = _acquire(tmp_path, pid=101)
+    with pytest.raises(InjectedTakeoverCrash, match="after_pending"):
+        LockedShardSession.recover_stale(
+            old.store.root,
+            owner=_owner(pid=202),
+            model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+            worker_liveness=lambda metadata: Liveness.DEAD,
+            slurm_liveness=lambda metadata: Liveness.DEAD,
+            event_timestamp="2026-07-31T00:11:00Z",
+            execution_context={},
+            fault_at="after_pending_replacement_durable_before_replace",
+        )
+    assert list(old.store.root.glob(".*.pending"))
+    completed = LockedShardSession.finish_pending_takeover(
+        old.store.root,
+        worker_liveness=lambda metadata: Liveness.DEAD,
+        slurm_liveness=lambda metadata: Liveness.DEAD,
+    )
+    assert completed.store.inspect().audit_events[-1]["event_type"] == "stale_lock_recovered"
+    completed.close()
+
+
+def test_corrupt_pending_replacement_requires_operator_quarantine(
+    tmp_path: Path,
+) -> None:
+    from part1_runtime import (
+        InjectedTakeoverCrash,
+        Liveness,
+        LockedShardSession,
+        Part1RuntimeError,
+    )
+
+    old = _acquire(tmp_path, pid=101)
+    with pytest.raises(InjectedTakeoverCrash):
+        LockedShardSession.recover_stale(
+            old.store.root,
+            owner=_owner(pid=202),
+            model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+            worker_liveness=lambda metadata: Liveness.DEAD,
+            slurm_liveness=lambda metadata: Liveness.DEAD,
+            event_timestamp="2026-07-31T00:11:00Z",
+            execution_context={},
+            fault_at="after_pending_replacement_durable_before_replace",
+        )
+    pending = next(old.store.root.glob(".*.pending"))
+    pending.write_bytes(b"partial-conflict")
+    with pytest.raises(Part1RuntimeError, match="pending replacement"):
+        LockedShardSession.finish_pending_takeover(
+            old.store.root,
+            worker_liveness=lambda metadata: Liveness.DEAD,
+            slurm_liveness=lambda metadata: Liveness.DEAD,
+        )
+    assert pending.read_bytes() == b"partial-conflict"
+    completed = LockedShardSession.finish_pending_takeover(
+        old.store.root,
+        operator_override_reason="operator quarantined conflicting pending bytes",
+    )
+    event = completed.store.inspect().audit_events[-1]
+    assert event["event_type"] == "operator_unlock"
+    assert list((old.store.root / ".lock_history").glob("*.pending-quarantine"))
+    completed.close()
+
+
+def test_ordinary_post_replacement_error_preserves_resumable_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from part1_runtime import Liveness, LockedShardSession
+
+    old = _acquire(tmp_path, pid=101)
+    original = Part1ShardStore.finish_pending_recoveries
+    calls = 0
+
+    def fail_once(store):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("ordinary post-replacement validation error")
+        return original(store)
+
+    monkeypatch.setattr(Part1ShardStore, "finish_pending_recoveries", fail_once)
+    with pytest.raises(RuntimeError, match="ordinary post-replacement"):
+        LockedShardSession.recover_stale(
+            old.store.root,
+            owner=_owner(pid=202),
+            model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+            worker_liveness=lambda metadata: Liveness.DEAD,
+            slurm_liveness=lambda metadata: Liveness.DEAD,
+            event_timestamp="2026-07-31T00:11:00Z",
+            execution_context={},
+        )
+    assert (old.store.root / ".writer-lock-recovery.claim").exists()
+    completed = LockedShardSession.finish_pending_takeover(old.store.root)
+    events = [
+        event
+        for event in completed.store.inspect().audit_events
+        if event["event_type"] == "stale_lock_recovered"
+    ]
+    assert len(events) == 1
+    completed.close()
+
+
+def test_unjournaled_raw_tail_is_refused_before_irreversible_replacement(
+    tmp_path: Path,
+) -> None:
+    from part1_runtime import Liveness, LockedShardSession, Part1RuntimeError
+
+    old = _acquire(tmp_path, pid=101)
+    old.store.natural_results_path.write_bytes(b'{"partial"')
+    with pytest.raises(Part1RuntimeError, match="lack durable recovery evidence"):
+        LockedShardSession.recover_stale(
+            old.store.root,
+            owner=_owner(pid=202),
+            model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+            worker_liveness=lambda metadata: Liveness.DEAD,
+            slurm_liveness=lambda metadata: Liveness.DEAD,
+            event_timestamp="2026-07-31T00:11:00Z",
+            execution_context={},
+        )
+    old.assert_owned()
+    assert not (old.store.root / ".writer-lock-recovery.claim").exists()
+    assert not list(old.store.root.glob(".*.pending"))
+    old.close()
+
+
 def test_pending_stale_claim_can_be_operator_overridden_with_new_reason(tmp_path: Path) -> None:
     from part1_runtime import InjectedTakeoverCrash, Liveness, LockedShardSession
 
@@ -1618,3 +1767,223 @@ def test_dry_run_cli_reports_real_resume_and_fails_on_corrupt_shard(tmp_path: Pa
     corrupt = subprocess.run(command, cwd=repository, capture_output=True, text=True, check=False)
     assert corrupt.returncode != 0
     assert json.loads(corrupt.stdout)["is_valid"] is False
+
+
+def test_dry_run_rejects_work_or_retry_without_manifest_bound_shard(
+    tmp_path: Path,
+) -> None:
+    from part1_runtime import CompatibilityError, WorkSpec, run_dry_run
+
+    work = WorkSpec.natural(
+        STUDY_ID,
+        MODEL_RUN_ID,
+        MODEL_RUN_MANIFEST_HASH,
+        QUESTION_ID,
+        0,
+        seed=123,
+    )
+    with pytest.raises(CompatibilityError, match="work.*manifests.*shard"):
+        run_dry_run(
+            persistent_root=tmp_path / "smoke",
+            allow_root_override=True,
+            work_items=[work],
+        )
+    with pytest.raises(CompatibilityError, match="retry.*manifests.*shard"):
+        run_dry_run(
+            persistent_root=tmp_path / "smoke",
+            allow_root_override=True,
+            retry_request={
+                "work": work.to_dict(),
+                "category": "temporary_filesystem_failure",
+                "attempts_consumed": 1,
+            },
+        )
+
+
+def test_finalized_dry_run_keeps_completed_but_rejects_missing_work(
+    tmp_path: Path,
+) -> None:
+    from part1_contract import attempt_id, natural_record_id
+    from part1_runtime import LockMetadata, LockedShardSession, WorkSpec, run_dry_run
+
+    study, model = _compatible_manifests()
+    owner = LockMetadata.new(
+        study_id=study["study_id"],
+        model_run_id=model["model_run_id"],
+        shard_id=SHARD_ID,
+        hostname="synthetic-node",
+        pid=101,
+        slurm_job_id="job-17",
+        slurm_array_task_id="3",
+        acquired_at="2026-07-31T00:00:00Z",
+    )
+    session = LockedShardSession.acquire(
+        tmp_path / "shard",
+        owner=owner,
+        model_run_manifest_hash=model["model_run_manifest_hash"],
+    )
+    record = natural_result()
+    record.update(
+        study_id=study["study_id"],
+        model_run_id=model["model_run_id"],
+        model_run_manifest_hash=model["model_run_manifest_hash"],
+        question_manifest_hash=study["question_manifest_hash"],
+    )
+    record["raw_record_id"] = natural_record_id(
+        record["study_id"],
+        record["model_run_id"],
+        record["question_id"],
+        record["run_id"],
+    )
+    record["terminal_attempt_id"] = attempt_id(
+        record["study_id"],
+        record["model_run_id"],
+        record["question_id"],
+        record["run_id"],
+        record["terminal_attempt_number"],
+    )
+    session.store.append_audit_event(attempt_event(record, "attempt_started", 0))
+    session.store.commit_terminal_result(
+        record, attempt_event(record, "attempt_completed", 1)
+    )
+    session.store.finalize()
+    session.close()
+    completed = WorkSpec.natural(
+        record["study_id"],
+        record["model_run_id"],
+        record["model_run_manifest_hash"],
+        record["question_id"],
+        record["run_id"],
+        seed=record["generation_seed"],
+    )
+    missing = WorkSpec.natural(
+        record["study_id"],
+        record["model_run_id"],
+        record["model_run_manifest_hash"],
+        "1" * 64,
+        0,
+        seed=456,
+    )
+    completed_only = run_dry_run(
+        persistent_root=tmp_path / "smoke",
+        allow_root_override=True,
+        study_manifest=study,
+        model_run_manifest=model,
+        shard_root=session.store.root,
+        work_items=[completed],
+    )
+    assert completed_only["is_valid"] is True
+    assert completed_only["resume_plan"][0]["status"] == "completed"
+    report = run_dry_run(
+        persistent_root=tmp_path / "smoke",
+        allow_root_override=True,
+        study_manifest=study,
+        model_run_manifest=model,
+        shard_root=session.store.root,
+        work_items=[completed, missing],
+    )
+    decisions = {item["work"]["question_id"]: item for item in report["resume_plan"]}
+    assert decisions[completed.question_id]["status"] == "completed"
+    assert decisions[missing.question_id]["status"] == "ineligible"
+    assert decisions[missing.question_id]["reason"] == "finalized_shard"
+    assert report["is_valid"] is False
+    study_path = tmp_path / "study.json"
+    model_path = tmp_path / "model.json"
+    work_path = tmp_path / "finalized-work.json"
+    study_path.write_text(json.dumps(study), encoding="utf-8")
+    model_path.write_text(json.dumps(model), encoding="utf-8")
+    work_path.write_text(json.dumps([missing.to_dict()]), encoding="utf-8")
+    cli = subprocess.run(
+        [
+            sys.executable,
+            "scripts/part1_dry_run.py",
+            "--persistent-root",
+            str(tmp_path / "smoke"),
+            "--study-manifest",
+            str(study_path),
+            "--model-run-manifest",
+            str(model_path),
+            "--shard-root",
+            str(session.store.root),
+            "--work-specs",
+            str(work_path),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert cli.returncode != 0
+    assert json.loads(cli.stdout)["is_valid"] is False
+
+
+def test_posix_flock_blocks_takeover_in_a_second_process(tmp_path: Path) -> None:
+    repository = Path(__file__).resolve().parents[1]
+    old = _acquire(tmp_path, pid=101)
+    ready = tmp_path / "holder-ready"
+    release = tmp_path / "holder-release"
+    completed = tmp_path / "takeover-completed"
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(repository / "scripts")
+    holder_code = """
+from pathlib import Path
+import sys, time
+from part1_runtime import MutationController
+root, ready, release = map(Path, sys.argv[1:])
+with MutationController(root).section():
+    ready.write_text('ready', encoding='utf-8')
+    deadline = time.monotonic() + 5
+    while not release.exists():
+        if time.monotonic() >= deadline:
+            raise SystemExit(3)
+        time.sleep(0.01)
+"""
+    holder = subprocess.Popen(
+        [sys.executable, "-c", holder_code, str(old.store.root), str(ready), str(release)],
+        cwd=repository,
+        env=environment,
+    )
+    deadline = time.monotonic() + 5
+    while not ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ready.exists()
+    takeover_code = """
+from pathlib import Path
+import sys
+from part1_runtime import Liveness, LockMetadata, LockedShardSession
+root, completed = map(Path, sys.argv[1:3])
+study_id, model_run_id, manifest_hash, shard_id = sys.argv[3:7]
+owner = LockMetadata.new(
+    study_id=study_id, model_run_id=model_run_id, shard_id=shard_id,
+    hostname='replacement-node', pid=202, slurm_job_id='job-18',
+    slurm_array_task_id='4', acquired_at='2026-07-31T00:10:00Z')
+session = LockedShardSession.recover_stale(
+    root, owner=owner, model_run_manifest_hash=manifest_hash,
+    worker_liveness=lambda metadata: Liveness.DEAD,
+    slurm_liveness=lambda metadata: Liveness.DEAD,
+    event_timestamp='2026-07-31T00:10:00Z', execution_context={})
+completed.write_text('completed', encoding='utf-8')
+session.close()
+"""
+    takeover = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            takeover_code,
+            str(old.store.root),
+            str(completed),
+            STUDY_ID,
+            MODEL_RUN_ID,
+            MODEL_RUN_MANIFEST_HASH,
+            SHARD_ID,
+        ],
+        cwd=repository,
+        env=environment,
+    )
+    time.sleep(0.2)
+    assert takeover.poll() is None
+    assert not completed.exists()
+    release.write_text("release", encoding="utf-8")
+    assert holder.wait(timeout=5) == 0
+    assert takeover.wait(timeout=5) == 0
+    assert completed.read_text(encoding="utf-8") == "completed"

@@ -250,8 +250,11 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _exclusive_create(path: Path, payload: bytes) -> None:
+    """Publish complete bytes without ever exposing a partial target path."""
+
+    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    descriptor = os.open(path, flags, 0o600)
+    descriptor = os.open(temporary, flags, 0o600)
     try:
         with os.fdopen(descriptor, "wb", closefd=False) as handle:
             handle.write(payload)
@@ -259,6 +262,14 @@ def _exclusive_create(path: Path, payload: bytes) -> None:
             os.fsync(handle.fileno())
     finally:
         os.close(descriptor)
+    try:
+        os.link(temporary, path)
+    except FileExistsError:
+        temporary.unlink()
+        _fsync_directory(path.parent)
+        raise
+    _fsync_directory(path.parent)
+    temporary.unlink()
     _fsync_directory(path.parent)
 
 
@@ -485,6 +496,7 @@ class LockedShardSession:
             None,
             "after_claim_creation_before_liveness",
             "after_verified_evidence_before_replacement",
+            "after_pending_replacement_durable_before_replace",
             "after_lock_replacement_before_event",
             "during_takeover_event_append",
             "after_event_before_claim_cleanup",
@@ -549,8 +561,18 @@ class LockedShardSession:
             except InjectedTakeoverCrash:
                 raise
             except Exception:
-                # Refusal/errors leave permanent history but release the active claim.
-                if claim_path.exists():
+                # Only a wholly reversible refusal may release the active claim.
+                # Once pending replacement bytes or a replacement lock exist,
+                # the claim is the durable handle needed to finish the takeover.
+                pending_path = root / f".{LOCK_FILENAME}.{owner.lock_id}.pending"
+                reversible = False
+                if not pending_path.exists():
+                    try:
+                        current, current_raw = _read_lock(lock_path)
+                        reversible = current == previous and current_raw == previous_raw
+                    except Part1RuntimeError:
+                        reversible = False
+                if reversible and claim_path.exists():
                     claim_path.unlink()
                     _fsync_directory(root)
                 raise
@@ -667,10 +689,59 @@ class LockedShardSession:
                     raise StaleRecoveryRefused(
                         "automatic recovery refused: liveness is uncertain"
                     )
+            preflight_store = Part1ShardStore(
+                root,
+                shard_id=owner.shard_id,
+                study_id=owner.study_id,
+                model_run_id=owner.model_run_id,
+                model_run_manifest_hash=claim_value["model_run_manifest_hash"],
+            )
+            preflight_inspection = preflight_store.inspect()
+            incomplete_streams = set(preflight_inspection.trailing_tails) | set(
+                preflight_inspection.unterminated_streams
+            )
+            if incomplete_streams:
+                journal_streams = {
+                    event["error_details"]["stream"]
+                    for event in preflight_store._load_recovery_journal_events()
+                }
+                uncovered = incomplete_streams.difference(journal_streams)
+                if uncovered:
+                    raise Part1RuntimeError(
+                        "unrecovered raw tails lack durable recovery evidence before "
+                        f"takeover: {sorted(uncovered)}"
+                    )
             if fault_at == "after_verified_evidence_before_replacement":
                 raise InjectedTakeoverCrash(fault_at)
             pending_path = root / f".{LOCK_FILENAME}.{owner.lock_id}.pending"
-            _exclusive_create(pending_path, _json_bytes(owner.to_dict()))
+            expected_pending = _json_bytes(owner.to_dict())
+            if pending_path.exists():
+                actual_pending = pending_path.read_bytes()
+                if actual_pending != expected_pending:
+                    if operator_override_reason is None:
+                        raise Part1RuntimeError(
+                            "pending replacement bytes conflict with durable claim; "
+                            "operator override is required"
+                        )
+                    history_directory = root / LOCK_HISTORY_DIRECTORY
+                    quarantine_path = (
+                        history_directory
+                        / f"{claim_value['claim_id']}.pending-quarantine"
+                    )
+                    if quarantine_path.exists():
+                        if quarantine_path.read_bytes() != actual_pending:
+                            raise Part1RuntimeError(
+                                "pending replacement quarantine conflicts with current bytes"
+                            )
+                    else:
+                        _exclusive_create(quarantine_path, actual_pending)
+                    pending_path.unlink()
+                    _fsync_directory(root)
+                    _exclusive_create(pending_path, expected_pending)
+            else:
+                _exclusive_create(pending_path, expected_pending)
+            if fault_at == "after_pending_replacement_durable_before_replace":
+                raise InjectedTakeoverCrash(fault_at)
             os.replace(pending_path, root / LOCK_FILENAME)
             _fsync_directory(root)
             current = owner
@@ -1176,6 +1247,7 @@ def run_dry_run(
     work_items: Iterable[WorkSpec] = (),
     retry_request: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    requested_work = tuple(work_items)
     configs = {name: load_config(name) for name in CONFIG_NAMES}
     storage = dict(configs["storage"])
     configured_smoke = Path(storage["smoke_root"] if smoke_root is None else smoke_root)
@@ -1203,6 +1275,14 @@ def run_dry_run(
         raise CompatibilityError("study and model-run manifests must be supplied together")
     if study_manifest is not None and model_run_manifest is not None:
         manifest_report = validate_manifest_compatibility(study_manifest, model_run_manifest)
+    if requested_work and (manifest_report is None or shard_root is None):
+        raise CompatibilityError(
+            "work specs require compatible manifests and a manifest-bound shard"
+        )
+    if retry_request is not None and (manifest_report is None or shard_root is None):
+        raise CompatibilityError(
+            "retry request requires compatible manifests and a manifest-bound shard"
+        )
 
     shard_report: dict[str, Any] | None = None
     if shard_root is not None:
@@ -1263,10 +1343,23 @@ def run_dry_run(
         index = None
         if not inspection.trailing_tails and not inspection.unterminated_streams:
             index = shard.build_index()
-        decisions = plan_resume(index, work_items) if index is not None else {}
+        decisions = plan_resume(index, requested_work) if index is not None else {}
         lock_path = Path(shard_root) / LOCK_FILENAME
         lock_owner = _read_lock(lock_path)[0].to_dict() if lock_path.exists() else None
         history_directory = Path(shard_root) / LOCK_HISTORY_DIRECTORY
+        finalized = shard.finalization_path.exists()
+        finalized_blocked_work = False
+        if finalized:
+            for work, decision in tuple(decisions.items()):
+                if decision.status not in {"completed", "terminal"}:
+                    finalized_blocked_work = True
+                    decisions[work] = ResumeDecision(
+                        work=work,
+                        status="ineligible",
+                        reason="finalized_shard",
+                        attempts_consumed=decision.attempts_consumed,
+                        next_attempt_number=None,
+                    )
         shard_report = {
             "trailing_line_recovery_required": sorted(
                 set(inspection.trailing_tails) | set(inspection.unterminated_streams)
@@ -1295,7 +1388,8 @@ def run_dry_run(
             )
             if history_directory.exists()
             else [],
-            "finalized": shard.finalization_path.exists(),
+            "finalized": finalized,
+            "finalized_blocked_work": finalized_blocked_work,
         }
     else:
         decisions = {}
@@ -1303,6 +1397,14 @@ def run_dry_run(
     retry_plan = None
     if retry_request is not None:
         retry_work = WorkSpec.from_mapping(retry_request["work"])
+        assert manifest_report is not None and shard_root is not None
+        if (
+            retry_work.study_id != manifest_report["study_id"]
+            or retry_work.model_run_id != manifest_report["model_run_id"]
+            or retry_work.model_run_manifest_hash
+            != manifest_report["model_run_manifest_hash"]
+        ):
+            raise CompatibilityError("retry work identity differs from manifest-bound shard")
         retry_plan = asdict(
             plan_retry(
                 retry_work,
@@ -1310,9 +1412,19 @@ def run_dry_run(
                 attempts_consumed=int(retry_request["attempts_consumed"]),
             )
         )
+        retry_plan["eligible"] = not bool(
+            shard_report is not None and shard_report["finalized"]
+        )
 
     return {
-        "is_valid": shard_report is None or bool(shard_report["validation"]["is_valid"]),
+        "is_valid": (
+            shard_report is None
+            or (
+                bool(shard_report["validation"]["is_valid"])
+                and not shard_report["finalized_blocked_work"]
+                and not (retry_plan is not None and not retry_plan["eligible"])
+            )
+        ),
         "mode": mode,
         "config": config_report,
         "schemas_validated": sorted(SCHEMA_NAMES),
