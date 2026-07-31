@@ -2,395 +2,343 @@
 
 ## Status and authority
 
-This is the Prompt 1 logical schema contract. It defines required information,
-status semantics, nullability, compatibility, and non-self-referential identity
-rules. It is not a claim that Phase 1 validators, canonical serializers, hashes,
-or immutable manifests already exist. They do not.
+Phase 1 implements this contract in `scripts/part1_contract.py`,
+`scripts/part1_store.py`, `scripts/part1_failure_policy.py`, and
+`scripts/part1_runtime.py`. Six versioned templates live under
+`configs/part1/`; eight JSON Schema Draft 2020-12 files live under
+`schemas/part1/`. Scientific meaning remains fixed by
+[DECISIONS.md](DECISIONS.md), operations by [RUNBOOK.md](RUNBOOK.md), and
+evidence by [VALIDATION.md](VALIDATION.md).
 
-Phase 1 must convert this contract into executable schemas and golden tests and
-must lock the exact payload choices listed under
-[Phase 1 decisions to lock](#phase-1-decisions-to-lock). Phase 2 then creates
-the question and study manifests. Phase 3 creates the production model-run
-manifest. Scientific meanings come from [DECISIONS.md](DECISIONS.md); lifecycle
-ordering comes from [RUNBOOK.md](RUNBOOK.md).
+Schema and template availability is not concrete manifest availability. Phase 2
+still creates the tracked question and study manifests and resolves immutable
+dataset/model/tokenizer revisions. The production model-run-manifest schema
+exists, but no production instance exists; Phase 3 owns its post-commit
+lifecycle.
 
-Historical `results/20q` and `results/200q` JSON files use legacy, unversioned
-shapes. They are not compatible Part 1 raw records and must never be migrated by
+Historical 20q/200q JSON is legacy and incompatible. It must not be upgraded by
 silently filling missing provenance.
 
-## Common representation rules
+## Executable contract inventory
 
-- JSON/JSONL is the planned interchange format. All records are UTF-8.
-- Every object has an explicit schema-name field and `schema_version`.
-- Stable SHA-256 values are represented as lowercase hexadecimal after Phase 1
-  locks and tests that representation.
-- Scientific floating-point values are written without presentation rounding.
-  Non-finite JSON numbers are forbidden; unavailable values are JSON `null`.
-- Choice maps and vectors use the semantic order A, B, C, D.
-- Logical identity fields are required even when execution terminates in
-  infrastructure failure.
-- Timestamps and operational paths may be recorded for audit/operations but
-  never enter stable scientific identity payloads.
-- A shard contains records from exactly one `model_run_id` and one complete
-  model-run-manifest hash.
+All schema instances use `schema_version = "1.0.0"`.
 
-## Question records and question-manifest sidecar
-
-The planned tracked JSONL contains exactly 500 immutable question records in
-`sample_index` order.
-
-### Question record
-
-| Field | Type | Required | Contract |
-|---|---|---:|---|
-| `schema_name` | string | yes | Question-record schema discriminator. |
-| `schema_version` | string | yes | Version understood by the manifest sidecar. |
-| `question_id` | string | yes | Stable ID derived from the locked question identity payload. |
-| `question_content_hash` | string | yes | Hash of the complete canonical question content, excluding this hash. |
-| `sample_index` | integer | yes | Unique integer 0–499; defines global order. |
-| `subject` | string | yes | One of the five fixed subjects. |
-| `subject_selection_index` | integer | yes | Unique integer 0–99 in seeded selection order within the subject. |
-| `source_repository` | string | yes | `cais/mmlu`. |
-| `source_revision` | string | yes | Immutable dataset revision resolved in Phase 2. |
-| `source_config` | string | yes | Resolved MMLU configuration used for materialization. |
-| `source_split` | string | yes | `test`. |
-| `source_row_identity` | object | yes | Stable source-row locator sufficient to audit selection without using mutable row position alone. |
-| `question` | string | yes | Exact question text. |
-| `choices` | array[string] | yes | Exactly four choices in A–D order. |
-| `gold_index` | integer | yes | Integer 0–3. |
-| `gold_letter` | string | yes | A–D and consistent with `gold_index`. |
-
-`source_row_identity`'s exact members depend on the pinned MMLU artifact and are
-locked during Phase 2. Acceptance requires duplicate-content handling to be
-explicit: content equality must not accidentally merge distinct selected source
-rows.
-
-### Complete question-manifest sidecar
-
-Required fields are `schema_name`, `schema_version`, `question_manifest_hash`,
-manifest format/version, source repository/revision/config/split, ordered
-subjects, quota per subject, total count, question-sampling seed, selection
-algorithm version, canonicalization version, ordered-record aggregation rule,
-and the JSONL path or immutable logical filename.
-
-Filesystem paths and creation timestamps are descriptive/operational and do not
-enter scientific IDs. The complete manifest hash covers all immutable sidecar
-fields selected in Phase 1 plus the ordered question-record representation; it
-excludes `question_manifest_hash` itself.
-
-Validation requires exact subjects/order, five quotas of 100, 500 records,
-unique `sample_index`, unique logical question IDs, 0–3 gold values, four
-choices, and recomputed record/manifest hashes.
-
-## Study manifest
-
-The tracked study manifest is model-independent and requires:
-
-| Field | Required content |
+| Schema | Discriminator |
 |---|---|
-| `schema_name`, `schema_version` | Study-manifest schema discriminator/version. |
-| `study_id` | SHA-256 identity from the locked study identity payload. |
-| `study_manifest_hash` | Hash of the complete immutable manifest excluding this field. |
-| `question_manifest_hash` | Exact hash of the tracked 500-question manifest. |
-| `subjects`, `subject_quotas`, `question_sampling_seed` | Fixed five-subject design, 100 each, seed 42. |
-| `scientific_protocol_version` | Version covering the immutable experiment design. |
-| `checkpoint_fractions` | All eleven requested fractions in order. |
-| `checkpoint_placement_contract` | Ties-to-even rounding, clamp, actual fraction, and alias rules. |
-| `entropy_contract` | Float32, natural-log nats, raw pre-warper natural entropy, mean/tail, A–D and full-vocabulary checkpoint metrics. |
-| `natural_answer_validity_rule` | One terminal post-close block; answer/confidence paired from it. |
-| `status_contract_version` | Orthogonal execution/output status meanings. |
-| `calibration_contract` | Targets, bins, per-fraction rule, pooled/subject/macro reporting. |
-| `bootstrap_contract` | Seed 42, 1,000/5,000 replicates, stratification, multiplicity, validity threshold. |
-| `primary_auroc_feature_registry` | Exact eleven approved features, orientations, and `natural_correct` target. |
-| `within_question_analysis` | Eligibility and paired-difference definition. |
-| `switching_stabilization_contract` | Alias-, adjacency-, missingness-, appearance-, recovery-, and stabilization rules. |
-| `repetition_policy` | Preserve successful output; no automatic detector/exclusion/retry. |
-| `compatible_raw_record_schema_versions` | Explicit allow-list/range determined by executable compatibility tests. |
-| `analysis_contract_version` | Version required for combining and analyzing records. |
+| `question_record.schema.json` | `part1_question_record` |
+| `question_manifest.schema.json` | `part1_question_manifest` |
+| `study_manifest.schema.json` | `part1_study_manifest` |
+| `model_run_manifest.schema.json` | `part1_model_run_manifest` |
+| `natural_terminal_result.schema.json` | `part1_natural_terminal_result` |
+| `checkpoint_terminal_result.schema.json` | `part1_checkpoint_terminal_result` |
+| `audit_event.schema.json` | `part1_audit_event` |
+| `validation_report.schema.json` | `part1_validation_report` |
 
-The study identity payload is a deliberately smaller scientific subset of the
-complete manifest. Exact members and ordering are a Phase 1 decision; neither
-payload includes its own ID/hash or mutable operational fields.
+The six `1.0.0` templates are `study_protocol.json`,
+`model_run_execution.json`, `dataset_materialization.json`, `storage.json`,
+`retries.json`, and `analysis.json`. Validators reject drift from fixed science,
+retry policy, production prohibition, root separation, and persistent-root
+safety.
 
-## Model-run manifest
+Common rules:
 
-One immutable model-run manifest describes one exact model revision and adapter.
-It is operational, generated under ignored persistent results only after the
-final production commit in Phase 3.
+- JSON/JSONL is UTF-8; non-finite numbers are forbidden and unavailable values
+  are JSON `null`.
+- Scientific floats persist without presentation rounding.
+- A–D vectors are ordered A, B, C, D.
+- Terminal logical identity and provenance are required even for terminal
+  infrastructure failures.
+- One shard contains one study ID, model-run ID, complete
+  model-run-manifest hash, and shard ID, fixed by `.shard-provenance.json`.
+- Full-vocabulary logits and selected-token log probabilities are never stored.
 
-Required fields are:
+## Canonical serialization
 
-- `schema_name`, `schema_version`;
-- `model_run_id` and `model_run_manifest_hash`;
-- `study_id`, `study_manifest_hash`, and `question_manifest_hash`;
-- model repository and immutable model revision;
-- tokenizer repository, when distinct, and immutable tokenizer revision;
-- canonical model ID used by seed derivation;
-- adapter version;
-- semantic prompt version and immutable prompt representation/hash;
-- parser version;
-- inducer version, text, and token-ID sequence;
-- reasoning opening/closing tag text and token-ID sequences;
-- requested natural and checkpoint generation settings;
-- effective natural and checkpoint generation settings after
-  `GenerationConfig` resolution;
-- A–D token convention, raw token sequences, and selected single-token IDs or
-  the validated model-specific representation;
-- seed-algorithm version and base generation seed;
-- software/environment versions needed for reproduction, including Python,
-  PyTorch, Transformers, CUDA/driver/runtime where applicable, and model dtype;
-- final production Git commit;
-- production flag;
-- for non-production smoke only, base Git commit and diff hash when the code is
-  dirty;
-- persistent output locations and shard layout as operational fields.
+`part1-canonical-json-v1` produces the UTF-8 bytes of:
 
-The exact immutable model/tokenizer revisions, compute-node tag and A–D token
-preflight result, and requested-to-effective setting resolution are Phase 2
-decisions. A model-run manifest may not be constructed from mutable branch names
-or an unresolved model default.
+```json
+{"serialization_version":"part1-canonical-json-v1","value":<normalized-value>}
+```
 
-`model_run_id` covers the locked scientific/execution identity subset. The
-complete manifest hash covers all locked immutable manifest fields but excludes
-itself. Output paths, creation timestamp, validation/completion state, runtime
-statistics, and mutable notes are excluded from both stable identity payloads;
-they may be stored as operational metadata only if mutation does not rewrite an
-otherwise immutable manifest. Phase 1 must choose whether such mutable metadata
-lives in a separate state file; the acceptance criterion is that the immutable
-manifest never changes as work progresses.
+The implementation:
 
-## Logical raw natural-run record
+- recursively normalizes CRLF and bare CR to LF in all string values and object
+  keys;
+- rejects key collisions introduced by line-ending normalization;
+- recursively sorts object keys;
+- preserves list/tuple order;
+- uses compact separators `,` and `:` with no insignificant whitespace;
+- emits Unicode directly rather than ASCII escapes;
+- permits only JSON null, booleans, integers, finite floats, strings, arrays,
+  and string-keyed objects; and
+- emits no trailing whitespace or newline.
 
-Raw-record physical granularity is intentionally deferred to Phase 1. Whether
-one JSONL terminal record nests the natural run and all checkpoints, or whether
-natural and checkpoint terminal records are normalized, must not change the
-following logical content and cardinality.
+This serialization is not JSONL framing. Raw JSONL records use the same
+normalization/sorting/compact/direct-Unicode/finite-value rules followed by one
+newline per complete record.
 
-Every logical natural run requires:
+## Identity and hash payloads
 
-### Identity and provenance
+Scientific identities use domain-separated SHA-256:
 
-- `schema_name`, `schema_version`, `raw_record_id`;
-- `study_id`, `model_run_id`, `model_run_manifest_hash`;
-- `question_manifest_hash`, `question_id`, `sample_index`, `subject`;
-- `run_id` in 0–9;
-- `generation_seed` and `seed_algorithm_version`;
-- attempt/event references sufficient to audit retries without changing the
-  logical raw-record ID.
+```json
+{
+  "identity_type": "<identifier kind>",
+  "identity_version": "part1-identity-v1",
+  "payload": {"<exact fields>": "..."}
+}
+```
 
-The logical natural-run identity is the tuple of the exact study/model run,
-question, and `run_id`. A retry is another attempt at the same logical identity,
-not another natural run.
+The envelope is serialized with `part1-canonical-json-v1`; the lowercase
+hexadecimal digest is the ID/hash. Exact field lists live as constants in
+`scripts/part1_contract.py` and are pinned by golden tests.
 
-### Natural execution and raw output
+### Question and manifest identities
 
-- `natural_execution_outcome`;
-- `stop_reason`;
-- infrastructure failure reference/category when execution fails;
-- exact generated token IDs and exact decoded full generated text when
-  execution completes;
-- generated-token count;
-- recognized opening/closing tag spans and reasoning slice boundaries or an
-  equivalent lossless index representation;
-- `n_reasoning` and `reasoning_status`;
-- terminal answer-block span and diagnostic match data when present;
-- `answer_parse_status`, `natural_answer`, and `natural_correct`;
-- `confidence_parse_status`, raw confidence text, raw parsed integer, and
-  normalized natural confidence;
-- per-generated-token raw full-vocabulary entropy in nats, aligned one-to-one
-  with generated token IDs;
-- mean reasoning entropy and tail reasoning entropy;
-- checkpoint eligibility and, for a complete natural execution, all eleven
-  requested checkpoint identities.
+- `question_content_hash` payload: source repository, immutable revision,
+  source config/split, source-row identity, exact question, four ordered
+  choices, gold index, and gold letter.
+- `question_id` currently uses the same immutable source/content fields under a
+  different identity domain. Including source-row identity prevents equal text
+  from distinct selected source rows from collapsing.
+- `question_manifest_hash` payload: the complete selected immutable sidecar
+  fields plus every selected immutable question-record field in manifest order.
+- `study_id` payload: question-manifest hash and the fixed model-independent
+  scientific subset—subjects/quotas/seed, protocol, checkpoints, entropy,
+  answer validity, statuses, calibration, bootstrap, primary registry,
+  within-question, switching/stabilization, repetition, and analysis contract.
+- `study_manifest_hash` covers the selected complete immutable study-manifest
+  fields, including compatible raw schema versions.
+- `model_run_id` covers exact study/question provenance plus model/tokenizer
+  revision, canonical model identity, adapter/prompt/parser/inducer/tags,
+  requested/effective generation settings, A–D convention/tokens, and seed
+  algorithm/base seed.
+- `model_run_manifest_hash` covers all selected immutable model-run fields,
+  additionally including schema discriminators, environment versions, final
+  production Git commit, production flag, and smoke Git provenance.
 
-No full-vocabulary logits or selected-token log probabilities are stored.
+### Work, event, validation, and shard identities
 
-### Natural nullability
+- `natural_record_id`: `(study_id, model_run_id, question_id, run_id)`.
+- `checkpoint_record_id`: the natural key plus `checkpoint_id`.
+- `shared_probe_id`: natural key plus `prefix_hash` and `inducer_version`.
+  Requested checkpoint identity and alias owner are excluded, so aliased
+  requested records share one physical-probe identity.
+- `attempt_id`: logical natural/checkpoint work kind, natural key, optional
+  checkpoint ID, and `attempt_number`.
+- Attempt-scope `audit_event_id`: attempt ID, event type, event sequence.
+- Shard-scope `audit_event_id`: study ID, model-run ID, shard ID, event type,
+  event sequence.
+- `validation_report_id` uses independent domain
+  `part1-validation-report-identity-v1` over study/model-run/complete manifest
+  hash, shard ID, artifact kind, validator version, and store-contract version.
+  Timestamps, results, and mutable report state do not change the target ID.
+- `.shard-provenance.json` is an immutable header containing schema name/version,
+  study ID, model-run ID, complete model-run-manifest hash, and shard ID.
 
-| Condition | Required | Must be null/absent as specified |
+Every payload excludes its own ID/hash, creation/event timestamps, filesystem
+paths, mutable status or validation state, runtime statistics, operational
+notes/messages, and any field that can change without changing scientific
+identity. Result IDs exclude attempt/outcome data; retries never create a new
+logical result identity.
+
+## Seed derivation
+
+`part1-seed-v1` hashes the canonical payload:
+
+```json
+{
+  "seed_algorithm_version": "part1-seed-v1",
+  "base_seed": 42,
+  "canonical_model_identity": "<immutable model identity>",
+  "question_id": "<stable question ID>",
+  "run_id": 0
+}
+```
+
+Take the first eight digest bytes as an unsigned big-endian integer and bitwise
+AND with `2**63 - 1`. The result is in PyTorch's supported nonnegative signed
+64-bit range `[0, 2**63 - 1]`. Retries preserve the exact value. Tests pin
+golden values and separation across model, question, run, and algorithm version.
+Python's built-in `hash()` is not used.
+
+## Question, study, and model-run manifests
+
+### Question record and sidecar
+
+The Phase 2 tracked JSONL must contain exactly 500 records in `sample_index`
+order. Each record requires:
+
+`schema_name`, `schema_version`, `question_id`, `question_content_hash`,
+`sample_index`, `subject`, `subject_selection_index`, `source_repository`,
+`source_revision`, `source_config`, `source_split`, `source_row_identity`,
+`question`, exactly four ordered `choices`, `gold_index`, and `gold_letter`.
+
+The sidecar requires its complete hash, format/source/revision/config/split,
+five subjects in fixed order, quota 100, count 500, seed 42, selection and
+canonicalization versions, ordered-record aggregation rule, and logical
+filename. Phase 2 resolves source-row identity and the immutable source
+revision.
+
+### Study manifest
+
+The model-independent tracked study manifest requires its ID/hash,
+question-manifest hash, fixed subjects/quotas/seed, protocol/checkpoint/entropy/
+answer-validity/status/calibration/bootstrap contracts, exact primary registry,
+within-question and switching/stabilization contracts, repetition policy,
+compatible raw schema versions, and analysis-contract version.
+
+### Model-run manifest
+
+One operational immutable manifest represents one exact model revision and
+adapter. It requires its ID/hash; study/question hierarchy; immutable
+model/tokenizer revisions; canonical model identity; adapter, prompt/hash,
+parser, inducer/text/tokens, reasoning tags/tokens; requested/effective natural
+and checkpoint settings; A–D token convention/sequences/IDs; seed algorithm and
+base seed; environment versions; Git provenance; and production/smoke status.
+
+Production requires a final 40-hex Git commit and null smoke provenance. Smoke
+requires null final-production commit and non-null smoke provenance. Output
+paths and mutable progress stay outside the immutable manifest. The schema is
+implemented, but no production instance exists.
+
+## Normalized terminal result schemas
+
+Terminal result files contain no pending or running record. Lifecycle is only
+in `audit_events.jsonl`.
+
+### Natural terminal result
+
+Required Phase-2-ready fields are:
+
+- identity/provenance: schema name/version, raw record ID, study/model-run/
+  question IDs, complete model-run-manifest and question-manifest hashes,
+  sample index, subject, run ID, generation seed/version, terminal attempt
+  number/ID, and infrastructure-failure reference;
+- prompt/output: prompt hash, rendered prompt, prompt token IDs, generated token
+  IDs, full decoded output, reasoning text/boundaries, close-tag information,
+  stop reason, generated/reasoning token counts;
+- measurements/parsing: full-precision per-token entropy trace, mean/tail
+  reasoning entropy, terminal answer block text/span, natural answer, raw
+  confidence text/integer, normalized confidence, `natural_correct`, and
+  diagnostic answer-like text;
+- checkpoint linkage: eligibility and exactly eleven unique checkpoint IDs for
+  a complete execution; and
+- orthogonal outcome/statuses, component versions, and terminal error details.
+
+Enums are exact:
+
+- `natural_execution_outcome`: `complete` |
+  `terminal_infrastructure_failure`;
+- `stop_reason`: `eos` | `max_new_tokens` | `stopping_criterion` | `error` |
+  `other`;
+- `reasoning_status`: `closed` | `missing_close` | `no_reasoning` |
+  `malformed`;
+- `answer_parse_status`: `parsed` | `missing` | `malformed` |
+  `out_of_domain`; and
+- `confidence_parse_status`: `parsed` | `missing` | `malformed` |
+  `out_of_range`.
+
+| Natural condition | Required non-null/output facts | Required null facts |
 |---|---|---|
-| `natural_execution_outcome = terminal_infrastructure_failure` | logical identity, seed, `stop_reason=error`, failure reference, durable event | generated output, parsing results, correctness, entropies, and scientific checkpoint results; checkpoint eligibility is infrastructure-ineligible |
-| `natural_execution_outcome = complete` | stop reason, tokens/text, boundary and parse statuses, aligned entropy array, checkpoint eligibility | fields unavailable under their explicit status are null |
-| `reasoning_status = missing_close` | diagnostic boundary information and all recognized reasoning measurements | `natural_answer`, `natural_correct`, normalized natural confidence |
-| `reasoning_status = no_reasoning` | `n_reasoning=0`, executed output, all eleven checkpoint identities | mean and tail reasoning entropy |
-| `answer_parse_status = parsed` after valid closure | A–D `natural_answer`, boolean `natural_correct` | neither may be null |
-| answer missing/malformed/out of domain or invalid closure | diagnostic raw text/status | `natural_answer` and `natural_correct` |
-| `confidence_parse_status = parsed` | raw text, integer 0–100, normalized value `integer/100` | none of these parsed values may be silently changed |
-| confidence missing/malformed/out of range | available raw diagnostic values and status | normalized confidence; out-of-range raw integer remains preserved |
+| `complete` | prompt/tokens/text, boundaries/statuses, aligned entropy array, counts, `checkpoint_eligible=true`, eleven checkpoint IDs | infrastructure reference and terminal error |
+| terminal infrastructure failure | logical identity, seed, attempt, `stop_reason=error`, failure reference/details, malformed/missing statuses, `checkpoint_eligible=false` | prompt/output/parsing/correctness/entropy/checkpoint IDs |
+| `missing_close` | executed diagnostic boundaries/reasoning measures | terminal block/span, natural answer/correctness, normalized confidence; parsed answer/confidence forbidden |
+| `no_reasoning` | complete output and `reasoning_token_count=0` | mean and tail reasoning entropy |
+| parsed answer | A–D natural answer, correctness, terminal block/span | none of these |
+| nonparsed answer | diagnostic fields/status | natural answer and correctness |
+| parsed confidence | raw text, integer 0–100, exact integer/100 normalized value | none of these |
+| missing/malformed/out-of-range confidence | available raw diagnostics/status; out-of-range integer is preserved | normalized confidence |
 
-## Logical checkpoint record
+Generated token IDs and per-token entropy must have equal lengths, and
+`generated_token_count` must match them. Scientific floats remain unrounded.
 
-Every complete natural execution produces exactly eleven logical requested
-checkpoint records, even when several share one physical probe.
+### Checkpoint terminal result
 
-### Identity and placement
+Required Phase-2-ready fields are:
 
-- checkpoint schema name/version and `checkpoint_record_id` if checkpoint
-  records are physically normalized;
-- parent `raw_record_id` or full parent logical identity;
-- `requested_checkpoint_index` 0–10;
-- exact requested fraction representation;
-- `k_keep`;
-- `actual_fraction`, null only when `n_reasoning = 0`;
-- `shared_probe_id`;
-- `is_alias`, alias-group membership, and canonical probe-owner reference;
-- intervention/inducer version inherited from or checked against the model-run
-  manifest.
+- identity/provenance/parent: schema name/version, checkpoint and parent natural
+  IDs, study/model-run/question IDs, complete manifest hashes, sample/subject,
+  run/checkpoint ID, natural seed, terminal attempt number/ID, and failure
+  reference;
+- placement/alias: requested checkpoint index 0–10, exact index/10 fraction,
+  `k_keep`, actual fraction, shared-probe ID, alias flag/metadata, prefix hash,
+  and inducer version/text;
+- output/parse: forced token IDs, full decoded forced output, terminal answer
+  block, forced answer, raw/parsed/normalized confidence, checkpoint-local
+  correctness;
+- answer-step measurement: answer token index/ID, token convention, four A–D
+  token IDs, raw float32 A–D logits, float32 A–D probabilities, four-choice
+  entropy nats, full-vocabulary answer-step entropy nats, maximum A–D
+  probability, and natural-answer agreement; and
+- orthogonal outcome/statuses, component versions, and terminal error details.
 
-`requested_checkpoint_index`, not `k_keep`, preserves the eleven identities.
-All aliases in a group must have identical physical probe results and must not
-be double-counted as answer transitions.
+Enums are exact:
 
-### Execution, output, and measurements
+- `checkpoint_execution_outcome`: `complete` |
+  `terminal_infrastructure_failure`;
+- `checkpoint_model_output_status`: `valid` | `invalid`;
+- answer/confidence parse enums as above;
+- `answer_token_status`: `located` | `missing` | `ambiguous` |
+  `unsupported`; and
+- `entropy_status`: `computed` | `unavailable` | `invalid`.
 
-- `checkpoint_execution_outcome`;
-- `checkpoint_model_output_status`;
-- separate `answer_parse_status`, `confidence_parse_status`,
-  `answer_token_location_status`, and `entropy_computation_status`;
-- infrastructure failure reference when applicable;
-- exact checkpoint generated token IDs and decoded text when execution
-  completes;
-- forced answer and checkpoint-local correctness when validly parsed;
-- raw confidence text, raw parsed integer, and normalized checkpoint confidence
-  only when valid;
-- answer-token generation step/index and the preflighted A–D token convention;
-- raw float32-derived A–D logits in A–D order;
-- normalized A–D probabilities in A–D order;
-- four-choice entropy in nats;
-- maximum normalized A–D probability;
-- full-vocabulary entropy in nats at the identified answer-token step;
-- natural-answer agreement at checkpoint 1.0 when both answers are valid, with
-  null otherwise.
-
-### Checkpoint nullability
-
-| Condition | Required | Null fields |
+| Checkpoint condition | Required non-null/output facts | Required null facts |
 |---|---|---|
-| `checkpoint_execution_outcome = terminal_infrastructure_failure` | identity/placement, failure reference, durable event | generated output, parse products, correctness, answer-step fields, logits/probabilities, entropies |
-| execution complete, output valid | raw output, all status fields, parsed answer and checkpoint correctness, valid answer-token location, A–D/full-vocabulary measurements | only confidence values may be null when confidence status permits |
-| execution complete, output invalid | raw output and all separate statuses | each unavailable parsed/measurement field according to its status; never relabel as infrastructure failure |
-| answer-token location not valid | diagnostic output/location status | answer-step index, A–D logits/probabilities/entropy/max and full-vocabulary answer-step entropy |
-| confidence out of range | raw text and parsed integer, `out_of_range` | normalized confidence |
+| complete + valid | output, parsed A–D answer/correctness, terminal block, located answer token and convention, computed four-value measurements | failure reference/details; only confidence fields may be null when its separate status permits |
+| complete + invalid | raw output and every orthogonal status; at least one of answer parsed/token located/entropy computed is not valid | every unavailable parsed/measurement value according to its status |
+| terminal infrastructure failure | identity/placement/alias, seed/attempt, failure reference/details; invalid/missing/unsupported/unavailable statuses | output, parse products, correctness, answer-step fields, logits/probabilities/entropies/agreement |
+| answer token not located | diagnostic output/status | token index/ID/convention/A–D IDs and all computed measurements |
+| entropy not computed | explicit entropy status | logits, probabilities, both entropies, maximum probability |
+| confidence out of range | raw text and parsed integer | normalized confidence |
 
-Phase 1 must define the exact allowed values for answer-token-location and
-entropy-computation statuses and validate every status/value combination.
+When computed, A–D token/logit/probability arrays contain exactly four aligned
+values; probabilities sum to one; maximum and entropy recompute; the answer
+index/ID aligns with forced token IDs. Agreement can be null and disagreement
+is valid data.
 
-## Derived analysis records
+Checkpoint publication additionally requires exactly one complete eligible
+natural parent and matching parent record ID, seed, manifest provenance,
+question/sample/subject/run fields, and checkpoint membership.
 
-Derived tables must retain `study_id`, model-run identity/hash, raw schema
-version, analysis-contract version, feature registry version, and cohort/filter
-counts. They must distinguish pooled, subject, and arithmetic macro results and
-label primary versus secondary targets.
+## Audit event schema and lifecycle
 
-Bootstrap result records require metric/feature/target, scope, requested/valid/
-invalid replicate counts, seed, percentile level, point estimate, lower/upper
-bounds, and interval-valid flag plus warning when validity is below 95%.
-Reliability records require checkpoint identity, bin index and exact edges,
-count, mean confidence, empirical accuracy, empty-bin representation, and the
-count-weighted ECE aggregate.
+The event taxonomy is exactly eight types:
 
-Within-question records require question ID, run counts by natural correctness,
-correct-run mean, incorrect-run mean, and paired difference. Switching records
-require switch count, first natural-answer appearance, stabilization fraction,
-switched-away-from-correct and recovered flags, and checkpoint-1.0 agreement.
+- attempt scope: `attempt_started`, `attempt_failed`,
+  `attempt_interrupted`, `attempt_completed`,
+  `terminal_result_recovered`;
+- shard scope: `stale_lock_recovered`, `trailing_line_recovered`,
+  `operator_unlock`.
 
-## Audit event records
+Every event includes schema/ID/scope, study/model-run/shard context, logical
+work and attempt fields where applicable, monotonic sequence, timestamp,
+execution context, failure/retry/backoff metadata where applicable, related
+lock owner, terminal record reference, and operator reason. Shard-scope events
+must null all work/attempt fields. Only `operator_unlock` has a nonblank operator
+reason. `attempt_completed` and `terminal_result_recovered` require a terminal
+record reference; starts/failures/interruptions forbid one.
 
-Audit events are append-only operational evidence. Each event requires:
+`attempt_started` at sequence zero consumes its attempt number. Starts are
+sequential. `attempt_failed` is valid only for a retry-authorizing failure.
+Final/nonretryable work is represented by result then `attempt_completed`.
+`terminal_result_recovered` records an authoritative result whose completion
+was missing; an optional matching completion can follow. Completion without
+result and an orphaned start are classified as interruptions and count toward
+the limit.
 
-- `schema_name`, `schema_version`, and `event_id`;
-- logical raw identity (`study_id`, `model_run_id`, question ID, run ID) and,
-  when applicable, requested checkpoint identity;
-- attempt ID and monotonically meaningful event sequence within that attempt;
-- event type;
-- event timestamp as audit metadata;
-- SLURM job/array/task and host/process context when available;
-- outcome/category and structured error information when applicable;
-- retryability classification, retry decision, and backoff metadata when
-  applicable;
-- related lock owner and artifact/terminal-record reference when applicable.
+## Validation reports, append-only layout, and evolution
 
-At minimum, the Phase 1 event taxonomy must represent attempt start, natural
-terminal success/failure, checkpoint terminal success/failure, retry scheduled
-or exhausted, terminal record committed, lock acquired/released/stale-recovered,
-and validation failure. Raw traceback/message text is diagnostic and excluded
-from `event_id`.
+Validation reports contain target identity, timestamps, validator version,
+pass/fail/warning checks, counts, and summary. Reports are written at an
+explicit external path and never modify raw streams. The current shard checks
+cover JSON syntax, schema validity, duplicate/conflict detection, malformed
+middle, trailing/pending recovery, array alignment, terminal/event consistency,
+hierarchy/terminalization, and outcome nullability.
 
-Event IDs must remain unique for distinct attempts/events without using a
-timestamp as scientific identity. Phase 1 must lock whether a deterministic
-attempt ordinal and event sequence, or another explicit non-self-referential
-payload, supplies uniqueness.
-
-## Canonical hashes and identifiers
-
-The fixed algorithm is SHA-256 over versioned canonical UTF-8 bytes. Each
-identifier has a separately defined payload:
-
-| Identifier | Required identity content | Always excluded |
-|---|---|---|
-| `question_content_hash` | complete immutable source/content representation sufficient to detect any scientific question change | itself, paths, timestamps |
-| `question_id` | stable source identity plus content identity, with an explicit duplicate-content rule | itself, selection position if position is not scientific identity |
-| `question_manifest_hash` | complete immutable sidecar fields plus all ordered question records | itself, path, creation/validation state |
-| `study_id` | model-independent scientific identity subset | itself, manifest hash, paths, timestamps, status |
-| `study_manifest_hash` | complete immutable study manifest | itself, mutable operational metadata |
-| `model_run_id` | exact study/model/tokenizer/adapter/prompt/parser/inducer/settings identity subset | itself, complete hash, output path, timestamps, runtime/completion state |
-| `model_run_manifest_hash` | complete immutable model-run manifest | itself and mutable operational fields |
-| `raw_record_id` | exact model-run, question, and run logical identity, plus record-kind discriminator if physical records are normalized | itself, attempt, time, status, runtime |
-| `checkpoint_record_id` | parent logical identity plus requested checkpoint identity, if separately stored | itself, shared physical-probe result/status |
-| `shared_probe_id` | parent logical identity plus exact unique prefix/probe identity | itself, alias owner selection, runtime |
-| `event_id` | logical work identity, deterministic attempt identity, event type, and sequence | itself, timestamp, message, runtime |
-
-No ID or hash payload may contain the value being calculated. Creation time,
-filesystem location, validation/completion status, runtime statistics, mutable
-notes, and any field that can change without changing scientific identity are
-excluded. A complete-manifest hash may cover immutable descriptive fields not
-present in the shorter ID payload, but never its own hash.
-
-## Compatibility and evolution
-
-- Schema versions are explicit. Phase 1 must select the version syntax and
-  implement compatibility as an allow-list or tested rule, not string guessing.
-- Adding an optional field is compatible only when its default/null meaning is
-  unambiguous and does not change existing scientific interpretation.
-- Renaming fields, changing status meanings, nullability, identity payloads,
-  metric formulas, parser validity, or checkpoint semantics requires a new
-  incompatible schema or contract version.
-- Immutable manifests and terminal raw records are never edited in place.
-  Corrections create a new identity/version and preserve prior artifacts.
-- Cross-model analysis requires identical `study_id`, question-manifest hash,
-  scientific protocol version, compatible raw schema versions, and compatible
-  analysis contracts.
-- Validators reject records with unknown incompatible versions, mixed
-  model-run manifests in one shard, or hashes that do not recompute.
-
-## Phase 1 decisions to lock
-
-The following are deliberately not asserted as implemented or immutable in
-Prompt 1. Phase 1 must resolve each with executable acceptance tests:
-
-1. Exact schema file/mechanism, version strings, required-field spelling, and
-   the complete status/nullability truth tables.
-2. Exact canonical JSON or other byte serialization: ordered keys, separators,
-   number representation, Unicode normalization/escaping, newline policy,
-   array ordering, null handling, and UTF-8 encoding.
-3. Exact ordered field list and version discriminator for every hash/ID in the
-   table above, including duplicate question-content handling.
-4. Exact seed payload, digest-to-integer conversion, nonnegative PyTorch range,
-   and golden seed vectors.
-5. Raw storage granularity: one nested terminal natural-run record versus
-   normalized natural/checkpoint records, while preserving one logical run and
-   eleven requested checkpoint identities.
-6. Atomic file/journal format, fsync/rename boundary, terminal-record
-   publication rule, index/checkpoint format, and crash recovery behavior.
-7. Mila-compatible lock mechanism, persistent output root, owner metadata,
-   timeout, stale-lock determination, and safe stale-lock recovery.
-8. Infrastructure error taxonomy, retryable categories, finite retry count,
-   backoff, attempt numbering, and terminal exhaustion representation.
-9. Exact answer-token-location and entropy-computation status enums and their
-   measurement nullability.
-10. Whether mutable operational state is stored outside immutable manifests;
-    acceptance requires that updates never change a manifest hash.
-
-Phase 2, not Phase 1, resolves the immutable MMLU, model, and tokenizer
-revisions and the compute-node tag/A–D token preflight. Phase 3 resolves the
-final persistent production output locations after the production commit.
+Active raw streams are append-only and per-record fsynced. Recovery may modify
+only an incomplete final physical line after exact-byte quarantine and durable
+journal evidence. `.finalized` blocks further raw-shard mutation. Renaming fields,
+changing status meaning/nullability, identity payloads, metric formulas, parser
+validity, or checkpoint semantics requires a new incompatible version; prior
+manifests/results are preserved.

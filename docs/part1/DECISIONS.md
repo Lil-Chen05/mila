@@ -97,10 +97,12 @@ The run seed is derived from a versioned canonical SHA-256 serialization of:
 3. stable question ID;
 4. run ID.
 
-Python's built-in `hash()` is forbidden. Phase 1 must lock and golden-test the
-exact field order, UTF-8 representation, delimiter or canonical-JSON rules,
-SHA-256 digest conversion, supported nonnegative PyTorch seed range, and
-seed-algorithm version. A retry reuses the original seed.
+Python's built-in `hash()` is forbidden. Phase 1 locked `part1-seed-v1`: hash
+the canonical JSON payload containing `seed_algorithm_version`,
+`base_seed`, `canonical_model_identity`, `question_id`, and `run_id`; interpret
+the first eight SHA-256 digest bytes as an unsigned big-endian integer and mask
+with `2**63 - 1`. The result is in `[0, 2**63 - 1]`. Golden vectors cover model,
+question, run, and version separation. A retry reuses the original seed.
 
 ## Numerical measurements
 
@@ -236,9 +238,14 @@ Successful abnormal output is never automatically retried or excluded.
 Checkpoint-1.0 disagreement is not retryable. Part 1 has no automatic
 repetition detector or repetition-based retry/exclusion; repetitive or
 degenerate successful outputs are preserved. Only infrastructure failures may
-be retryable. The exact retryable categories, maximum attempt count, and
-backoff are a Phase 1 repository-specific decision; acceptance requires a
-documented finite policy, durable attempt events, and same-seed retries.
+be retryable. Phase 1 fixed exactly three attempts and backoffs
+`[0, 30, 120]`. Retryable categories are interrupted process, temporary
+filesystem failure, transient worker failure, and transient CUDA runtime
+failure. Invalid configuration, schema or manifest incompatibility, tokenizer
+preflight incompatibility, deterministic context overflow, reproducible CUDA
+OOM, unsupported model/tokenizer behavior, and corrupt immutable manifests are
+terminal on the current attempt. A transient CUDA retry requires termination
+and a fresh process. All retries preserve logical identity and seed.
 
 ## Confidence and calibration
 
@@ -405,5 +412,129 @@ notes, and any value that can change without changing scientific identity.
 
 Complete manifest hashes may include immutable descriptive fields omitted from
 shorter identity payloads, but always exclude their own hash field. Phase 1
-locks and tests the exact canonical bytes and field lists described in
+locked and golden-tested the exact canonical bytes and field lists described in
 [SCHEMA.md](SCHEMA.md).
+
+## Phase 1 executable engineering decisions
+
+These decisions are implemented in the Phase 1 modules and schemas. They do not
+create the Phase 2 question/study manifests or a production model-run manifest.
+
+### Versioned configuration and schema boundary
+
+The repository contains six `1.0.0` configuration templates under
+`configs/part1/` for study protocol, model-run execution, dataset
+materialization, storage, retries, and analysis. It contains eight JSON Schema
+Draft 2020-12 contracts under `schemas/part1/` for question records, question
+manifests, study manifests, model-run manifests, natural terminal results,
+checkpoint terminal results, audit events, and validation reports. These are
+templates and validators, not concrete immutable Phase 2 revisions or
+manifests. Dataset/model/tokenizer revisions remain unresolved until their
+compute-node work.
+
+### Canonical serialization and identity
+
+`part1-canonical-json-v1` emits UTF-8 JSON inside a
+`serialization_version`/`value` envelope. It recursively converts CRLF and CR
+in strings and keys to LF, rejects normalization-induced duplicate keys,
+recursively sorts object keys, preserves list order, uses compact `,` and `:`
+separators, emits Unicode directly, rejects non-finite numbers, and emits no
+trailing whitespace or newline.
+
+Every scientific ID is a lowercase SHA-256 digest of a second domain-separated
+envelope containing `identity_type`, `identity_version=part1-identity-v1`, and
+the exact payload. Question content and question ID both include immutable
+source-row identity and content, so equal text from distinct source rows does
+not collapse. Complete manifest hashes cover the selected complete immutable
+fields; study/model-run IDs use their explicit smaller identity subsets.
+Natural and checkpoint IDs use their logical keys. A shared-probe ID uses the
+natural logical key plus prefix hash and inducer version, never the requested
+checkpoint or alias owner. Attempt IDs use logical work kind, optional
+checkpoint ID, and attempt number. Attempt audit IDs use attempt ID/type/
+sequence; shard audit IDs use study/model-run/shard/type/sequence. Validation
+report IDs use an independent `part1-validation-report-identity-v1` target
+payload. `.shard-provenance.json` binds the full operational shard identity.
+
+All identity payloads exclude their own ID/hash, timestamps, filesystem paths,
+mutable status, validation state, operational notes, and other mutable runtime
+facts. Golden tests pin every public identity function and both audit scopes.
+
+### Terminal records and lifecycle events
+
+Storage is normalized: `natural_results.jsonl` and
+`checkpoint_results.jsonl` contain terminal immutable outcomes only, while
+`audit_events.jsonl` contains lifecycle evidence. Selected-token log
+probabilities are not in either result schema.
+
+The event taxonomy is exactly:
+
+- attempt scope: `attempt_started`, `attempt_failed`,
+  `attempt_interrupted`, `attempt_completed`, and
+  `terminal_result_recovered`;
+- shard scope: `stale_lock_recovered`, `trailing_line_recovered`, and
+  `operator_unlock`.
+
+`attempt_started` consumes its number. Starts are sequential. `attempt_failed`
+exists only when policy authorizes another retry; nonretryable current-attempt
+and retryable attempt-3 exhaustion are terminalized by durable terminal result
+followed by `attempt_completed`. An exhausted interruption remains
+`terminalization_required` until its infrastructure-failure result is
+published. An authoritative result without completion receives recovery
+evidence and may receive the missing completion. Completion without result and
+an orphaned start are interruptions and still consume the attempt.
+
+### Crash consistency, recovery, and finalization
+
+A successful or terminal outcome is committed in this order: append the result,
+flush and fsync it, append `attempt_completed`, then flush and fsync the event.
+The result is authoritative at the intervening crash boundary. Existing valid
+stream bytes and logical records are never overwritten.
+
+Only a final physical line may be repaired. Invalid tail bytes are preserved
+byte-for-byte under `quarantine/`; immutable evidence is first fsynced under
+`recovery_journal/`; only then may the invalid tail be truncated. A complete
+valid JSON object missing its newline is preserved and repaired by appending
+only the newline under the same journal protocol. Recovery is idempotent after
+every durability boundary. Malformed middle records are fatal. `.finalized`
+blocks every later mutation. Validation reports are external, machine-readable,
+and target-stable rather than hashes of mutable report timestamps/outcomes.
+
+### Exclusive ownership and takeover
+
+`.writer.lock` records a unique lock ID plus study/model-run/shard, host, PID,
+SLURM job/array IDs, and acquisition time. One stable `.writer.guard` POSIX
+`flock` spans ownership validation and the entire mutation, close, or takeover;
+a displaced writer cannot mutate or remove its replacement's lock.
+
+Takeover creates a durable active `.writer-lock-recovery.claim`, immutable
+claim/event records under `.lock_history/`, and atomically publishes complete
+control files. Pending replacement bytes are reused idempotently; conflicting
+pending bytes require a newly reasoned operator override and are permanently
+quarantined. Cleanup removes the active claim last, after the one required audit
+event is durable.
+
+Automatic stale recovery never uses age. Any LIVE worker or scheduler evidence
+refuses. For a SLURM owner, conclusive scheduler DEAD evidence suffices even
+when a remote PID cannot be checked; on the same host, PID DEAD may suffice when
+scheduler state is unknown. A non-SLURM owner requires same-host PID DEAD.
+Every ambiguous or failed probe refuses. Operator takeover always requires a
+nonblank reason and writes `operator_unlock`.
+
+The local two-process POSIX lock regression passed. Actual `flock` behavior on
+the selected Mila persistent filesystem and the exact Mila `squeue` array-job
+behavior remain Phase 2 operational readiness checks, not completed cluster
+validation.
+
+### Resume and shard hierarchy
+
+Before work, resume validates `.shard-provenance.json`, indexes both terminal
+streams and events, verifies lifecycle/parent hierarchy, reconciles orphans,
+counts durable starts, and classifies each requested natural/checkpoint item as
+completed, retryable, terminal, terminalization-required, or ineligible.
+`WorkSpec` carries the complete model-run-manifest hash and canonical seed.
+
+Checkpoint publication requires exactly one complete checkpoint-eligible
+natural parent and exact parent record ID, seed, question/sample/subject,
+study/model/question-manifest provenance, and checkpoint membership. Missing
+checkpoint work never invalidates or regenerates a successful natural chain.
+The same command or array can therefore be resubmitted idempotently.

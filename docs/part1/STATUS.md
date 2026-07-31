@@ -2,174 +2,197 @@
 
 ## Executive status
 
-**Prompt 1 work is complete and awaiting Prompt 2.** The repository was audited,
-the current working agreement and authoritative Part 1 documentation were
-committed, and `.superpowers/` was locally excluded. No Phase 1
-production pipeline code, immutable production model-run manifest, or new model
-or dataset artifact has been created. The full 500-question experiment has not
-been launched.
+**Prompt 2 / Phase 1 is implemented and independently verified on branch
+`codex/phase1-infrastructure`. Stop before Phase 2.** The repository now has
+executable schemas, canonical identities and seeds, crash-consistent normalized
+storage, exclusive shard ownership, failure policy, retry planning,
+resumability, validation reports, and login-safe operator tools.
 
-This status is read with [PLAN.md](PLAN.md), [DECISIONS.md](DECISIONS.md),
+Phase 1 did not load a model, tokenizer, dataset, CUDA runtime, or invoke real
+SLURM. It did not materialize MMLU, create the fixed question/study manifests,
+create a production model-run manifest, generate a smoke or production output,
+or launch the experiment. The full 500-question run remains unauthorized.
+
+Read this with [PLAN.md](PLAN.md), [DECISIONS.md](DECISIONS.md),
 [SCHEMA.md](SCHEMA.md), [RUNBOOK.md](RUNBOOK.md), and
-[VALIDATION.md](VALIDATION.md). `README.md`, `CLAUDE.md`, older `docs/` files,
-and 20q/200q results and analyses remain tracked historical artifacts; they do
-not define the current protocol.
+[VALIDATION.md](VALIDATION.md). Older root documentation and 20q/200q artifacts
+remain historical.
 
-## Repository baseline and Prompt 1 changes
+## Git and audit baseline
 
-The audit baseline was commit
-`ce113b5060de2d7a2b0266e5527be2df4a57a5e9` (`ce113b5`,
-`Add entropy trace and signal distribution analyses`) on `main`, also
-`origin/main` at audit time. That tracked revision contained the legacy
-greedy 20q/200q experiment, tracked pilot outputs/analysis, an outdated
-`README.md` and `CLAUDE.md`, and no tracked `AGENTS.md`.
+- Prompt 1 working agreement: `01ed450` (`docs: update Part 1 working
+  contract`).
+- Prompt 1 authoritative documentation: `27cbacd` (`docs: establish Part 1
+  experiment plan`).
+- Prompt 2 preflight re-read all six documents and `AGENTS.md`, inspected Git,
+  verified `.superpowers/` remained excluded only through `.git/info/exclude`,
+  found the tracked worktree clean, and reran the existing suite: 21 tests
+  passed.
+- `.superpowers/`, historical outputs, and unrelated user state were not
+  modified.
 
-Prompt 1 committed only the new working agreement:
+## Phase 1 implementation ledger
 
-- commit: `01ed450be07ac346c148ba0ec1846b5770fd9838`
-- subject: `docs: update Part 1 working contract`
-- scope: new `AGENTS.md`, 144 lines; no production/test/job changes
+### Contracts and schemas
 
-The commit was independently verified as correct and scoped. At the start of
-documentation drafting, `main` was one commit ahead of `origin/main` and the
-tracked worktree was clean. The six authoritative `docs/part1/` files were then
-root-reviewed and added in a separate docs-only Prompt 1 commit. Its hash is not
-embedded here because doing so would make this document self-referential; Git
-history is the authority for that commit identity.
+Commits `0b7b6f4` and `8ce4bbf` added:
 
-`.superpowers/` is local tool state and is now excluded by the exact line
-`.superpowers/` in `.git/info/exclude`. It was not edited, deleted, added to
-shared `.gitignore`, or committed.
+- six `1.0.0` templates under `configs/part1/` for study protocol, model-run
+  execution, dataset materialization, storage, retries, and analysis;
+- eight JSON Schema Draft 2020-12 files under `schemas/part1/` for question
+  records/manifests, study/model-run manifests, natural/checkpoint terminals,
+  audit events, and validation reports;
+- `scripts/part1_contract.py` and its synthetic test suite;
+- `jsonschema` as a direct `uv` dependency; and
+- narrow ignores for generated `results/part1-smoke/` and `results/part1/`
+  roots without changing historical tracked result policy.
 
-There were no genuinely unrelated unignored untracked files. Ignored `.venv/`
-and `.pytest_cache/` entries are local environment/cache state, and the locally
-excluded `.superpowers/` is tool state. Tracked historical results are not
-untracked files and remain untouched.
+The locked canonical contract is `part1-canonical-json-v1`; scientific
+identities use `part1-identity-v1`; deterministic seeds use `part1-seed-v1`.
+All public identities, including shared probes and both audit scopes, have
+golden vectors.
 
-## Verified architecture at the baseline
+### Storage and recovery
 
-| Area | Verified implementation |
-|---|---|
-| Model path | `scripts/checkpoints.py` imports Hugging Face Transformers `AutoTokenizer` and `AutoModelForCausalLM`; this is the active model interface. |
-| Core execution | `process_question` generates one full natural chain and then greedily probes checkpoints in the same process. Both natural generation and probes currently set `do_sample=False`. |
-| Model configuration | `MODEL_NAME` is mutable through the environment and defaults to `HuggingFaceTB/SmolLM3-3B`; it is printed but neither an immutable revision nor a stable persisted identity. |
-| Legacy scale | `scripts/fetch_mmlu.py` globally shuffles the `cais/mmlu` test split with seed 42 and takes 200 rows. It does not enforce the five fixed subject quotas/order. |
-| Generation limits | Natural maximum defaults to 16,384 tokens; forced checkpoints use 32. Current production contract instead requires natural maximum 8,192. |
-| Checkpoints | Eleven requested deciles are defined, but `checkpoint_indices` deduplicates equal `k_keep` values. `process_question` writes only the minimum fraction for each unique prefix, so requested alias identities are lost. |
-| Reasoning/output handling | The first `</think>` token closes reasoning. Chains with fewer than eight reasoning tokens are dropped. Missing-close chains can be probed, but current aggregate analysis excludes them. |
-| Parser | `mc_common.py` independently chooses the last answer match and last confidence match anywhere in text, clamps confidence, and is not gated on a terminal post-close block. `find_answer_token` likewise is not post-close gated. |
-| Entropy | Current helper casts raw logits to float32 and reports nats. Natural per-token entropy is stored for all generated tokens but rounded to four decimals; mean reasoning entropy is unrounded. |
-| Missing measurements | Generated natural token IDs and full decoded natural text are not persisted. Raw A–D logits/probabilities, maximum A–D probability, explicit answer-step/location/entropy statuses, tail entropy as a raw field, seeds, and complete provenance are absent. |
-| Persistence | Records accumulate in memory and each shard output is opened with `w` only at shard end. A crash can lose the full shard; a rerun overwrites it. There is no atomic journal, lock, terminal-record index, or resume protocol. |
-| Failures | Per-question exceptions are printed to stdout and skipped. There is no durable structured failure record, attempt identity, retry classification, or same-seed retry. |
-| Identity/provenance | No schemas, schema versions, question/study/model-run manifests, raw/event IDs, canonical hashes, immutable model/tokenizer revisions, run IDs, or generation seeds exist. |
-| Sharding/merge | Sharding uses `qid % NUM_SHARDS`. Merge checks missing shard files and ownership but tolerates missing question IDs, writes the destination before all validation finishes, and may leave incomplete output even when it exits nonzero. |
-| Analysis | `analysis/analyze_200q.py` targets forced checkpoint-1.0 correctness, not `natural_correct`; aggregates only closed/answered chains and reports truncated/short cohorts separately. It uses legacy custom confidence bins, has no specified stratified bootstrap, and omits the fixed primary registry, within-question sampled-run analysis, maximum A–D probability, and required switching/stabilization rules. |
-| Switching | Legacy 20q analysis counts any adjacent stored-value change, including `None`, and calls stable suffix start a commit fraction; it is not alias/missingness compliant. |
-| Historical data | `results/20q`, `results/200q`, `analysis/20q`, and `analysis/200q` are tracked pilot artifacts with unversioned legacy records. |
+Commits `10d2f95`, `34c4c90`, and `a850ee2` added
+`scripts/part1_store.py` plus fixtures/tests. The implementation uses three
+separate append-only streams, per-record flush/fsync, result-before-completion
+ordering, terminal-result authority, reconciliation, exact-byte tail
+quarantine, immutable recovery journals, validation reports, duplicate/
+conflict detection, complete checkpoint-parent validation, and a `.finalized`
+marker that blocks further raw-shard mutation.
 
-## Baseline claims: verified and qualified
+The public result API requires a matching durable `attempt_started` before it
+can create authoritative result bytes. Malformed middle lines are fatal; only
+the final physical line can be repaired. A valid EOF JSON object missing only
+its newline is repaired by append, not rewrite.
 
-The Prompt 1 baseline claims were verified: Transformers is active;
-`scripts/checkpoints.py` combines natural generation and probes; both paths are
-greedy; natural full text/token IDs are not persisted; shard writes occur only
-after the shard loop; no per-run seed/resume or durable structured failure
-exists; legacy analysis uses checkpoint-1.0 correctness; 20q/200q assumptions
-remain; confidence is clamped; short chains are dropped; and checkpoint
-fractions are deduplicated.
+### Locking, retry, and resume
 
-The only qualification is the claim that there is “no model ID”: a mutable
-`MODEL_NAME` configuration/default exists and is printed. It is not an immutable
-model revision, canonical model identity, manifest field, or value persisted in
-raw records, so it does not satisfy the new provenance contract.
+Commits `c066bff`, `d15ba85`, and `68926ec` added:
 
-The audit also established details not explicit in the baseline claims:
+- `scripts/part1_failure_policy.py`;
+- `scripts/part1_runtime.py`;
+- `scripts/part1_dry_run.py`;
+- `scripts/part1_operator_unlock.py`; and
+- the locking/retry/resume test matrix.
 
-- current natural cap is 16,384, not the required 8,192;
-- per-token entropy is rounded to four decimals;
-- the parser can pair unrelated answer/confidence matches and accept text inside
-  unclosed reasoning;
-- checkpoint 1.0 is called an invariant, but disagreement is only reported and
-  not asserted; the new protocol correctly treats it as a secondary outcome;
-- the current merge can publish incomplete output before reporting failure; and
-- the Part 1 uncertainty/status fields and two-level provenance are almost
-  entirely absent.
+Every shard is bound by immutable `.shard-provenance.json` to `study_id`,
+`model_run_id`, the complete `model_run_manifest_hash`, and `shard_id`.
+`.writer.lock` records the active owner, while stable `.writer.guard` advisory
+locking spans the complete check-and-mutate/close/takeover critical section.
+Takeover state is durable, idempotent, and auditable through the active claim
+and immutable `.lock_history/` artifacts. Displaced writers fail ownership
+checks.
 
-## Completed, current, and outstanding work
+Automatic stale recovery never uses age and fails closed on ambiguity. Any LIVE
+source refuses; conclusive SLURM DEAD suffices for a SLURM owner with an
+uncheckable remote PID; same-host PID DEAD can establish a non-SLURM owner is
+dead and may resolve unknown scheduler state. Operator recovery requires a
+nonblank reason and records `operator_unlock`.
 
-### Completed in Prompt 1
+Retry policy has exactly three attempts and backoffs `[0, 30, 120]`.
+`attempt_failed` authorizes only a subsequent retry. Final/nonretryable
+failures publish a terminal infrastructure result followed by completion;
+retryable attempt-3 interruption remains terminalization-required until that
+publication. Transient CUDA retry requires worker termination and a fresh
+process. Every retry preserves seed and logical identity.
 
-- Audited Git state, current scripts, jobs, tests, analyses, root documentation,
-  ignores, and historical outputs.
-- Verified all baseline claims and the one qualification above.
-- Replaced the obsolete working contract with committed `AGENTS.md` while
-  preserving cluster, `uv`, storage, and Git safety rules.
-- Locally excluded `.superpowers/` without modifying shared `.gitignore`.
-- Established the fixed science, schemas, runbook, validation matrix, and exact
-  three-phase plan in `docs/part1/`.
-- Independently ran the fresh login-safe legacy suite; the final root gate
-  confirmed 21 tests passed in 0.79s.
+Resume is idempotent at natural and checkpoint granularity. It counts durable
+starts, reconciles orphan/completion anomalies, rejects corrupt provenance or
+hierarchy, skips terminal keys, and never regenerates a successful natural
+chain because a checkpoint is missing.
 
-### Current boundary
+## Manifest hierarchy status
 
-Stop after the root-reviewed docs-only Prompt 1 commit and wait for Prompt 2.
-There are no intended uncommitted project changes at this handoff. Phase 1 is
-not authorized until Prompt 2.
+The two-level provenance design is implemented as schema/validation support,
+not as concrete Phase 2/3 artifacts:
 
-### Outstanding by phase
+1. The tracked question manifest and tracked model-independent study manifest
+   remain Phase 2 outputs under `manifests/part1/`; neither exists yet.
+2. The operational model-run-manifest schema exists. No production instance
+   exists. Phase 3 may create one only after the final production commit and a
+   clean tracked-worktree gate, under the ignored persistent production root.
 
-- Phase 1: executable schemas; canonical bytes and IDs; seed algorithm;
-  persistence, locking, failure events, retry policy, and resumability.
-- Phase 2: immutable dataset/model/tokenizer revisions; fixed question and study
-  manifests; SmolLM3 adapter/preflight; ten sampled natural runs; exact raw
-  entropy; all eleven checkpoint identities; separate smoke artifacts.
-- Phase 3: analysis, bootstrap, calibration, switching/stabilization, validator,
-  atomic merge, SLURM readiness, production-manifest lifecycle, and final
-  bounded smoke.
-- After this four-prompt sequence and only with separate approval: launch the
-  full production experiment and add later models.
+Smoke and production roots are distinct and ignored. Phase 1 configuration
+rejects production mode, ambiguous roots, explicit/expanded ephemeral roots,
+and smoke/production aliasing.
 
-## Risks, blockers, and deferred decisions
+## Verification evidence
 
-Highest-priority risks are:
+The final independent closure review of `68926ec` found no remaining P0, P1,
+or P2 issue in the Phase 1 runtime scope. Fresh reported evidence was:
 
-1. target/cohort mismatch from using forced checkpoint-1.0 correctness and
-   excluding successful abnormal chains instead of targeting
-   `natural_correct` with explicit missingness;
-2. missing provenance and mutable model identity;
-3. crash-unsafe buffered persistence and overwrite-on-rerun;
-4. parser contamination across reasoning/answer blocks;
-5. loss of checkpoint aliases and therefore incorrect trajectory semantics;
-6. missing/unrounded uncertainty fields, including exact token IDs/text, raw A–D
-   values, maximum probability, and complete statuses; and
-7. merge publication before completeness validation.
+- `uv run pytest -q` — **188 passed**;
+- focused takeover/dry-run/POSIX-lock closure slice — **11 passed, 86
+  deselected**;
+- Python compile checks — exit 0;
+- CLI help and default dry run — exit 0;
+- `git diff --check` — exit 0; and
+- tracked worktree clean on `codex/phase1-infrastructure`.
 
-There is no Prompt 1 blocker. The following are genuine repository-specific
-decisions assigned to later phases, with acceptance criteria in
-[SCHEMA.md](SCHEMA.md) and [VALIDATION.md](VALIDATION.md):
+Coverage includes:
 
-- Phase 1: raw-record granularity; canonical payload details; retryable failure
-  taxonomy/count/backoff; Mila lock/stale-lock policy; persistent output root;
-  atomic journal format; narrow ignore patterns.
-- Phase 2: immutable MMLU, model, and tokenizer revisions; source-row identity;
-  compute-node reasoning-tag and A–D token preflight.
-- Phase 3 or explicit later maintenance: whether to update/deprecate tracked
-  `CLAUDE.md` and `README.md`; how narrow new ignore rules coexist with tracked
-  historical results.
+- canonical bytes, all hash identities, exclusions, and stable seed vectors;
+- schemas and complete outcome/nullability matrices;
+- all five terminal commit crash boundaries;
+- authoritative-result and completion-without-result handling;
+- orphan counting and terminalization-required states;
+- exact-byte tail recovery, recovery crash boundaries, malformed-middle
+  rejection, and finalization;
+- full-precision persistence and token/entropy/A–D alignment;
+- duplicate/conflict and checkpoint-parent rejection;
+- writer contention, liveness, operator recovery, every takeover durability
+  boundary, and a real two-process local POSIX `flock` regression;
+- retry taxonomy/backoff/fresh-process CUDA policy; and
+- manifest compatibility, resume, idempotent rerun, and smoke/production path
+  separation.
 
-Until resolved, these are controlled phase gates, not placeholders or authority
-to guess.
+All evidence was synthetic and login-safe. It is not model, dataset, GPU,
+filesystem-on-Mila, or real-scheduler validation.
 
-## Latest successful checks
+## Current output contract
 
-| Command | Result |
-|---|---|
-| `uv run pytest -q` | 21 passed in 0.79s at the final pre-commit root gate; login-safe legacy tests only; no model/tokenizer/dataset load. |
-| `git show --stat --oneline 01ed450` | Only `AGENTS.md`; 144 insertions. |
-| `git diff --stat ce113b5..HEAD` | Only `AGENTS.md` before documentation drafting. |
-| `git check-ignore -v .superpowers .superpowers/` | Both matched `.git/info/exclude:7:.superpowers/`. |
-| `git ls-files --others --exclude-standard` | No unignored untracked files before documentation drafting. |
-| `git status --short --branch` | `main...origin/main [ahead 1]` and otherwise clean before documentation drafting. |
+A bound active shard may contain:
 
-See [VALIDATION.md](VALIDATION.md) for environment, warnings, and future
-acceptance checks.
+```text
+<shard-root>/
+  .shard-provenance.json
+  natural_results.jsonl
+  checkpoint_results.jsonl
+  audit_events.jsonl
+  recovery_journal/<event-id>.json
+  quarantine/<stream>.<sha256>.trailing-bytes.bin
+  .writer.guard
+  .writer.lock
+  .writer-lock-recovery.claim
+  .lock_history/<claim-id>.claim.json
+  .lock_history/<claim-id>.event.json
+  .finalized
+```
+
+Some entries exist only while a lock/takeover is active or after a particular
+recovery. Validation reports are written externally at an explicitly supplied
+path; the configured directory name is `validation_reports`.
+
+## Phase 2 blockers and risks
+
+There is no remaining repository-code blocker within Phase 1. The next phase is
+gated on:
+
+1. resolving immutable MMLU dataset revision/source-row identity and creating
+   the tracked fixed question/study manifests on a compute node where required;
+2. resolving immutable model/tokenizer revisions, prompt/tag/token conventions,
+   and effective generation settings through SmolLM3 compute-node preflight;
+3. confirming stable POSIX `flock` behavior on the selected Mila persistent
+   filesystem;
+4. confirming the actual Mila `squeue` array selector/output and completed-job
+   absence semantics used by the fail-closed liveness probe;
+5. integrating generation only through `LockedShardSession`, complete compatible
+   manifests, policy-complete events/results, canonical seeds, and same-seed
+   retry; and
+6. ensuring transient CUDA retry exits to a fresh process and smoke artifacts
+   remain separate from production.
+
+No production model-run manifest or production generation is permitted at this
+boundary.
