@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -49,6 +50,18 @@ AUDIT_EVENT_TYPES = {
     "attempt_interrupted",
     "attempt_completed",
     "terminal_result_recovered",
+    "stale_lock_recovered",
+    "trailing_line_recovered",
+    "operator_unlock",
+}
+ATTEMPT_AUDIT_EVENT_TYPES = {
+    "attempt_started",
+    "attempt_failed",
+    "attempt_interrupted",
+    "attempt_completed",
+    "terminal_result_recovered",
+}
+SHARD_AUDIT_EVENT_TYPES = {
     "stale_lock_recovered",
     "trailing_line_recovered",
     "operator_unlock",
@@ -361,6 +374,30 @@ def checkpoint_record_id(
     )
 
 
+def shared_probe_id(
+    study_id_value: str,
+    model_run_id_value: str,
+    question_id_value: str,
+    run_id: int,
+    *,
+    prefix_hash: str,
+    inducer_version: str,
+) -> str:
+    """Identify one physical checkpoint probe independently of alias owners."""
+
+    return _identity_hash(
+        "shared_probe_id",
+        {
+            "study_id": study_id_value,
+            "model_run_id": model_run_id_value,
+            "question_id": question_id_value,
+            "run_id": run_id,
+            "prefix_hash": prefix_hash,
+            "inducer_version": inducer_version,
+        },
+    )
+
+
 def attempt_id(
     study_id_value: str,
     model_run_id_value: str,
@@ -385,18 +422,44 @@ def attempt_id(
     return _identity_hash("attempt_id", payload)
 
 
-def audit_event_id(attempt_id_value: str, event_type: str, event_sequence: int) -> str:
+def audit_event_id(
+    attempt_id_value: str | None,
+    event_type: str,
+    event_sequence: int,
+    *,
+    study_id_value: str | None = None,
+    model_run_id_value: str | None = None,
+    shard_id: str | None = None,
+) -> str:
     if event_type not in AUDIT_EVENT_TYPES:
         raise ValueError(f"unsupported audit event type: {event_type}")
     if event_sequence < 0:
         raise ValueError("event_sequence must be nonnegative")
-    return _identity_hash(
-        "audit_event_id",
-        {
+    if event_type in ATTEMPT_AUDIT_EVENT_TYPES:
+        if attempt_id_value is None:
+            raise ValueError("attempt-scoped event requires attempt identity")
+        payload = {
             "attempt_id": attempt_id_value,
             "event_type": event_type,
             "event_sequence": event_sequence,
-        },
+        }
+    elif event_type in SHARD_AUDIT_EVENT_TYPES:
+        if attempt_id_value is not None:
+            raise ValueError("shard-scoped event must not use attempt identity")
+        if not study_id_value or not model_run_id_value or not shard_id:
+            raise ValueError("shard-scoped event requires complete shard identity")
+        payload = {
+            "study_id": study_id_value,
+            "model_run_id": model_run_id_value,
+            "shard_id": shard_id,
+            "event_type": event_type,
+            "event_sequence": event_sequence,
+        }
+    else:  # AUDIT_EVENT_TYPES is intentionally partitioned by the two sets.
+        raise ValueError(f"audit event type has no scope: {event_type}")
+    return _identity_hash(
+        "audit_event_id",
+        payload,
     )
 
 
@@ -449,6 +512,19 @@ def validate_instance(schema_name: str, instance: Mapping[str, Any]) -> None:
         path = ".".join(str(item) for item in error.absolute_path) or "<root>"
         raise ValueError(f"{path}: {error.message}")
 
+    if schema_name in {"natural_terminal_result", "checkpoint_terminal_result"}:
+        if instance["confidence_parse_status"] == "parsed":
+            expected_confidence = instance["raw_parsed_confidence"] / 100
+            if not math.isclose(
+                instance["normalized_confidence"],
+                expected_confidence,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                raise ValueError(
+                    "normalized_confidence must equal raw_parsed_confidence / 100"
+                )
+
     if schema_name == "question_record":
         expected_letter = "ABCD"[instance["gold_index"]]
         if instance["gold_letter"] != expected_letter:
@@ -459,6 +535,14 @@ def validate_instance(schema_name: str, instance: Mapping[str, Any]) -> None:
         if instance["generated_token_count"] != len(instance["generated_token_ids"]):
             raise ValueError("generated_token_count must equal generated_token_ids length")
     elif schema_name == "checkpoint_terminal_result":
+        if instance["checkpoint_model_output_status"] == "invalid" and (
+            instance["answer_parse_status"] == "parsed"
+            and instance["answer_token_status"] == "located"
+            and instance["entropy_status"] == "computed"
+        ):
+            raise ValueError(
+                "invalid checkpoint output cannot retain the complete valid triad"
+            )
         expected_fraction = instance["requested_checkpoint_index"] / 10
         if instance["requested_fraction"] != expected_fraction:
             raise ValueError("requested fraction must match requested_checkpoint_index / 10")
@@ -469,7 +553,7 @@ def validate_instance(schema_name: str, instance: Mapping[str, Any]) -> None:
 
 
 def validate_phase1_config(
-    configs: Mapping[str, Mapping[str, Any]], *, mode: str, persistent_root: Path
+    configs: Mapping[str, Mapping[str, Any]], *, mode: str, persistent_root: Path | None
 ) -> dict[str, Any]:
     """Validate the tracked templates and enforce the Phase 1 no-production gate."""
 
@@ -517,10 +601,34 @@ def validate_phase1_config(
         raise ValueError("mode must be smoke or production")
     if mode == "production" or configs["storage"].get("phase1_production_allowed") is not False:
         raise ValueError("production execution is forbidden during Phase 1")
+    if persistent_root is None:
+        raise ValueError("persistent_root must be explicitly configured")
+    storage = configs["storage"]
     resolved = Path(persistent_root).expanduser().resolve()
-    production_root = Path(configs["storage"]["production_root"]).expanduser().resolve()
-    if resolved == production_root:
+    configured_smoke_root = Path(storage["smoke_root"]).expanduser().resolve()
+    production_root = Path(storage["production_root"]).expanduser().resolve()
+    if configured_smoke_root == production_root:
         raise ValueError("smoke and production roots must be separate")
+    raw_root_values = (str(persistent_root), str(storage["smoke_root"]))
+    for forbidden in storage["ephemeral_roots_forbidden"]:
+        if forbidden.startswith("$"):
+            if any(forbidden in value for value in raw_root_values):
+                raise ValueError(f"ephemeral root {forbidden} is forbidden")
+            environment_root = os.environ.get(forbidden[1:])
+            if environment_root:
+                expanded_forbidden_root = Path(environment_root).expanduser().resolve()
+                if resolved == expanded_forbidden_root or resolved.is_relative_to(
+                    expanded_forbidden_root
+                ):
+                    raise ValueError(
+                        f"ephemeral root alias {expanded_forbidden_root} is forbidden"
+                    )
+            continue
+        forbidden_root = Path(forbidden).expanduser().resolve()
+        if resolved == forbidden_root or resolved.is_relative_to(forbidden_root):
+            raise ValueError(f"ephemeral root {forbidden_root} is forbidden")
+    if resolved != configured_smoke_root:
+        raise ValueError("persistent_root must equal the configured smoke root")
     if configs["retries"].get("max_total_attempts") != 3:
         raise ValueError("retry policy differs from the fixed Part 1 three-attempt contract")
     return {

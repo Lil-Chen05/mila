@@ -6,6 +6,7 @@ import copy
 import json
 import math
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -28,6 +29,7 @@ from part1_contract import (
     question_content_hash,
     question_id,
     question_manifest_hash,
+    shared_probe_id,
     study_id,
     study_manifest_hash,
     validate_instance,
@@ -217,6 +219,12 @@ def test_identity_payloads_are_domain_separated_and_ignore_mutable_metadata() ->
     changed["question"] = "What is 3 + 3?"
     assert question_content_hash(changed) != content_hash
     assert question_id(changed) != stable_id
+    duplicate_content_other_source_row = copy.deepcopy(q)
+    duplicate_content_other_source_row["source_row_identity"] = {"row_key": "m-18"}
+    # The content identity intentionally includes immutable source-row identity:
+    # duplicate text in distinct source rows must never collapse into one ID.
+    assert question_content_hash(duplicate_content_other_source_row) != content_hash
+    assert question_id(duplicate_content_other_source_row) != stable_id
     assert content_hash != stable_id
 
 
@@ -316,7 +324,7 @@ def test_model_run_and_record_identity_key_boundaries() -> None:
         "seed_algorithm_version": "part1-seed-v1",
         "base_generation_seed": 42,
         "environment_versions": {"python": "3.12"},
-        "final_production_git_commit": "f" * 40,
+        "final_production_git_commit": None,
         "production": False,
         "smoke_git_provenance": {"base_commit": "e" * 40, "diff_hash": "1" * 64},
     }
@@ -326,6 +334,30 @@ def test_model_run_and_record_identity_key_boundaries() -> None:
         "model_run_manifest",
         {**manifest, "model_run_id": rid, "model_run_manifest_hash": rhash},
     )
+    with pytest.raises(ValueError, match="final_production_git_commit"):
+        validate_instance(
+            "model_run_manifest",
+            {
+                **manifest,
+                "model_run_id": rid,
+                "model_run_manifest_hash": rhash,
+                "final_production_git_commit": "f" * 40,
+            },
+        )
+    production_manifest = {
+        **manifest,
+        "model_run_id": rid,
+        "model_run_manifest_hash": rhash,
+        "production": True,
+        "final_production_git_commit": "f" * 40,
+        "smoke_git_provenance": None,
+    }
+    validate_instance("model_run_manifest", production_manifest)
+    with pytest.raises(ValueError, match="smoke_git_provenance"):
+        validate_instance(
+            "model_run_manifest",
+            {**production_manifest, "smoke_git_provenance": {"base_commit": "e" * 40}},
+        )
     assert model_run_id({**manifest, "model_run_id": "0" * 64, "output_path": "/new"}) == rid
     assert model_run_manifest_hash(
         {**manifest, "model_run_manifest_hash": "0" * 64, "runtime_status": "complete"}
@@ -338,6 +370,44 @@ def test_model_run_and_record_identity_key_boundaries() -> None:
     checkpoint_id = checkpoint_record_id(HEX_64, rid, HEX_64_B, 0, "cp-00")
     assert checkpoint_id != natural_id
     assert checkpoint_id != checkpoint_record_id(HEX_64, rid, HEX_64_B, 0, "cp-01")
+
+    probe_id = shared_probe_id(
+        HEX_64,
+        rid,
+        HEX_64_B,
+        0,
+        prefix_hash="2" * 64,
+        inducer_version="part1-inducer-v1",
+    )
+    assert probe_id == shared_probe_id(
+        HEX_64,
+        rid,
+        HEX_64_B,
+        0,
+        prefix_hash="2" * 64,
+        inducer_version="part1-inducer-v1",
+    )
+    assert probe_id != shared_probe_id(
+        HEX_64,
+        rid,
+        HEX_64_B,
+        0,
+        prefix_hash="3" * 64,
+        inducer_version="part1-inducer-v1",
+    )
+    # Requested checkpoint identity and alias owner are intentionally absent:
+    # all aliases for the same physical prefix/probe share this ID.
+    assert probe_id not in {checkpoint_id, natural_id}
+    alias_checkpoint_id = checkpoint_record_id(HEX_64, rid, HEX_64_B, 0, "cp-04")
+    assert alias_checkpoint_id != checkpoint_id
+    assert probe_id == shared_probe_id(
+        HEX_64,
+        rid,
+        HEX_64_B,
+        0,
+        prefix_hash="2" * 64,
+        inducer_version="part1-inducer-v1",
+    )
 
     nat_attempt = attempt_id(HEX_64, rid, HEX_64_B, 0, 1)
     cp_attempt = attempt_id(HEX_64, rid, HEX_64_B, 0, 1, checkpoint_id="cp-00")
@@ -363,6 +433,127 @@ def test_seed_algorithm_is_deterministic_bounded_and_versioned() -> None:
     assert seed != derive_generation_seed(**{**kwargs, "question_id": HEX_64_B})
     assert seed != derive_generation_seed(**{**kwargs, "canonical_model_identity": "hf:other@immutable"})
     assert seed != derive_generation_seed(**kwargs, algorithm_version="part1-seed-v2-test")
+
+
+def test_all_public_identity_functions_have_fixed_golden_vectors() -> None:
+    q = question()
+    sidecar = {
+        "schema_name": "part1_question_manifest",
+        "schema_version": "1.0.0",
+        "manifest_format_version": "jsonl-v1",
+        "source_repository": "cais/mmlu",
+        "source_revision": "immutable-revision",
+        "source_config": "all",
+        "source_split": "test",
+        "subjects": ["high_school_mathematics"],
+        "quota_per_subject": 1,
+        "total_count": 1,
+        "question_sampling_seed": 42,
+        "selection_algorithm_version": "part1-balanced-sample-v1",
+        "canonicalization_version": CANONICAL_JSON_VERSION,
+        "ordered_record_aggregation": "canonical-record-bytes-in-manifest-order-v1",
+        "logical_filename": "questions.jsonl",
+    }
+    qmh = question_manifest_hash(sidecar, [q])
+    study = {
+        "schema_name": "part1_study_manifest",
+        "schema_version": "1.0.0",
+        "question_manifest_hash": qmh,
+        "subjects": ["high_school_mathematics"],
+        "subject_quotas": {"high_school_mathematics": 1},
+        "question_sampling_seed": 42,
+        "scientific_protocol_version": "part1-science-v1",
+        "checkpoint_fractions": [0.0, 0.5, 1.0],
+        "checkpoint_placement_contract": {"version": "ties-even-v1"},
+        "entropy_contract": {"version": "entropy-v1"},
+        "natural_answer_validity_rule": {"version": "post-close-v1"},
+        "status_contract_version": "part1-status-v1",
+        "calibration_contract": {"version": "calibration-v1"},
+        "bootstrap_contract": {"version": "bootstrap-v1"},
+        "primary_auroc_feature_registry": ["negative_mean_reasoning_entropy"],
+        "within_question_analysis": {"version": "paired-v1"},
+        "switching_stabilization_contract": {"version": "trajectory-v1"},
+        "repetition_policy": "preserve-successful-output",
+        "compatible_raw_record_schema_versions": ["1.0.0"],
+        "analysis_contract_version": "part1-analysis-v1",
+    }
+    sid = study_id(study)
+    model = {
+        "schema_name": "part1_model_run_manifest",
+        "schema_version": "1.0.0",
+        "study_id": sid,
+        "study_manifest_hash": study_manifest_hash(study),
+        "question_manifest_hash": qmh,
+        "model_repository": "HuggingFaceTB/SmolLM3-3B",
+        "model_revision": "model-commit",
+        "tokenizer_repository": "HuggingFaceTB/SmolLM3-3B",
+        "tokenizer_revision": "tokenizer-commit",
+        "canonical_model_identity": "hf:HuggingFaceTB/SmolLM3-3B@model-commit",
+        "adapter_version": "smollm3-v1",
+        "prompt_version": "part1-prompt-v1",
+        "prompt_hash": "d" * 64,
+        "parser_version": "part1-parser-v1",
+        "inducer_version": "part1-inducer-v1",
+        "inducer_text": "</think>\nAnswer:",
+        "inducer_token_ids": [1, 2],
+        "reasoning_open_tag": "<think>",
+        "reasoning_open_token_ids": [3],
+        "reasoning_close_tag": "</think>",
+        "reasoning_close_token_ids": [4],
+        "requested_natural_generation": {"do_sample": True},
+        "effective_natural_generation": {"do_sample": True},
+        "requested_checkpoint_generation": {"do_sample": False},
+        "effective_checkpoint_generation": {"do_sample": False},
+        "ad_token_convention": "single-token",
+        "ad_raw_token_sequences": {"A": [65], "B": [66], "C": [67], "D": [68]},
+        "ad_token_ids": [65, 66, 67, 68],
+        "seed_algorithm_version": "part1-seed-v1",
+        "base_generation_seed": 42,
+        "environment_versions": {"python": "3.12"},
+        "final_production_git_commit": None,
+        "production": False,
+        "smoke_git_provenance": {"base_commit": "e" * 40, "diff_hash": "1" * 64},
+    }
+    mrid = model_run_id(model)
+    natural_id = natural_record_id(sid, mrid, q["question_id"], 0)
+    checkpoint_id = checkpoint_record_id(sid, mrid, q["question_id"], 0, "cp-05")
+    probe_id = shared_probe_id(
+        sid,
+        mrid,
+        q["question_id"],
+        0,
+        prefix_hash="2" * 64,
+        inducer_version="part1-inducer-v1",
+    )
+    aid = attempt_id(sid, mrid, q["question_id"], 0, 1)
+    actual = {
+        "question_content_hash": question_content_hash(q),
+        "question_id": question_id(q),
+        "question_manifest_hash": qmh,
+        "study_id": sid,
+        "study_manifest_hash": study_manifest_hash(study),
+        "model_run_id": mrid,
+        "model_run_manifest_hash": model_run_manifest_hash(model),
+        "natural_record_id": natural_id,
+        "checkpoint_record_id": checkpoint_id,
+        "shared_probe_id": probe_id,
+        "attempt_id": aid,
+        "audit_event_id": audit_event_id(aid, "attempt_started", 0),
+    }
+    assert actual == {
+        "question_content_hash": "c57e912ef72fee82c4920d43a9b284a5e79657f10ef6b72f136a2318824c8f30",
+        "question_id": "71a3c45f7d81db3c6acd133e67e277b08f7b492ba1db8fb3ae3531123520548b",
+        "question_manifest_hash": "c81a3382357488a06aa6ddaea3a999779f3dada7787dc42c27d8142914d57133",
+        "study_id": "a6b8a3b2d52bbc692dc65704ddddfd843f09c823e8ff6f8007469fee1cac011e",
+        "study_manifest_hash": "0b559ef0867d875da4c7bdba30f44ba72bf034284cf67f0a8fea3c2020155bdd",
+        "model_run_id": "c5805e34bfd4f3661e9ad8289d8cc54785dc530731e5cb701b64e16df9e18246",
+        "model_run_manifest_hash": "4502d6cefb35b3c819ea59c2bdf50874ea6cf274d831df73642de7ee7a81863b",
+        "natural_record_id": "1e251f76fb293bae1b6228bcfc14c50c49bbd9f8971857fb99cc1d564eea879b",
+        "checkpoint_record_id": "ba39257c156e76b1d0100107af50d6987b73f327e7e16eccebef7ea753357dd2",
+        "shared_probe_id": "13582938eb479996fb846ca6f940c918f841ab22c6465865b36a8dcfe03599d1",
+        "attempt_id": "05c4cdf98323649b43357c2e3446bb55ada994405ee4f76bf3d80dd0623b2ef3",
+        "audit_event_id": "6460e30564fc371f5b83c4e4695a8fab8c3b980b710f24e7e7c57060fe1f2165",
+    }
 
 
 def test_all_machine_readable_schemas_and_configs_are_present() -> None:
@@ -447,6 +638,11 @@ def test_natural_schema_enforces_terminal_and_parse_nullability() -> None:
     with pytest.raises(ValueError, match="aligned"):
         validate_instance("natural_terminal_result", misaligned)
 
+    wrong_normalization = natural()
+    wrong_normalization["normalized_confidence"] = 0.7
+    with pytest.raises(ValueError, match="raw_parsed_confidence / 100"):
+        validate_instance("natural_terminal_result", wrong_normalization)
+
 
 def test_checkpoint_schema_enforces_outcome_and_measurement_nullability() -> None:
     validate_instance("checkpoint_terminal_result", checkpoint())
@@ -483,6 +679,21 @@ def test_checkpoint_schema_enforces_outcome_and_measurement_nullability() -> Non
     with pytest.raises(ValueError, match="requested fraction"):
         validate_instance("checkpoint_terminal_result", mismatched_fraction)
 
+    wrong_normalization = checkpoint()
+    wrong_normalization["normalized_confidence"] = 0.7
+    with pytest.raises(ValueError, match="raw_parsed_confidence / 100"):
+        validate_instance("checkpoint_terminal_result", wrong_normalization)
+
+    contradictory_invalid = checkpoint()
+    contradictory_invalid["checkpoint_model_output_status"] = "invalid"
+    with pytest.raises(ValueError, match="valid triad|should not be valid"):
+        validate_instance("checkpoint_terminal_result", contradictory_invalid)
+
+    contradictory_valid = checkpoint(output_status="invalid")
+    contradictory_valid["checkpoint_model_output_status"] = "valid"
+    with pytest.raises(ValueError, match="answer_parse_status"):
+        validate_instance("checkpoint_terminal_result", contradictory_valid)
+
 
 def test_audit_event_taxonomy_is_exact() -> None:
     assert AUDIT_EVENT_TYPES == {
@@ -508,6 +719,8 @@ def test_audit_event_taxonomy_is_exact() -> None:
         "attempt_number": 1,
         "event_sequence": 0,
         "event_type": "attempt_started",
+        "event_scope": "attempt",
+        "shard_id": None,
         "event_timestamp": "2026-07-31T00:00:00Z",
         "execution_context": {"hostname": "node", "pid": 123},
         "outcome_category": None,
@@ -522,6 +735,53 @@ def test_audit_event_taxonomy_is_exact() -> None:
     validate_instance("audit_event", event)
     with pytest.raises(ValueError, match="event_type"):
         validate_instance("audit_event", {**event, "event_type": "lock_acquired"})
+
+    shard_event_id = audit_event_id(
+        None,
+        "operator_unlock",
+        4,
+        study_id_value=HEX_64_B,
+        model_run_id_value=HEX_64_C,
+        shard_id="shard-007",
+    )
+    shard_event = {
+        **event,
+        "event_id": shard_event_id,
+        "event_type": "operator_unlock",
+        "event_scope": "shard",
+        "shard_id": "shard-007",
+        "question_id": None,
+        "run_id": None,
+        "checkpoint_id": None,
+        "attempt_id": None,
+        "attempt_number": None,
+        "event_sequence": 4,
+        "operator_reason": "verified worker and SLURM job are gone",
+    }
+    validate_instance("audit_event", shard_event)
+    assert shard_event_id == "b56cca4e3208cf934bde2c299f498f77b96086fcb1193833a85e47ddabe5e4b8"
+
+    with pytest.raises(ValueError, match="attempt_id|event_type"):
+        validate_instance(
+            "audit_event",
+            {**shard_event, "event_scope": "attempt", "event_type": "operator_unlock"},
+        )
+    with pytest.raises(ValueError, match="attempt_id"):
+        validate_instance("audit_event", {**shard_event, "attempt_id": "e" * 64})
+    with pytest.raises(ValueError, match="operator_reason"):
+        validate_instance(
+            "audit_event",
+            {**shard_event, "event_type": "stale_lock_recovered"},
+        )
+    with pytest.raises(ValueError, match="shard identity"):
+        audit_event_id(
+            None,
+            "stale_lock_recovered",
+            0,
+            study_id_value=HEX_64_B,
+            model_run_id_value=HEX_64_C,
+            shard_id=None,
+        )
 
 
 def test_manifest_and_validation_report_schemas_accept_complete_examples() -> None:
@@ -604,7 +864,9 @@ def test_manifest_and_validation_report_schemas_accept_complete_examples() -> No
     validate_instance("validation_report", report)
 
 
-def test_config_templates_encode_fixed_science_and_phase1_guard(tmp_path: Path) -> None:
+def test_config_templates_encode_fixed_science_and_phase1_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     configs = {name: load_config(name) for name in CONFIG_NAMES}
     protocol = configs["study_protocol"]
     assert protocol["subjects"] == [
@@ -639,7 +901,7 @@ def test_config_templates_encode_fixed_science_and_phase1_guard(tmp_path: Path) 
     assert retries["cuda_retry_requires_fresh_process"] is True
     assert retries["preserve_seed_and_logical_identity"] is True
 
-    root = tmp_path / "persistent" / "part1-smoke"
+    root = Path(configs["storage"]["smoke_root"])
     summary = validate_phase1_config(configs, mode="smoke", persistent_root=root)
     assert summary["mode"] == "smoke"
     assert summary["production_allowed"] is False
@@ -647,11 +909,60 @@ def test_config_templates_encode_fixed_science_and_phase1_guard(tmp_path: Path) 
     with pytest.raises(ValueError, match="production"):
         validate_phase1_config(configs, mode="production", persistent_root=root)
     with pytest.raises(ValueError, match="separate"):
+        aliased = copy.deepcopy(configs)
+        aliased["storage"]["production_root"] = aliased["storage"]["smoke_root"]
+        validate_phase1_config(aliased, mode="smoke", persistent_root=root)
+
+    with pytest.raises(ValueError, match="configured smoke root"):
         validate_phase1_config(
             configs,
             mode="smoke",
-            persistent_root=Path(configs["storage"]["production_root"]),
+            persistent_root=tmp_path / "different-root",
         )
+
+    with pytest.raises(ValueError, match="ephemeral"):
+        ephemeral = copy.deepcopy(configs)
+        ephemeral["storage"]["smoke_root"] = "/tmp/part1-smoke"
+        validate_phase1_config(
+            ephemeral,
+            mode="smoke",
+            persistent_root=Path("/private/tmp/../tmp/part1-smoke"),
+        )
+
+    with pytest.raises(ValueError, match="explicitly configured"):
+        validate_phase1_config(configs, mode="smoke", persistent_root=None)
+
+    with pytest.raises(ValueError, match="ephemeral"):
+        slurm_tmp = copy.deepcopy(configs)
+        slurm_tmp["storage"]["smoke_root"] = "$SLURM_TMPDIR/part1-smoke"
+        validate_phase1_config(
+            slurm_tmp,
+            mode="smoke",
+            persistent_root=Path("$SLURM_TMPDIR/part1-smoke"),
+        )
+
+    slurm_tmp_root = tmp_path / "slurm-job-tmp"
+    monkeypatch.setenv("SLURM_TMPDIR", str(slurm_tmp_root))
+    with pytest.raises(ValueError, match="ephemeral"):
+        expanded_slurm_tmp = copy.deepcopy(configs)
+        expanded_slurm_tmp["storage"]["smoke_root"] = str(slurm_tmp_root / "part1-smoke")
+        validate_phase1_config(
+            expanded_slurm_tmp,
+            mode="smoke",
+            persistent_root=slurm_tmp_root / "part1-smoke",
+        )
+
+    shared_target = tmp_path / "shared-target"
+    shared_target.mkdir()
+    smoke_alias = tmp_path / "smoke-alias"
+    production_alias = tmp_path / "production-alias"
+    smoke_alias.symlink_to(shared_target, target_is_directory=True)
+    production_alias.symlink_to(shared_target, target_is_directory=True)
+    aliased = copy.deepcopy(configs)
+    aliased["storage"]["smoke_root"] = str(smoke_alias)
+    aliased["storage"]["production_root"] = str(production_alias)
+    with pytest.raises(ValueError, match="separate"):
+        validate_phase1_config(aliased, mode="smoke", persistent_root=smoke_alias)
 
 
 @pytest.mark.parametrize(
@@ -673,5 +984,32 @@ def test_config_validation_rejects_scientific_or_retry_drift(
         validate_phase1_config(
             configs,
             mode="smoke",
-            persistent_root=tmp_path / "persistent" / "part1-smoke",
+            persistent_root=Path(configs["storage"]["smoke_root"]),
         )
+
+
+@pytest.mark.parametrize(
+    "generated_path",
+    [
+        "results/part1-smoke/smoke-run/model_run_manifest.json",
+        "results/part1-smoke/smoke-run/natural_results.jsonl",
+        "results/part1/model-run/checkpoint_results.jsonl",
+        "results/part1/model-run/audit_events.jsonl",
+    ],
+)
+def test_configured_generated_result_roots_are_narrowly_ignored(generated_path: str) -> None:
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", generated_path],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+    )
+    assert result.returncode == 0
+
+
+def test_historical_result_roots_are_not_newly_ignored() -> None:
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", "results/20q/new-untracked-summary.json"],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+    )
+    assert result.returncode == 1

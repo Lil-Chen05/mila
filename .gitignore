@@ -18,3 +18,8 @@ logs/*
 # Datasets and experiment outputs (saved to disk, not version-controlled)
 data/
 results/*/*.shard*.jsonl
+
+# Generated Part 1 operational manifests, raw shards, events, and reports.
+# Historical results/20q and results/200q remain tracked and unaffected.
+results/part1-smoke/
+results/part1/

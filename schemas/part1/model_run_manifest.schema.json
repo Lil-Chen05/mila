@@ -46,6 +46,6 @@
   },
   "allOf": [
     {"if": {"properties": {"production": {"const": true}}}, "then": {"properties": {"final_production_git_commit": {"type": "string"}, "smoke_git_provenance": {"type": "null"}}}},
-    {"if": {"properties": {"production": {"const": false}}}, "then": {"properties": {"smoke_git_provenance": {"type": "object"}}}}
+    {"if": {"properties": {"production": {"const": false}}}, "then": {"properties": {"final_production_git_commit": {"type": "null"}, "smoke_git_provenance": {"type": "object"}}}}
   ]
 }

@@ -81,6 +81,10 @@
       "then": {"properties": {"checkpoint_execution_outcome": {"const": "complete"}, "answer_parse_status": {"const": "parsed"}, "answer_token_status": {"const": "located"}, "entropy_status": {"const": "computed"}, "terminal_answer_block_text": {"type": "string"}}}
     },
     {
+      "if": {"properties": {"checkpoint_model_output_status": {"const": "invalid"}}},
+      "then": {"not": {"properties": {"answer_parse_status": {"const": "parsed"}, "answer_token_status": {"const": "located"}, "entropy_status": {"const": "computed"}}, "required": ["answer_parse_status", "answer_token_status", "entropy_status"]}}
+    },
+    {
       "if": {"properties": {"answer_parse_status": {"const": "parsed"}}},
       "then": {"properties": {"forced_answer": {"enum": ["A", "B", "C", "D"]}, "checkpoint_local_correct": {"type": "boolean"}}},
       "else": {"properties": {"forced_answer": {"type": "null"}, "checkpoint_local_correct": {"type": "null"}}}

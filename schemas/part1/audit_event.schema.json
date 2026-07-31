@@ -4,18 +4,20 @@
   "title": "Part 1 append-only audit event",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_name", "schema_version", "event_id", "study_id", "model_run_id", "question_id", "run_id", "checkpoint_id", "attempt_id", "attempt_number", "event_sequence", "event_type", "event_timestamp", "execution_context", "outcome_category", "error_details", "retry_classification", "retry_decision", "backoff_seconds", "related_lock_owner", "terminal_record_id", "operator_reason"],
+  "required": ["schema_name", "schema_version", "event_id", "event_scope", "study_id", "model_run_id", "shard_id", "question_id", "run_id", "checkpoint_id", "attempt_id", "attempt_number", "event_sequence", "event_type", "event_timestamp", "execution_context", "outcome_category", "error_details", "retry_classification", "retry_decision", "backoff_seconds", "related_lock_owner", "terminal_record_id", "operator_reason"],
   "properties": {
     "schema_name": {"const": "part1_audit_event"},
     "schema_version": {"const": "1.0.0"},
     "event_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "study_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "model_run_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "question_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "run_id": {"type": "integer", "minimum": 0},
+    "event_scope": {"enum": ["attempt", "shard"]},
+    "shard_id": {"type": ["string", "null"]},
+    "question_id": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "run_id": {"type": ["integer", "null"], "minimum": 0},
     "checkpoint_id": {"type": ["string", "null"]},
-    "attempt_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "attempt_number": {"type": "integer", "minimum": 1, "maximum": 3},
+    "attempt_id": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "attempt_number": {"type": ["integer", "null"], "minimum": 1, "maximum": 3},
     "event_sequence": {"type": "integer", "minimum": 0},
     "event_type": {"enum": ["attempt_started", "attempt_failed", "attempt_interrupted", "attempt_completed", "terminal_result_recovered", "stale_lock_recovered", "trailing_line_recovered", "operator_unlock"]},
     "event_timestamp": {"type": "string", "format": "date-time"},
@@ -30,6 +32,8 @@
     "operator_reason": {"type": ["string", "null"]}
   },
   "allOf": [
-    {"if": {"properties": {"event_type": {"const": "operator_unlock"}}}, "then": {"properties": {"operator_reason": {"type": "string", "minLength": 1}}}}
+    {"if": {"properties": {"event_scope": {"const": "attempt"}}}, "then": {"properties": {"event_type": {"enum": ["attempt_started", "attempt_failed", "attempt_interrupted", "attempt_completed", "terminal_result_recovered"]}, "question_id": {"type": "string"}, "run_id": {"type": "integer"}, "attempt_id": {"type": "string"}, "attempt_number": {"type": "integer"}}}},
+    {"if": {"properties": {"event_scope": {"const": "shard"}}}, "then": {"properties": {"event_type": {"enum": ["stale_lock_recovered", "trailing_line_recovered", "operator_unlock"]}, "shard_id": {"type": "string", "minLength": 1}, "question_id": {"type": "null"}, "run_id": {"type": "null"}, "checkpoint_id": {"type": "null"}, "attempt_id": {"type": "null"}, "attempt_number": {"type": "null"}}}},
+    {"if": {"properties": {"event_type": {"const": "operator_unlock"}}}, "then": {"properties": {"operator_reason": {"type": "string", "minLength": 1}}}, "else": {"properties": {"operator_reason": {"type": "null"}}}}
   ]
 }
