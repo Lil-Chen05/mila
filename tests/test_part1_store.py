@@ -30,13 +30,15 @@ from part1_store_fixtures import (
 
 
 def store(tmp_path: Path) -> Part1ShardStore:
-    return Part1ShardStore(
+    shard = Part1ShardStore(
         tmp_path / "shard",
         shard_id=SHARD_ID,
         study_id=STUDY_ID,
         model_run_id=MODEL_RUN_ID,
         model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
     )
+    shard.initialize_provenance_header()
+    return shard
 
 
 def _write_synthetic_raw_terminal(shard: Part1ShardStore, result: dict) -> None:
@@ -182,7 +184,7 @@ def test_read_only_index_flags_persisted_failure_policy_mismatch(tmp_path: Path)
         retry_classification="retryable",
         retry_decision="retry",
     )
-    shard.root.mkdir(parents=True)
+    shard.root.mkdir(parents=True, exist_ok=True)
     shard.audit_events_path.write_text(
         "".join(
             json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
@@ -226,7 +228,7 @@ def test_read_only_index_flags_terminal_completion_policy_mismatch(tmp_path: Pat
 def test_read_only_index_flags_nonsequential_persisted_attempt_numbers(tmp_path: Path) -> None:
     shard = store(tmp_path)
     third = natural_result(attempt_number=3)
-    shard.root.mkdir(parents=True)
+    shard.root.mkdir(parents=True, exist_ok=True)
     shard.audit_events_path.write_text(
         json.dumps(
             attempt_event(third, "attempt_started", 0),
@@ -238,6 +240,16 @@ def test_read_only_index_flags_nonsequential_persisted_attempt_numbers(tmp_path:
     )
     index = shard.build_index()
     assert any("nonsequential" in error for error in index.lifecycle_errors)
+
+
+def test_retry_failure_backoff_must_match_shared_schedule(tmp_path: Path) -> None:
+    shard = store(tmp_path)
+    result = natural_result()
+    shard.append_audit_event(attempt_event(result, "attempt_started", 0))
+    bad = attempt_event(result, "attempt_failed", 1)
+    bad["backoff_seconds"] = 99
+    with pytest.raises(ValueError, match="backoff"):
+        shard.append_audit_event(bad)
 
 
 @pytest.mark.parametrize(
@@ -366,7 +378,7 @@ def test_malformed_middle_is_rejected_and_never_truncated(tmp_path: Path) -> Non
     result = natural_result()
     valid_line = json.dumps(result, sort_keys=True, separators=(",", ":")).encode() + b"\n"
     original = valid_line + b"not-json\n" + valid_line
-    shard.root.mkdir(parents=True)
+    shard.root.mkdir(parents=True, exist_ok=True)
     shard.natural_results_path.write_bytes(original)
     with pytest.raises(MalformedMiddleError, match="middle"):
         shard.recover_trailing_line(
@@ -380,7 +392,7 @@ def test_malformed_middle_is_rejected_and_never_truncated(tmp_path: Path) -> Non
 
 def test_append_refuses_unrecovered_tail_and_finalized_shard_is_immutable(tmp_path: Path) -> None:
     shard = store(tmp_path)
-    shard.root.mkdir(parents=True)
+    shard.root.mkdir(parents=True, exist_ok=True)
     shard.audit_events_path.write_bytes(b'{"incomplete"')
     with pytest.raises(StreamTailError, match="recover"):
         shard.append_audit_event(attempt_event(natural_result(), "attempt_started", 0))
@@ -458,7 +470,7 @@ def test_valid_json_at_eof_without_newline_is_preserved_and_repaired(tmp_path: P
     shard = store(tmp_path)
     result = natural_result()
     encoded = json.dumps(result, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    shard.root.mkdir(parents=True)
+    shard.root.mkdir(parents=True, exist_ok=True)
     shard.natural_results_path.write_bytes(encoded)
 
     inspection = shard.inspect()
@@ -537,7 +549,7 @@ def test_validation_rejects_completion_reference_to_a_different_attempt_result(
 
 def test_validation_distinguishes_valid_json_with_invalid_schema(tmp_path: Path) -> None:
     shard = store(tmp_path)
-    shard.root.mkdir(parents=True)
+    shard.root.mkdir(parents=True, exist_ok=True)
     shard.natural_results_path.write_text(
         json.dumps({"schema_name": "part1_natural_terminal_result"}) + "\n",
         encoding="utf-8",
@@ -711,7 +723,7 @@ def test_pending_recovery_journals_can_be_finished_without_reconstructing_argume
     tmp_path: Path,
 ) -> None:
     shard = store(tmp_path)
-    shard.root.mkdir(parents=True)
+    shard.root.mkdir(parents=True, exist_ok=True)
     partial = b'{"schema_name":"part1_natural_terminal_result","cut"'
     shard.natural_results_path.write_bytes(partial)
     with pytest.raises(InjectedCrash):
@@ -829,7 +841,7 @@ def test_read_only_validation_rejects_handwritten_contradictory_lifecycle(tmp_pa
         attempt_event(result, "attempt_failed", 1),
         attempt_event(result, "attempt_completed", 2),
     ]
-    shard.root.mkdir(parents=True)
+    shard.root.mkdir(parents=True, exist_ok=True)
     shard.natural_results_path.write_text(
         json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
@@ -909,6 +921,7 @@ def test_validation_report_identity_excludes_mutable_report_state_and_is_domain_
         model_run_id=MODEL_RUN_ID,
         model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
     )
+    different_shard.initialize_provenance_header()
     different = different_shard.validate_shard(
         artifact_kind="natural_shard",
         started_at="2026-07-31T00:00:00Z",

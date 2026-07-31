@@ -16,10 +16,11 @@ from part1_runtime import LockMetadata, LockedShardSession
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--shard-root", type=Path, required=True)
-    parser.add_argument("--study-id", required=True)
-    parser.add_argument("--model-run-id", required=True)
-    parser.add_argument("--model-run-manifest-hash", required=True)
-    parser.add_argument("--shard-id", required=True)
+    parser.add_argument("--finish-pending", action="store_true")
+    parser.add_argument("--study-id")
+    parser.add_argument("--model-run-id")
+    parser.add_argument("--model-run-manifest-hash")
+    parser.add_argument("--shard-id")
     parser.add_argument("--reason", required=True, help="Nonblank operator justification")
     return parser
 
@@ -27,6 +28,28 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    if args.finish_pending:
+        session = LockedShardSession.finish_pending_takeover(
+            args.shard_root,
+            operator_override_reason=args.reason,
+        )
+        event = session.store.inspect().audit_events[-1]
+        session.close()
+        print(json.dumps({
+            "event_id": event["event_id"],
+            "event_type": event["event_type"],
+            "shard_id": event["shard_id"],
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        return 0
+    missing = [
+        name
+        for name in (
+            "study_id", "model_run_id", "model_run_manifest_hash", "shard_id"
+        )
+        if getattr(args, name) is None
+    ]
+    if missing:
+        raise SystemExit(f"missing arguments for new takeover: {', '.join(missing)}")
     owner = LockMetadata.new(
         study_id=args.study_id,
         model_run_id=args.model_run_id,

@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import threading
+import time
 
 import pytest
 
@@ -42,6 +44,7 @@ def test_store_checks_current_lock_ownership_before_each_mutation(tmp_path: Path
         model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
         mutation_guard=assert_owned,
     )
+    shard.initialize_provenance_header()
     result = natural_result()
     shard.append_audit_event(attempt_event(result, "attempt_started", 0))
 
@@ -70,6 +73,7 @@ def test_store_rechecks_ownership_immediately_before_file_creation(
         model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
         mutation_guard=displaced_after_preflight,
     )
+    shard.initialize_provenance_header()
     if operation == "validation_report":
         output = tmp_path / "report.json"
         with pytest.raises(RuntimeError, match="displaced"):
@@ -150,8 +154,9 @@ def test_verified_stale_recovery_is_race_safe_audited_and_displaces_old_writer(
     assert event["event_type"] == "stale_lock_recovered"
     assert event["related_lock_owner"]["lock_id"] == old.owner.lock_id
     history = list((replacement.store.root / ".lock_history").glob("*.json"))
-    assert len(history) == 1
-    assert json.loads(history[0].read_text(encoding="utf-8"))["previous_lock"]["pid"] == 101
+    assert len(history) == 2
+    claim_history = next(path for path in history if path.name.endswith(".claim.json"))
+    assert json.loads(claim_history.read_text(encoding="utf-8"))["previous_lock"]["pid"] == 101
 
     with pytest.raises(LostLockOwnershipError, match="no longer owns"):
         old.store.append_audit_event(attempt_event(natural_result(), "attempt_started", 0))
@@ -298,7 +303,6 @@ def test_acquire_and_takeover_reject_finalized_shards(tmp_path: Path) -> None:
     [
         ("LIVE", "DEAD", "live"),
         ("DEAD", "LIVE", "live"),
-        ("UNKNOWN", "DEAD", "uncertain"),
         ("DEAD", "UNKNOWN", "uncertain"),
     ],
 )
@@ -327,7 +331,12 @@ def test_stale_recovery_refuses_live_or_uncertain_liveness_and_never_uses_age(
 
 
 def test_default_remote_and_slurm_liveness_probes_fail_closed(tmp_path: Path) -> None:
-    from part1_runtime import LockedShardSession, StaleRecoveryRefused
+    from part1_runtime import (
+        Liveness,
+        LockedShardSession,
+        StaleRecoveryRefused,
+        default_worker_liveness,
+    )
 
     old = _acquire(tmp_path, pid=999999)
     with pytest.raises(StaleRecoveryRefused, match="uncertain"):
@@ -335,6 +344,8 @@ def test_default_remote_and_slurm_liveness_probes_fail_closed(tmp_path: Path) ->
             tmp_path / "shard",
             owner=_owner(pid=202),
             model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+            worker_liveness=default_worker_liveness,
+            slurm_liveness=lambda metadata: Liveness.UNKNOWN,
             event_timestamp="2026-07-31T00:01:00Z",
             execution_context={"hostname": "recovery-node", "pid": 202},
         )
@@ -366,8 +377,7 @@ def test_slurm_probe_uses_exact_array_selector_and_fails_closed(
     assert probe_slurm_liveness(_owner(pid=101), runner=runner) is Liveness[expected]
     assert observed["command"] == [
         "squeue",
-        "--jobs",
-        "job-17_3",
+        "--jobs=job-17_3",
         "--noheader",
         "--format=%i",
     ]
@@ -431,7 +441,7 @@ def test_operator_unlock_requires_reason_audits_takeover_and_invalidates_old_lea
 def test_retryable_failure_categories_preserve_identity_and_seed(category: str) -> None:
     from part1_runtime import WorkSpec, plan_retry
 
-    work = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, QUESTION_ID, 0, seed=123)
+    work = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, MODEL_RUN_MANIFEST_HASH, QUESTION_ID, 0, seed=123)
     plan = plan_retry(work, category=category, attempts_consumed=1)
     assert plan.decision == "retry"
     assert plan.next_attempt_number == 2
@@ -455,7 +465,7 @@ def test_retryable_failure_categories_preserve_identity_and_seed(category: str) 
 def test_terminal_failure_categories_never_retry(category: str) -> None:
     from part1_runtime import WorkSpec, plan_retry
 
-    work = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, QUESTION_ID, 0, seed=123)
+    work = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, MODEL_RUN_MANIFEST_HASH, QUESTION_ID, 0, seed=123)
     plan = plan_retry(work, category=category, attempts_consumed=1)
     assert plan.classification == "terminal"
     assert plan.decision == "do_not_retry"
@@ -465,7 +475,7 @@ def test_terminal_failure_categories_never_retry(category: str) -> None:
 def test_attempt_limit_is_exactly_three_total_attempts() -> None:
     from part1_runtime import WorkSpec, plan_retry
 
-    work = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, QUESTION_ID, 0, seed=123)
+    work = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, MODEL_RUN_MANIFEST_HASH, QUESTION_ID, 0, seed=123)
     exhausted = plan_retry(work, category="interrupted_process", attempts_consumed=3)
     assert exhausted.decision == "exhausted"
     assert exhausted.next_attempt_number is None
@@ -488,7 +498,7 @@ def test_retry_config_must_equal_both_shared_failure_category_sets() -> None:
 def test_cuda_retry_requires_worker_exit_and_forbids_in_process_execution() -> None:
     from part1_runtime import FreshProcessRequired, WorkSpec, assert_in_process_retry_allowed, plan_retry
 
-    work = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, QUESTION_ID, 0, seed=123)
+    work = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, MODEL_RUN_MANIFEST_HASH, QUESTION_ID, 0, seed=123)
     plan = plan_retry(work, category="transient_cuda_runtime_failure", attempts_consumed=1)
     assert plan.requires_fresh_process is True
     assert plan.terminate_current_process is True
@@ -499,9 +509,9 @@ def test_cuda_retry_requires_worker_exit_and_forbids_in_process_execution() -> N
 def _work_specs():
     from part1_runtime import WorkSpec
 
-    natural = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, QUESTION_ID, 0, seed=123)
+    natural = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, MODEL_RUN_MANIFEST_HASH, QUESTION_ID, 0, seed=123)
     checkpoints = [
-        WorkSpec.checkpoint(STUDY_ID, MODEL_RUN_ID, QUESTION_ID, 0, cp, seed=123)
+        WorkSpec.checkpoint(STUDY_ID, MODEL_RUN_ID, MODEL_RUN_MANIFEST_HASH, QUESTION_ID, 0, cp, seed=123)
         for cp in ("cp-00", "cp-05")
     ]
     return natural, checkpoints
@@ -604,19 +614,22 @@ def test_resume_classifies_terminal_failure_and_exhaustion(tmp_path: Path) -> No
     from part1_runtime import WorkSpec, plan_resume
 
     session = _acquire(tmp_path)
-    work = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, QUESTION_ID, 0, seed=123)
-    for number in (1, 2, 3):
+    work = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, MODEL_RUN_MANIFEST_HASH, QUESTION_ID, 0, seed=123)
+    for number in (1, 2):
         record = natural_result(attempt_number=number)
         started = attempt_event(record, "attempt_started", 0)
         session.store.append_audit_event(started)
         failed = attempt_event(record, "attempt_failed", 1)
         failed["outcome_category"] = "interrupted_process"
         failed["retry_classification"] = "retryable"
-        failed["retry_decision"] = "retry" if number < 3 else "exhausted"
+        failed["retry_decision"] = "retry"
         session.store.append_audit_event(failed)
+    third = natural_result(attempt_number=3)
+    session.store.append_audit_event(attempt_event(third, "attempt_started", 0))
+    session.store.append_audit_event(attempt_event(third, "attempt_interrupted", 1))
     decision = plan_resume(session.store.build_index(), [work])[work]
-    assert decision.status == "terminal"
-    assert decision.reason == "attempts_exhausted"
+    assert decision.status == "terminalization_required"
+    assert decision.reason == "terminal_result_required"
 
 
 @pytest.mark.parametrize(
@@ -632,14 +645,25 @@ def test_resume_honors_failed_attempt_classification_before_exhaustion(
     from part1_runtime import WorkSpec, plan_resume
 
     session = _acquire(tmp_path)
-    result = natural_result()
+    result = natural_result(
+        outcome="terminal_infrastructure_failure" if classification == "terminal" else "complete"
+    )
+    if classification == "terminal":
+        result["terminal_error_details"]["category"] = category
     session.store.append_audit_event(attempt_event(result, "attempt_started", 0))
+    if classification == "terminal":
+        session.store.commit_terminal_result(
+            result, attempt_event(result, "attempt_completed", 1)
+        )
+        work = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, MODEL_RUN_MANIFEST_HASH, QUESTION_ID, 0, seed=123)
+        assert plan_resume(session.store.build_index(), [work])[work].status == expected_status
+        return
     failed = attempt_event(result, "attempt_failed", 1)
     failed["outcome_category"] = category
     failed["retry_classification"] = classification
     failed["retry_decision"] = "retry" if classification == "retryable" else "do_not_retry"
     session.store.append_audit_event(failed)
-    work = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, QUESTION_ID, 0, seed=123)
+    work = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, MODEL_RUN_MANIFEST_HASH, QUESTION_ID, 0, seed=123)
     assert plan_resume(session.store.build_index(), [work])[work].status == expected_status
 
 
@@ -650,12 +674,12 @@ def test_resume_rejects_seed_or_logical_provenance_mismatch(tmp_path: Path) -> N
     result = natural_result()
     session.store.append_audit_event(attempt_event(result, "attempt_started", 0))
     session.store.commit_terminal_result(result, attempt_event(result, "attempt_completed", 1))
-    wrong_seed = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, QUESTION_ID, 0, seed=999)
+    wrong_seed = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, MODEL_RUN_MANIFEST_HASH, QUESTION_ID, 0, seed=999)
     with pytest.raises(CompatibilityError, match="seed"):
         plan_resume(session.store.build_index(), [wrong_seed])
 
     wrong_checkpoint_seed = WorkSpec.checkpoint(
-        STUDY_ID, MODEL_RUN_ID, QUESTION_ID, 0, "cp-05", seed=999
+        STUDY_ID, MODEL_RUN_ID, MODEL_RUN_MANIFEST_HASH, QUESTION_ID, 0, "cp-05", seed=999
     )
     with pytest.raises(CompatibilityError, match="seed"):
         plan_resume(session.store.build_index(), [wrong_checkpoint_seed])
@@ -669,7 +693,7 @@ def test_resume_rejects_requested_study_or_model_run_incompatible_with_shard(
     session = _acquire(tmp_path)
     result = natural_result()
     session.store.append_audit_event(attempt_event(result, "attempt_started", 0))
-    wrong = WorkSpec.natural(STUDY_ID, "0" * 64, QUESTION_ID, 0, seed=123)
+    wrong = WorkSpec.natural(STUDY_ID, "0" * 64, MODEL_RUN_MANIFEST_HASH, QUESTION_ID, 0, seed=123)
     with pytest.raises(CompatibilityError, match="study/model-run|shard provenance"):
         plan_resume(session.store.build_index(), [wrong])
     with pytest.raises(CompatibilityError, match="study/model-run|shard provenance"):
@@ -696,7 +720,7 @@ def test_resume_refuses_index_with_lifecycle_corruption(tmp_path: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
-    work = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, QUESTION_ID, 0, seed=123)
+    work = WorkSpec.natural(STUDY_ID, MODEL_RUN_ID, MODEL_RUN_MANIFEST_HASH, QUESTION_ID, 0, seed=123)
     with pytest.raises(CompatibilityError, match="lifecycle"):
         plan_resume(session.store.build_index(), [work])
 
@@ -816,8 +840,7 @@ def test_dry_run_default_and_templates_are_read_only_and_login_safe(tmp_path: Pa
         model_run_manifest=model,
         shard_root=nonexistent_shard,
     )
-    assert shard_report["shard_plan"]["validation"]["is_valid"] is True
-    assert shard_report["shard_plan"]["completed_logical_keys"] == 0
+    assert shard_report["is_valid"] is False
     assert shard_report["shard_plan"]["mutation_performed"] is False
     assert not nonexistent_shard.exists()
 
@@ -894,3 +917,704 @@ def test_operator_unlock_cli_requires_reason_and_uses_no_model_or_data_imports(t
     source = (repository / "scripts" / "part1_operator_unlock.py").read_text(encoding="utf-8")
     for forbidden in ("torch", "transformers", "datasets", "AutoModel", "AutoTokenizer"):
         assert forbidden not in source
+
+
+def test_mutation_and_takeover_share_one_cross_process_critical_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from part1_runtime import Liveness, LockedShardSession
+
+    old = _acquire(tmp_path, pid=101)
+    result = natural_result()
+    entered = threading.Event()
+    release = threading.Event()
+    original = old.store._durable_append
+
+    def paused_append(path: Path, payload: bytes) -> None:
+        entered.set()
+        assert release.wait(5)
+        original(path, payload)
+
+    monkeypatch.setattr(old.store, "_durable_append", paused_append)
+    append_thread = threading.Thread(
+        target=lambda: old.store.append_audit_event(attempt_event(result, "attempt_started", 0))
+    )
+    append_thread.start()
+    assert entered.wait(5)
+    takeover_result: list = []
+
+    def takeover() -> None:
+        takeover_result.append(
+            LockedShardSession.recover_stale(
+                old.store.root,
+                owner=_owner(pid=202),
+                model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+                worker_liveness=lambda metadata: Liveness.DEAD,
+                slurm_liveness=lambda metadata: Liveness.DEAD,
+                event_timestamp="2026-07-31T00:10:00Z",
+                execution_context={"hostname": "node", "pid": 202},
+            )
+        )
+
+    takeover_thread = threading.Thread(target=takeover)
+    takeover_thread.start()
+    time.sleep(0.05)
+    assert takeover_result == []
+    release.set()
+    append_thread.join(5)
+    takeover_thread.join(5)
+    assert len(takeover_result) == 1
+    assert len(takeover_result[0].store.inspect().audit_events) == 2
+    takeover_result[0].close()
+
+
+def test_close_cannot_remove_replacement_lock_during_race(tmp_path: Path) -> None:
+    from part1_runtime import Liveness, LockedShardSession, LostLockOwnershipError
+
+    old = _acquire(tmp_path, pid=101)
+    replacement = LockedShardSession.recover_stale(
+        old.store.root,
+        owner=_owner(pid=202),
+        model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+        worker_liveness=lambda metadata: Liveness.DEAD,
+        slurm_liveness=lambda metadata: Liveness.DEAD,
+        event_timestamp="2026-07-31T00:10:00Z",
+        execution_context={"hostname": "node", "pid": 202},
+    )
+    with pytest.raises(LostLockOwnershipError):
+        old.close()
+    replacement.assert_owned()
+    replacement.close()
+
+
+def test_takeover_waits_for_full_trailing_recovery_critical_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from part1_runtime import Liveness, LockedShardSession
+
+    old = _acquire(tmp_path, pid=101)
+    old.store.natural_results_path.write_bytes(b'{"cut"')
+    entered = threading.Event()
+    release = threading.Event()
+    original = old.store._durable_append
+
+    def paused_append(path: Path, payload: bytes) -> None:
+        if path == old.store.audit_events_path:
+            entered.set()
+            assert release.wait(5)
+        original(path, payload)
+
+    monkeypatch.setattr(old.store, "_durable_append", paused_append)
+    recovery = threading.Thread(
+        target=lambda: old.store.recover_trailing_line(
+            "natural_results",
+            event_sequence=0,
+            event_timestamp="2026-07-31T00:09:00Z",
+            execution_context={},
+        )
+    )
+    recovery.start()
+    assert entered.wait(5)
+    replacements: list = []
+    takeover = threading.Thread(
+        target=lambda: replacements.append(
+            LockedShardSession.recover_stale(
+                old.store.root,
+                owner=_owner(pid=202),
+                model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+                worker_liveness=lambda metadata: Liveness.DEAD,
+                slurm_liveness=lambda metadata: Liveness.DEAD,
+                event_timestamp="2026-07-31T00:10:00Z",
+                execution_context={},
+            )
+        )
+    )
+    takeover.start()
+    time.sleep(0.05)
+    assert replacements == []
+    release.set()
+    recovery.join(5)
+    takeover.join(5)
+    assert len(replacements) == 1
+    replacements[0].close()
+
+
+@pytest.mark.parametrize("operation", ["report", "finalize"])
+def test_takeover_serializes_report_and_finalization_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    from part1_runtime import FinalizedRuntimeShardError, Liveness, LockedShardSession
+
+    old = _acquire(tmp_path, pid=101)
+    entered = threading.Event()
+    release = threading.Event()
+    original = old.store.validate_shard
+
+    def paused_validation(**kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original(**kwargs)
+
+    monkeypatch.setattr(old.store, "validate_shard", paused_validation)
+    mutation_errors: list[Exception] = []
+
+    def mutate() -> None:
+        try:
+            if operation == "report":
+                old.store.write_validation_report(
+                    tmp_path / "report.json",
+                    artifact_kind="natural_shard",
+                    started_at="2026-07-31T00:00:00Z",
+                    completed_at="2026-07-31T00:00:01Z",
+                )
+            else:
+                old.store.finalize()
+        except Exception as exc:  # pragma: no cover - asserted below
+            mutation_errors.append(exc)
+
+    mutation = threading.Thread(target=mutate)
+    mutation.start()
+    assert entered.wait(5)
+    replacements: list = []
+    takeover_errors: list[Exception] = []
+
+    def takeover() -> None:
+        try:
+            replacements.append(
+                LockedShardSession.recover_stale(
+                    old.store.root,
+                    owner=_owner(pid=202),
+                    model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+                    worker_liveness=lambda metadata: Liveness.DEAD,
+                    slurm_liveness=lambda metadata: Liveness.DEAD,
+                    event_timestamp="2026-07-31T00:10:00Z",
+                    execution_context={},
+                )
+            )
+        except Exception as exc:
+            takeover_errors.append(exc)
+
+    takeover_thread = threading.Thread(target=takeover)
+    takeover_thread.start()
+    time.sleep(0.05)
+    assert replacements == [] and takeover_errors == []
+    release.set()
+    mutation.join(5)
+    takeover_thread.join(5)
+    assert mutation_errors == []
+    if operation == "report":
+        assert len(replacements) == 1
+        replacements[0].close()
+    else:
+        assert len(takeover_errors) == 1
+        assert isinstance(takeover_errors[0], FinalizedRuntimeShardError)
+        old.close()
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "after_claim_creation_before_liveness",
+        "after_verified_evidence_before_replacement",
+        "after_lock_replacement_before_event",
+        "after_event_before_claim_cleanup",
+    ],
+)
+def test_every_takeover_claim_state_is_resumable(tmp_path: Path, boundary: str) -> None:
+    from part1_runtime import InjectedTakeoverCrash, Liveness, LockedShardSession
+
+    old = _acquire(tmp_path, pid=101)
+    with pytest.raises(InjectedTakeoverCrash, match=boundary):
+        LockedShardSession.recover_stale(
+            old.store.root,
+            owner=_owner(pid=202),
+            model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+            worker_liveness=lambda metadata: Liveness.DEAD,
+            slurm_liveness=lambda metadata: Liveness.DEAD,
+            event_timestamp="2026-07-31T00:11:00Z",
+            execution_context={"hostname": "node", "pid": 202},
+            fault_at=boundary,
+        )
+    completed = LockedShardSession.finish_pending_takeover(
+        old.store.root,
+        worker_liveness=lambda metadata: Liveness.DEAD,
+        slurm_liveness=lambda metadata: Liveness.DEAD,
+    )
+    takeover_events = [
+        event
+        for event in completed.store.inspect().audit_events
+        if event["event_type"] == "stale_lock_recovered"
+    ]
+    assert len(takeover_events) == 1
+    history = completed.store.root / ".lock_history"
+    assert list(history.glob("*.claim.json"))
+    assert list(history.glob("*.event.json"))
+    completed.close()
+
+
+def test_pending_stale_claim_can_be_operator_overridden_with_new_reason(tmp_path: Path) -> None:
+    from part1_runtime import InjectedTakeoverCrash, Liveness, LockedShardSession
+
+    old = _acquire(tmp_path, pid=101)
+    with pytest.raises(InjectedTakeoverCrash):
+        LockedShardSession.recover_stale(
+            old.store.root,
+            owner=_owner(pid=202),
+            model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+            worker_liveness=lambda metadata: Liveness.DEAD,
+            slurm_liveness=lambda metadata: Liveness.DEAD,
+            event_timestamp="2026-07-31T00:11:00Z",
+            execution_context={"hostname": "node", "pid": 202},
+            fault_at="after_claim_creation_before_liveness",
+        )
+    completed = LockedShardSession.finish_pending_takeover(
+        old.store.root,
+        operator_override_reason="operator confirmed allocation ended",
+    )
+    event = completed.store.inspect().audit_events[-1]
+    assert event["event_type"] == "operator_unlock"
+    assert event["operator_reason"] == "operator confirmed allocation ended"
+    completed.close()
+
+
+def test_remote_slurm_dead_is_conclusive_without_remote_pid_probe(tmp_path: Path) -> None:
+    from part1_runtime import Liveness, LockedShardSession
+
+    old = _acquire(tmp_path, pid=101)
+    replacement = LockedShardSession.recover_stale(
+        old.store.root,
+        owner=_owner(pid=202),
+        model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+        worker_liveness=lambda metadata: Liveness.UNKNOWN,
+        slurm_liveness=lambda metadata: Liveness.DEAD,
+        event_timestamp="2026-07-31T00:12:00Z",
+        execution_context={"hostname": "other", "pid": 202},
+    )
+    replacement.close()
+
+
+@pytest.mark.parametrize(
+    ("with_slurm", "hostname_is_local", "expected_success"),
+    [
+        (True, True, True),
+        (False, True, True),
+        (False, False, False),
+    ],
+)
+def test_pid_dead_only_establishes_staleness_for_same_host(
+    tmp_path: Path,
+    with_slurm: bool,
+    hostname_is_local: bool,
+    expected_success: bool,
+) -> None:
+    import socket
+
+    from part1_runtime import (
+        Liveness,
+        LockMetadata,
+        LockedShardSession,
+        StaleRecoveryRefused,
+    )
+
+    prior = LockMetadata.new(
+        study_id=STUDY_ID,
+        model_run_id=MODEL_RUN_ID,
+        shard_id=SHARD_ID,
+        hostname=socket.gethostname() if hostname_is_local else "remote-node",
+        pid=999999,
+        slurm_job_id="job-17" if with_slurm else None,
+        slurm_array_task_id=None,
+        acquired_at="2026-07-31T00:00:00Z",
+    )
+    old = LockedShardSession.acquire(
+        tmp_path / "shard",
+        owner=prior,
+        model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+    )
+    call = lambda: LockedShardSession.recover_stale(
+        old.store.root,
+        owner=_owner(pid=202),
+        model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+        worker_liveness=lambda metadata: Liveness.DEAD,
+        slurm_liveness=lambda metadata: (
+            Liveness.UNKNOWN if with_slurm else Liveness.NOT_APPLICABLE
+        ),
+        event_timestamp="2026-07-31T00:12:00Z",
+        execution_context={},
+    )
+    if expected_success:
+        call().close()
+    else:
+        with pytest.raises(StaleRecoveryRefused, match="uncertain"):
+            call()
+        old.close()
+
+
+def test_attempt_failed_rejects_terminal_or_exhausted_policy(tmp_path: Path) -> None:
+    session = _acquire(tmp_path)
+    result = natural_result()
+    session.store.append_audit_event(attempt_event(result, "attempt_started", 0))
+    failed = attempt_event(result, "attempt_failed", 1)
+    failed.update(
+        outcome_category="invalid_configuration",
+        retry_classification="terminal",
+        retry_decision="do_not_retry",
+        backoff_seconds=None,
+    )
+    with pytest.raises(ValueError, match="terminalization|required terminal"):
+        session.store.append_audit_event(failed)
+
+
+def test_final_orphan_requires_terminalization_until_result_exists(tmp_path: Path) -> None:
+    from part1_runtime import WorkSpec, prepare_resume
+
+    session = _acquire(tmp_path)
+    for number in (1, 2):
+        attempt = natural_result(attempt_number=number)
+        session.store.append_audit_event(attempt_event(attempt, "attempt_started", 0))
+        session.store.append_audit_event(attempt_event(attempt, "attempt_failed", 1))
+    third = natural_result(attempt_number=3)
+    session.store.append_audit_event(attempt_event(third, "attempt_started", 0))
+    work = WorkSpec.natural(
+        STUDY_ID,
+        MODEL_RUN_ID,
+        MODEL_RUN_MANIFEST_HASH,
+        QUESTION_ID,
+        0,
+        seed=123,
+    )
+    decision = prepare_resume(
+        session.store,
+        [work],
+        event_timestamp="2026-07-31T00:13:00Z",
+        execution_context={"hostname": "node", "pid": 101},
+    )[work]
+    assert decision.status == "terminalization_required"
+    assert decision.terminalization_required is True
+    assert decision.failure_category == "interrupted_process"
+    report = session.store.validate_shard(
+        artifact_kind="natural_shard",
+        started_at="2026-07-31T00:00:00Z",
+        completed_at="2026-07-31T00:00:01Z",
+    )
+    assert report["is_valid"] is False
+
+
+def test_exhausted_interruption_can_be_terminalized_exactly_once(tmp_path: Path) -> None:
+    session = _acquire(tmp_path)
+    for number in (1, 2):
+        record = natural_result(attempt_number=number)
+        session.store.append_audit_event(attempt_event(record, "attempt_started", 0))
+        session.store.append_audit_event(attempt_event(record, "attempt_failed", 1))
+    terminal = natural_result(
+        attempt_number=3, outcome="terminal_infrastructure_failure"
+    )
+    terminal["terminal_error_details"]["category"] = "interrupted_process"
+    session.store.append_audit_event(attempt_event(terminal, "attempt_started", 0))
+    session.store.append_audit_event(attempt_event(terminal, "attempt_interrupted", 1))
+    session.store.commit_terminal_result(
+        terminal, attempt_event(terminal, "attempt_completed", 2)
+    )
+    assert session.store.validate_shard(
+        artifact_kind="natural_shard",
+        started_at="2026-07-31T00:00:00Z",
+        completed_at="2026-07-31T00:00:01Z",
+    )["is_valid"] is True
+    with pytest.raises(Exception, match="already has a terminal result"):
+        session.store.append_terminal_result(terminal)
+
+
+def test_checkpoint_publication_requires_complete_matching_parent(tmp_path: Path) -> None:
+    session = _acquire(tmp_path)
+    checkpoint = checkpoint_result()
+    session.store.append_audit_event(attempt_event(checkpoint, "attempt_started", 0))
+    with pytest.raises(ValueError, match="parent natural"):
+        session.store.append_terminal_result(checkpoint)
+
+    parent = natural_result()
+    other = _acquire(tmp_path / "valid-parent")
+    other.store.append_audit_event(attempt_event(parent, "attempt_started", 0))
+    other.store.commit_terminal_result(parent, attempt_event(parent, "attempt_completed", 1))
+    wrong = checkpoint_result()
+    wrong["natural_seed"] = 999
+    other.store.append_audit_event(attempt_event(wrong, "attempt_started", 0))
+    with pytest.raises(ValueError, match="seed"):
+        other.store.append_terminal_result(wrong)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("parent_raw_record_id", "0" * 64),
+        ("sample_index", 1),
+        ("subject", "high_school_physics"),
+        ("question_manifest_hash", "0" * 64),
+    ],
+)
+def test_checkpoint_parent_requires_complete_matching_hierarchy(
+    tmp_path: Path, field: str, value
+) -> None:
+    session = _acquire(tmp_path)
+    parent = natural_result()
+    session.store.append_audit_event(attempt_event(parent, "attempt_started", 0))
+    session.store.commit_terminal_result(
+        parent, attempt_event(parent, "attempt_completed", 1)
+    )
+    checkpoint = checkpoint_result()
+    checkpoint[field] = value
+    session.store.append_audit_event(attempt_event(checkpoint, "attempt_started", 0))
+    with pytest.raises(ValueError, match="parent|differs"):
+        session.store.append_terminal_result(checkpoint)
+
+
+def test_handwritten_orphan_checkpoint_fails_index_and_resume(tmp_path: Path) -> None:
+    from part1_runtime import CompatibilityError, WorkSpec, plan_resume
+
+    session = _acquire(tmp_path)
+    checkpoint = checkpoint_result()
+    session.store.checkpoint_results_path.write_text(
+        json.dumps(checkpoint, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    index = session.store.build_index()
+    assert index.hierarchy_errors
+    work = WorkSpec.checkpoint(
+        STUDY_ID,
+        MODEL_RUN_ID,
+        MODEL_RUN_MANIFEST_HASH,
+        QUESTION_ID,
+        0,
+        "cp-05",
+        seed=123,
+    )
+    with pytest.raises(CompatibilityError, match="hierarchy"):
+        plan_resume(index, [work])
+
+
+def test_shard_provenance_header_binds_complete_manifest_hash(tmp_path: Path) -> None:
+    from part1_runtime import CompatibilityError, LockedShardSession
+
+    first = _acquire(tmp_path)
+    header_path = first.store.provenance_header_path
+    header = json.loads(header_path.read_text(encoding="utf-8"))
+    assert header["model_run_manifest_hash"] == MODEL_RUN_MANIFEST_HASH
+    first.close()
+    reopened = LockedShardSession.acquire(
+        tmp_path / "shard",
+        owner=_owner(pid=202),
+        model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+    )
+    reopened.close()
+    with pytest.raises(CompatibilityError, match="provenance|manifest hash"):
+        LockedShardSession.acquire(
+            tmp_path / "shard",
+            owner=_owner(pid=303),
+            model_run_manifest_hash="0" * 64,
+        )
+
+
+def test_missing_or_corrupt_provenance_header_blocks_all_store_use(tmp_path: Path) -> None:
+    bare = Part1ShardStore(
+        tmp_path / "bare",
+        shard_id=SHARD_ID,
+        study_id=STUDY_ID,
+        model_run_id=MODEL_RUN_ID,
+        model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+    )
+    with pytest.raises(Exception, match="provenance header is missing"):
+        bare.append_audit_event(attempt_event(natural_result(), "attempt_started", 0))
+    assert not bare.root.exists()
+
+    session = _acquire(tmp_path / "corrupt")
+    session.close()
+    session.store.provenance_header_path.write_text("{cut", encoding="utf-8")
+    from part1_runtime import CompatibilityError, LockedShardSession
+
+    with pytest.raises(CompatibilityError, match="provenance"):
+        LockedShardSession.acquire(
+            session.store.root,
+            owner=_owner(pid=202),
+            model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("lock_id", 7),
+        ("study_id", ""),
+        ("model_run_id", None),
+        ("shard_id", []),
+        ("hostname", " "),
+        ("pid", True),
+        ("slurm_job_id", 3),
+        ("slurm_array_task_id", ""),
+        ("acquired_at", "not-a-time"),
+    ],
+)
+def test_lock_metadata_rejects_invalid_types_and_values(field: str, value) -> None:
+    metadata = _owner(pid=101).to_dict()
+    metadata[field] = value
+    from part1_runtime import LockMetadata
+
+    with pytest.raises((TypeError, ValueError), match=field):
+        LockMetadata.from_mapping(metadata)
+
+
+def test_work_spec_complete_manifest_hash_is_resume_identity(tmp_path: Path) -> None:
+    from part1_runtime import CompatibilityError, WorkSpec, prepare_resume
+
+    session = _acquire(tmp_path)
+    wrong = WorkSpec.natural(
+        STUDY_ID,
+        MODEL_RUN_ID,
+        "0" * 64,
+        QUESTION_ID,
+        0,
+        seed=123,
+    )
+    with pytest.raises(CompatibilityError, match="manifest hash"):
+        prepare_resume(
+            session.store,
+            [wrong],
+            event_timestamp="2026-07-31T00:00:00Z",
+            execution_context={},
+        )
+
+
+def test_complete_retry_config_and_backoff_are_enforced() -> None:
+    from part1_contract import load_config
+    from part1_runtime import CompatibilityError, WorkSpec, plan_retry, validate_retry_policy_config
+
+    config = load_config("retries")
+    validate_retry_policy_config(config)
+    for field in (
+        "config_version",
+        "attempt_numbers",
+        "cuda_retry_requires_fresh_process",
+        "preserve_seed_and_logical_identity",
+        "backoff_seconds",
+    ):
+        changed = dict(config)
+        changed[field] = None
+        with pytest.raises(CompatibilityError, match=field):
+            validate_retry_policy_config(changed)
+    work = WorkSpec.natural(
+        STUDY_ID,
+        MODEL_RUN_ID,
+        MODEL_RUN_MANIFEST_HASH,
+        QUESTION_ID,
+        0,
+        seed=123,
+    )
+    assert plan_retry(work, category="interrupted_process", attempts_consumed=1).backoff_seconds == 30
+    assert plan_retry(work, category="interrupted_process", attempts_consumed=2).backoff_seconds == 120
+    assert plan_retry(work, category="interrupted_process", attempts_consumed=3).backoff_seconds is None
+
+
+def test_operator_cli_finishes_pending_takeover_with_reason(tmp_path: Path) -> None:
+    from part1_runtime import InjectedTakeoverCrash, Liveness, LockedShardSession
+
+    repository = Path(__file__).resolve().parents[1]
+    old = _acquire(tmp_path, pid=101)
+    with pytest.raises(InjectedTakeoverCrash):
+        LockedShardSession.recover_stale(
+            old.store.root,
+            owner=_owner(pid=202),
+            model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+            worker_liveness=lambda metadata: Liveness.DEAD,
+            slurm_liveness=lambda metadata: Liveness.DEAD,
+            event_timestamp="2026-07-31T00:15:00Z",
+            execution_context={},
+            fault_at="after_claim_creation_before_liveness",
+        )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/part1_operator_unlock.py",
+            "--finish-pending",
+            "--shard-root",
+            str(old.store.root),
+            "--reason",
+            "operator verified stale allocation",
+        ],
+        cwd=repository,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["event_type"] == "operator_unlock"
+
+
+def test_dry_run_cli_reports_real_resume_and_fails_on_corrupt_shard(tmp_path: Path) -> None:
+    from part1_runtime import LockMetadata, LockedShardSession, WorkSpec
+
+    repository = Path(__file__).resolve().parents[1]
+    study, model = _compatible_manifests()
+    session = LockedShardSession.acquire(
+        tmp_path / "shard",
+        owner=LockMetadata.new(
+            study_id=study["study_id"],
+            model_run_id=model["model_run_id"],
+            shard_id=SHARD_ID,
+            hostname="synthetic-node",
+            pid=101,
+            slurm_job_id="job-17",
+            slurm_array_task_id="3",
+            acquired_at="2026-07-31T00:00:00Z",
+        ),
+        model_run_manifest_hash=model["model_run_manifest_hash"],
+    )
+    session.close()
+    study_path = tmp_path / "study.json"
+    model_path = tmp_path / "model.json"
+    work_path = tmp_path / "work.json"
+    retry_path = tmp_path / "retry.json"
+    study_path.write_text(json.dumps(study), encoding="utf-8")
+    model_path.write_text(json.dumps(model), encoding="utf-8")
+    work = WorkSpec.natural(
+        study["study_id"],
+        model["model_run_id"],
+        model["model_run_manifest_hash"],
+        QUESTION_ID,
+        0,
+        seed=123,
+    )
+    work_path.write_text(json.dumps([work.to_dict()]), encoding="utf-8")
+    retry_path.write_text(
+        json.dumps(
+            {
+                "work": work.to_dict(),
+                "category": "temporary_filesystem_failure",
+                "attempts_consumed": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    command = [
+        sys.executable,
+        "scripts/part1_dry_run.py",
+        "--persistent-root",
+        str(tmp_path / "configured-smoke"),
+        "--study-manifest",
+        str(study_path),
+        "--model-run-manifest",
+        str(model_path),
+        "--shard-root",
+        str(session.store.root),
+        "--work-specs",
+        str(work_path),
+        "--retry-request",
+        str(retry_path),
+    ]
+    valid = subprocess.run(command, cwd=repository, capture_output=True, text=True, check=False)
+    assert valid.returncode == 0, valid.stderr
+    payload = json.loads(valid.stdout)
+    assert payload["resume_plan"][0]["status"] == "retryable"
+    assert payload["is_valid"] is True
+    assert payload["retry_plan"]["backoff_seconds"] == 30
+    session.store.audit_events_path.write_bytes(b'{"cut"')
+    corrupt = subprocess.run(command, cwd=repository, capture_output=True, text=True, check=False)
+    assert corrupt.returncode != 0
+    assert json.loads(corrupt.stdout)["is_valid"] is False

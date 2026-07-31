@@ -9,12 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from contextlib import nullcontext
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, ContextManager, Mapping
 
 from part1_contract import (
     attempt_id,
@@ -33,6 +34,7 @@ from part1_failure_policy import (
 
 
 STORE_VERSION = "part1-store-v1"
+PROVENANCE_HEADER_FILENAME = ".shard-provenance.json"
 VALIDATOR_VERSION = "part1-shard-validator-v1"
 VALIDATION_REPORT_IDENTITY_VERSION = "part1-validation-report-identity-v1"
 STREAM_FILES = {
@@ -114,6 +116,9 @@ class ShardIndex:
     orphaned_attempt_ids: frozenset[str]
     lifecycle_errors: tuple[str, ...]
     pending_recovery_event_ids: frozenset[str]
+    hierarchy_errors: tuple[str, ...]
+    terminalization_required: dict[LogicalKey, str]
+    model_run_manifest_hash: str
 
 
 @dataclass(frozen=True)
@@ -122,6 +127,17 @@ class _ParsedStream:
     trailing_tail: bytes | None
     trailing_offset: int | None
     unterminated_valid_record: bool
+
+
+def _serialized_mutation(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Hold the store's stable lease serialization section for a whole mutation."""
+
+    def wrapped(self: "Part1ShardStore", *args: Any, **kwargs: Any) -> Any:
+        with self._mutation_section():
+            self._assert_provenance_header()
+            return method(self, *args, **kwargs)
+
+    return wrapped
 
 
 def _normalize_json(value: Any) -> Any:
@@ -202,6 +218,7 @@ class Part1ShardStore:
         model_run_id: str,
         model_run_manifest_hash: str,
         mutation_guard: Callable[[], None] | None = None,
+        mutation_section: Callable[[], ContextManager[Any]] | None = None,
     ) -> None:
         self.root = Path(root)
         self.shard_id = shard_id
@@ -209,6 +226,8 @@ class Part1ShardStore:
         self.model_run_id = model_run_id
         self.model_run_manifest_hash = model_run_manifest_hash
         self._mutation_guard = mutation_guard
+        self._mutation_section = mutation_section or nullcontext
+        self.provenance_header_path = self.root / PROVENANCE_HEADER_FILENAME
         self.natural_results_path = self.root / STREAM_FILES["natural_results"]
         self.checkpoint_results_path = self.root / STREAM_FILES["checkpoint_results"]
         self.audit_events_path = self.root / STREAM_FILES["audit_events"]
@@ -227,6 +246,41 @@ class Part1ShardStore:
     def _assert_mutation_authorized(self) -> None:
         if self._mutation_guard is not None:
             self._mutation_guard()
+
+    def _expected_provenance_header(self) -> dict[str, Any]:
+        return {
+            "schema_name": "part1_shard_provenance",
+            "schema_version": "1.0.0",
+            "study_id": self.study_id,
+            "model_run_id": self.model_run_id,
+            "model_run_manifest_hash": self.model_run_manifest_hash,
+            "shard_id": self.shard_id,
+        }
+
+    def initialize_provenance_header(self) -> None:
+        """Create the immutable shard identity before any append-only stream."""
+
+        with self._mutation_section():
+            expected = self._expected_provenance_header()
+            payload = _json_line_bytes(expected)[:-1]
+            if self.provenance_header_path.exists():
+                self._assert_provenance_header()
+                return
+            if any(path.exists() for path in self.stream_paths.values()):
+                raise InvalidRecordError("missing provenance header for existing shard streams")
+            self._assert_mutation_authorized()
+            self._durable_create(self.provenance_header_path, payload)
+
+    def _assert_provenance_header(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.provenance_header_path.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise InvalidRecordError("shard provenance header is missing") from exc
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise InvalidRecordError(f"shard provenance header is corrupt: {exc}") from exc
+        if value != self._expected_provenance_header():
+            raise InvalidRecordError("shard provenance header identity or manifest hash differs")
+        return value
 
     def _assert_provenance(self, record: Mapping[str, Any]) -> None:
         if record["study_id"] != self.study_id:
@@ -280,6 +334,7 @@ class Part1ShardStore:
         return _ParsedStream(tuple(records), None, None, False)
 
     def inspect(self) -> StreamInspection:
+        self._assert_provenance_header()
         parsed = {name: self._parse_stream(name) for name in STREAM_FILES}
         return StreamInspection(
             natural_results=parsed["natural_results"].records,
@@ -549,6 +604,9 @@ class Part1ShardStore:
         self._validate_scientific_alignment(record)
         self._assert_provenance(record)
         self._verify_terminal_identity(record)
+        if schema_name_value == "part1_checkpoint_terminal_result":
+            natural_records = self._assert_stream_appendable("natural_results").records
+            self._validate_checkpoint_parent(record, natural_records)
         parsed = self._assert_stream_appendable(stream_name)
         logical_key = _logical_key(record)
         record_id_value = _record_id(record)
@@ -580,9 +638,19 @@ class Part1ShardStore:
             }
         ]
         if terminal_lifecycle_events:
-            raise ValueError(
-                "attempt already has a terminal lifecycle event; result publication is forbidden"
+            controlled_terminalization = (
+                len(terminal_lifecycle_events) == 1
+                and terminal_lifecycle_events[0]["event_type"] == "attempt_interrupted"
+                and terminal_lifecycle_events[0].get("retry_decision") == "exhausted"
+                and outcome == "terminal_infrastructure_failure"
+                and isinstance(record.get("terminal_error_details"), Mapping)
+                and record["terminal_error_details"].get("category")
+                == "interrupted_process"
             )
+            if not controlled_terminalization:
+                raise ValueError(
+                    "attempt already has a terminal lifecycle event; result publication is forbidden"
+                )
         if outcome == "terminal_infrastructure_failure":
             consumed = self._consumed_attempts(logical_key)
             terminal_attempt = int(record["terminal_attempt_number"])
@@ -624,6 +692,45 @@ class Part1ShardStore:
                     )
         return stream_name
 
+    @staticmethod
+    def _validate_checkpoint_parent(
+        checkpoint: Mapping[str, Any],
+        natural_records: tuple[Mapping[str, Any], ...],
+    ) -> None:
+        parent_key = (
+            checkpoint["study_id"],
+            checkpoint["model_run_id"],
+            checkpoint["question_id"],
+            checkpoint["run_id"],
+        )
+        matches = [record for record in natural_records if _logical_key(record) == parent_key]
+        if len(matches) != 1:
+            raise ValueError("checkpoint requires exactly one parent natural result")
+        parent = matches[0]
+        if parent["natural_execution_outcome"] != "complete":
+            raise ValueError("checkpoint parent natural result must be complete")
+        if not parent["checkpoint_eligible"]:
+            raise ValueError("checkpoint parent natural result is not checkpoint eligible")
+        if checkpoint["checkpoint_id"] not in parent["checkpoint_ids"]:
+            raise ValueError("checkpoint ID is not eligible for the parent natural result")
+        if checkpoint["parent_raw_record_id"] != parent["raw_record_id"]:
+            raise ValueError("checkpoint parent natural record ID differs")
+        if checkpoint["natural_seed"] != parent["generation_seed"]:
+            raise ValueError("checkpoint natural seed differs from parent natural seed")
+        for field in (
+            "study_id",
+            "model_run_id",
+            "model_run_manifest_hash",
+            "question_manifest_hash",
+            "question_id",
+            "sample_index",
+            "subject",
+            "run_id",
+        ):
+            if checkpoint[field] != parent[field]:
+                raise ValueError(f"checkpoint {field} differs from parent natural result")
+
+    @_serialized_mutation
     def append_terminal_result(self, record: Mapping[str, Any]) -> None:
         self._assert_mutation_authorized()
         stream_name = self._preflight_terminal_result(record)
@@ -746,12 +853,32 @@ class Part1ShardStore:
                     raise ValueError("terminal_result_recovered requires its matching terminal result")
             elif event_type == "attempt_completed":
                 if prior_terminal:
-                    if (
-                        len(prior_terminal) != 1
-                        or prior_terminal[0]["event_type"] != "terminal_result_recovered"
-                        or self._matching_terminal_record(prior_terminal[0], candidate_records)
-                        is None
-                        or matching_record is None
+                    recovered_completion = len(prior_terminal) == 1 and (
+                        prior_terminal[0]["event_type"] == "terminal_result_recovered"
+                        and self._matching_terminal_record(
+                            prior_terminal[0], candidate_records
+                        )
+                        is not None
+                        and matching_record is not None
+                    )
+                    exhausted_interruption_completion = (
+                        len(prior_terminal) == 1
+                        and prior_terminal[0]["event_type"] == "attempt_interrupted"
+                        and prior_terminal[0].get("retry_decision") == "exhausted"
+                        and matching_record is not None
+                        and matching_record.get(
+                            "natural_execution_outcome",
+                            matching_record.get("checkpoint_execution_outcome"),
+                        )
+                        == "terminal_infrastructure_failure"
+                        and isinstance(
+                            matching_record.get("terminal_error_details"), Mapping
+                        )
+                        and matching_record["terminal_error_details"].get("category")
+                        == "interrupted_process"
+                    )
+                    if not (
+                        recovered_completion or exhausted_interruption_completion
                     ):
                         raise ValueError("attempt already has a conflicting terminal lifecycle event")
                 # A completion without a result is retained as corrupt evidence so
@@ -796,6 +923,7 @@ class Part1ShardStore:
             prospective_terminal=prospective_terminal,
         )
 
+    @_serialized_mutation
     def append_audit_event(self, event: Mapping[str, Any]) -> None:
         self._assert_mutation_authorized()
         self._preflight_audit_event(event)
@@ -828,6 +956,7 @@ class Part1ShardStore:
         self._preflight_terminal_result(record)
         self._preflight_audit_event(completion_event, prospective_terminal=record)
 
+    @_serialized_mutation
     def commit_terminal_result(
         self,
         record: Mapping[str, Any],
@@ -891,6 +1020,15 @@ class Part1ShardStore:
             target[key] = record
             terminal_by_id[record_id_value] = record
             terminal_attempt_ids[record["terminal_attempt_id"]] = record_id_value
+
+        hierarchy_errors: list[str] = []
+        for key, checkpoint in checkpoint_by_key.items():
+            try:
+                self._validate_checkpoint_parent(
+                    checkpoint, tuple(natural_by_key.values())
+                )
+            except ValueError as exc:
+                hierarchy_errors.append(f"checkpoint {key!r}: {exc}")
 
         events_by_attempt_lists: dict[str, list[dict[str, Any]]] = {}
         event_ids: set[str] = set()
@@ -1050,6 +1188,20 @@ class Part1ShardStore:
                 # Required corruption-classification exception: completion was
                 # durable without its result, then resume classified interruption.
                 coherent = matching_terminals == [False, False] and attempt_record is None
+            elif terminal_types_in_order == ["attempt_interrupted", "attempt_completed"]:
+                controlled = (
+                    attempt_record is not None
+                    and attempt_record.get(
+                        "natural_execution_outcome",
+                        attempt_record.get("checkpoint_execution_outcome"),
+                    )
+                    == "terminal_infrastructure_failure"
+                    and isinstance(attempt_record.get("terminal_error_details"), Mapping)
+                    and attempt_record["terminal_error_details"].get("category")
+                    == "interrupted_process"
+                    and terminals[0].get("retry_decision") == "exhausted"
+                )
+                coherent = controlled and matching_terminals == [False, True]
             if not coherent:
                 lifecycle_errors.append(
                     f"attempt {attempt_id_value} has contradictory terminal lifecycle: "
@@ -1057,6 +1209,25 @@ class Part1ShardStore:
                 )
 
         completed_keys: set[LogicalKey] = set(natural_by_key) | set(checkpoint_by_key)
+        terminalization_required: dict[LogicalKey, str] = {}
+        for logical_key, attempt_numbers in attempts_consumed_sets.items():
+            if logical_key in completed_keys or max(attempt_numbers) < MAX_TOTAL_ATTEMPTS:
+                continue
+            final_attempt = max(attempt_numbers)
+            final_events = [
+                event
+                for events in events_by_attempt.values()
+                for event in events
+                if _event_logical_key(event) == logical_key
+                and event["attempt_number"] == final_attempt
+            ]
+            closures = [
+                event
+                for event in final_events
+                if event["event_type"] in {"attempt_failed", "attempt_interrupted"}
+            ]
+            if not closures or closures[-1].get("retry_decision") == "exhausted":
+                terminalization_required[logical_key] = "interrupted_process"
         journal_events = self._load_recovery_journal_events()
         audit_event_ids = {event["event_id"] for event in inspection.audit_events}
         pending_recovery_event_ids = frozenset(
@@ -1077,6 +1248,9 @@ class Part1ShardStore:
             orphaned_attempt_ids=frozenset(orphaned),
             lifecycle_errors=tuple(lifecycle_errors),
             pending_recovery_event_ids=pending_recovery_event_ids,
+            hierarchy_errors=tuple(hierarchy_errors),
+            terminalization_required=terminalization_required,
+            model_run_manifest_hash=self.model_run_manifest_hash,
         )
 
     def _make_attempt_event(
@@ -1118,12 +1292,13 @@ class Part1ShardStore:
             else None,
             "retry_classification": failure_policy.classification if failure_policy else None,
             "retry_decision": failure_policy.retry_decision if failure_policy else None,
-            "backoff_seconds": None,
+            "backoff_seconds": failure_policy.backoff_seconds if failure_policy else None,
             "related_lock_owner": None,
             "terminal_record_id": terminal_record_id,
             "operator_reason": None,
         }
 
+    @_serialized_mutation
     def reconcile(
         self,
         *,
@@ -1205,6 +1380,7 @@ class Part1ShardStore:
             appended.append(interrupted)
         return appended
 
+    @_serialized_mutation
     def recover_trailing_line(
         self,
         stream_name: str,
@@ -1380,6 +1556,7 @@ class Part1ShardStore:
             self._durable_append(self.audit_events_path, _json_line_bytes(event))
         return quarantine_path
 
+    @_serialized_mutation
     def finish_pending_recoveries(self) -> list[str]:
         """Idempotently finish every durable recovery journal not yet in main audit."""
 
@@ -1548,6 +1725,8 @@ class Part1ShardStore:
                 + len(index.inconsistent_completion_attempt_ids)
                 + len(index.orphaned_attempt_ids)
                 + len(index.lifecycle_errors)
+                + len(index.hierarchy_errors)
+                + len(index.terminalization_required)
             )
             warnings = len(index.missing_completion_record_ids)
             consistency_outcome = "failed" if failures else ("warning" if warnings else "passed")
@@ -1558,6 +1737,10 @@ class Part1ShardStore:
                 ),
                 "orphaned_attempt_ids": sorted(index.orphaned_attempt_ids),
                 "lifecycle_errors": list(index.lifecycle_errors),
+                "hierarchy_errors": list(index.hierarchy_errors),
+                "terminalization_required": [
+                    repr(key) for key in sorted(index.terminalization_required)
+                ],
                 "authoritative_results_missing_completion": sorted(
                     index.missing_completion_record_ids
                 ),
@@ -1627,6 +1810,7 @@ class Part1ShardStore:
         validate_instance("validation_report", report)
         return report
 
+    @_serialized_mutation
     def write_validation_report(
         self,
         path: Path,
@@ -1650,6 +1834,7 @@ class Part1ShardStore:
             os.fsync(handle.fileno())
         return report
 
+    @_serialized_mutation
     def finalize(self) -> None:
         self._assert_mutation_authorized()
         self._assert_active()

@@ -172,6 +172,16 @@ def attempt_event(record: dict, event_type: str, sequence: int) -> dict:
     terminal_policy = (
         classify_failure(terminal_category, attempt_number) if terminal_category else None
     )
+    failure_policy = (
+        classify_failure(
+            "interrupted_process"
+            if event_type == "attempt_interrupted"
+            else "temporary_filesystem_failure",
+            attempt_number,
+        )
+        if is_failure
+        else None
+    )
     event = {
         "schema_name": "part1_audit_event",
         "schema_version": "1.0.0",
@@ -209,7 +219,11 @@ def attempt_event(record: dict, event_type: str, sequence: int) -> dict:
             if is_failure
             else None
         ),
-        "backoff_seconds": None,
+        "backoff_seconds": (
+            terminal_policy.backoff_seconds
+            if terminal_policy
+            else failure_policy.backoff_seconds if failure_policy else None
+        ),
         "related_lock_owner": None,
         "terminal_record_id": record_id if event_type == "attempt_completed" else None,
         "operator_reason": None,

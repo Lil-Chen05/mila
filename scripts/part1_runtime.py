@@ -8,16 +8,21 @@ and resume planning using only persisted metadata.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from enum import Enum
+from contextlib import contextmanager
 import errno
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import socket
 import subprocess
-from typing import Any, Callable, Iterable, Mapping
+import threading
+from typing import Any, Callable, Iterable, Iterator, Mapping
 import uuid
+import re
 
 from part1_contract import (
     CONFIG_NAMES,
@@ -35,9 +40,13 @@ from part1_contract import (
     validate_phase1_config,
 )
 from part1_failure_policy import (
+    ATTEMPT_NUMBERS,
+    BACKOFF_SECONDS,
     MAX_TOTAL_ATTEMPTS,
     RETRYABLE_CATEGORIES,
+    RETRYABLE_CATEGORY_ORDER,
     TERMINAL_CATEGORIES,
+    TERMINAL_CATEGORY_ORDER,
 )
 from part1_store import CheckpointKey, LogicalKey, NaturalKey, Part1ShardStore, ShardIndex
 
@@ -46,6 +55,45 @@ LOCK_FILENAME = ".writer.lock"
 RECOVERY_CLAIM_FILENAME = ".writer-lock-recovery.claim"
 TAKEOVER_EVENT_JOURNAL_FILENAME = ".writer-lock-takeover-event.json"
 LOCK_HISTORY_DIRECTORY = ".lock_history"
+MUTATION_GUARD_FILENAME = ".writer.guard"
+
+_LOCAL_GUARDS: dict[str, tuple[threading.RLock, threading.local]] = {}
+_LOCAL_GUARDS_MUTEX = threading.Lock()
+
+
+class MutationController:
+    """Reentrant process/thread serialization on one stable per-shard inode."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = Path(root)
+        self.path = self.root / MUTATION_GUARD_FILENAME
+        key = str(self.path.resolve())
+        with _LOCAL_GUARDS_MUTEX:
+            self._local_lock, self._state = _LOCAL_GUARDS.setdefault(
+                key, (threading.RLock(), threading.local())
+            )
+
+    @contextmanager
+    def section(self) -> Iterator[None]:
+        self.root.mkdir(parents=True, exist_ok=True)
+        with self._local_lock:
+            depth = getattr(self._state, "depth", 0)
+            if depth:
+                self._state.depth = depth + 1
+                try:
+                    yield
+                finally:
+                    self._state.depth -= 1
+                return
+            descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                self._state.depth = 1
+                yield
+            finally:
+                self._state.depth = 0
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
 
 
 class Part1RuntimeError(RuntimeError):
@@ -102,6 +150,44 @@ class LockMetadata:
     slurm_array_task_id: str | None
     acquired_at: str
 
+    def __post_init__(self) -> None:
+        hex32 = re.compile(r"^[0-9a-f]{32}$")
+        hex64 = re.compile(r"^[0-9a-f]{64}$")
+        if not isinstance(self.lock_id, str) or not hex32.fullmatch(self.lock_id):
+            raise ValueError("lock_id must be 32 lowercase hexadecimal characters")
+        for field, value in (("study_id", self.study_id), ("model_run_id", self.model_run_id)):
+            if not isinstance(value, str) or not hex64.fullmatch(value):
+                raise ValueError(f"{field} must be 64 lowercase hexadecimal characters")
+        for field, value in (
+            ("shard_id", self.shard_id),
+            ("hostname", self.hostname),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field} must be a nonblank string")
+        if isinstance(self.pid, bool) or not isinstance(self.pid, int) or self.pid < 1:
+            raise ValueError("pid must be a positive integer")
+        for field, value in (
+            ("slurm_job_id", self.slurm_job_id),
+            ("slurm_array_task_id", self.slurm_array_task_id),
+        ):
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"{field} must be null or a nonblank string")
+        if self.slurm_array_task_id is not None and self.slurm_job_id is None:
+            raise ValueError("slurm_array_task_id requires slurm_job_id")
+        rfc3339 = re.compile(
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+        )
+        if not isinstance(self.acquired_at, str) or not rfc3339.fullmatch(
+            self.acquired_at
+        ):
+            raise ValueError("acquired_at must be an RFC 3339 timestamp")
+        try:
+            parsed = datetime.fromisoformat(self.acquired_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("acquired_at must be an RFC 3339 timestamp") from exc
+        if parsed.tzinfo is None:
+            raise ValueError("acquired_at must include a timezone")
+
     @classmethod
     def new(
         cls,
@@ -115,10 +201,6 @@ class LockMetadata:
         slurm_array_task_id: str | None,
         acquired_at: str,
     ) -> "LockMetadata":
-        if pid < 1:
-            raise ValueError("lock PID must be positive")
-        if not shard_id:
-            raise ValueError("shard_id must be nonblank")
         return cls(
             lock_id=uuid.uuid4().hex,
             study_id=study_id,
@@ -229,8 +311,7 @@ def probe_slurm_liveness(
         result = runner(
             [
                 "squeue",
-                "--jobs",
-                selector,
+                f"--jobs={selector}",
                 "--noheader",
                 "--format=%i",
             ],
@@ -269,6 +350,7 @@ class LockedShardSession:
         self.owner = owner
         self.lock_path = self.root / LOCK_FILENAME
         self.claim_path = self.root / RECOVERY_CLAIM_FILENAME
+        self.controller = MutationController(self.root)
         self.store = Part1ShardStore(
             self.root,
             shard_id=owner.shard_id,
@@ -276,6 +358,7 @@ class LockedShardSession:
             model_run_id=owner.model_run_id,
             model_run_manifest_hash=model_run_manifest_hash,
             mutation_guard=self.assert_owned,
+            mutation_section=self.controller.section,
         )
 
     @classmethod
@@ -288,22 +371,27 @@ class LockedShardSession:
     ) -> "LockedShardSession":
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
-        _assert_not_finalized(root)
-        claim_path = root / RECOVERY_CLAIM_FILENAME
-        if claim_path.exists():
-            raise LockHeldError("shard lock recovery is in progress")
-        lock_path = root / LOCK_FILENAME
-        try:
-            _exclusive_create(lock_path, _json_bytes(owner.to_dict()))
-        except FileExistsError as exc:
-            raise LockHeldError("shard is already locked by another writer") from exc
-        if claim_path.exists():
-            current, _ = _read_lock(lock_path)
-            if current.lock_id == owner.lock_id:
+        controller = MutationController(root)
+        with controller.section():
+            _assert_not_finalized(root)
+            claim_path = root / RECOVERY_CLAIM_FILENAME
+            if claim_path.exists():
+                raise LockHeldError("shard lock recovery is in progress")
+            lock_path = root / LOCK_FILENAME
+            try:
+                _exclusive_create(lock_path, _json_bytes(owner.to_dict()))
+            except FileExistsError as exc:
+                raise LockHeldError("shard is already locked by another writer") from exc
+            session = cls(root, owner, model_run_manifest_hash=model_run_manifest_hash)
+            try:
+                session.store.initialize_provenance_header()
+            except Exception as exc:
                 lock_path.unlink()
                 _fsync_directory(root)
-            raise LockHeldError("shard lock recovery raced with acquisition")
-        return cls(root, owner, model_run_manifest_hash=model_run_manifest_hash)
+                if "provenance" in str(exc) or "manifest hash" in str(exc):
+                    raise CompatibilityError(str(exc)) from exc
+                raise
+            return session
 
     def assert_owned(self) -> None:
         try:
@@ -314,9 +402,10 @@ class LockedShardSession:
             raise LostLockOwnershipError("writer no longer owns the shard lock")
 
     def close(self) -> None:
-        self.assert_owned()
-        self.lock_path.unlink()
-        _fsync_directory(self.root)
+        with self.controller.section():
+            self.assert_owned()
+            self.lock_path.unlink()
+            _fsync_directory(self.root)
 
     def __enter__(self) -> "LockedShardSession":
         self.assert_owned()
@@ -394,118 +483,110 @@ class LockedShardSession:
     ) -> "LockedShardSession":
         if fault_at not in {
             None,
+            "after_claim_creation_before_liveness",
+            "after_verified_evidence_before_replacement",
             "after_lock_replacement_before_event",
             "during_takeover_event_append",
+            "after_event_before_claim_cleanup",
         }:
             raise ValueError(f"unknown takeover fault boundary: {fault_at}")
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
-        _assert_not_finalized(root)
-        claim_path = root / RECOVERY_CLAIM_FILENAME
-        if claim_path.exists():
-            raise LockHeldError("another lock recovery is already in progress")
-        lock_path = root / LOCK_FILENAME
-        previous, previous_raw = _read_lock(lock_path)
-        if (
-            previous.study_id != owner.study_id
-            or previous.model_run_id != owner.model_run_id
-            or previous.shard_id != owner.shard_id
-        ):
-            raise CompatibilityError("replacement lock identity differs from prior lock")
-        claim = {
-            "requested_event_type": event_type,
-            "previous_lock": previous.to_dict(),
-            "previous_lock_sha256": hashlib.sha256(previous_raw).hexdigest(),
-            "replacement_lock": owner.to_dict(),
-            "model_run_manifest_hash": model_run_manifest_hash,
-            "event_timestamp": event_timestamp,
-            "execution_context": dict(execution_context),
-            "operator_reason": operator_reason,
-        }
-        try:
-            _exclusive_create(claim_path, _json_bytes(claim))
-        except FileExistsError as exc:
-            raise LockHeldError("another lock recovery is already in progress") from exc
-
-        replaced = False
-        try:
-            current, current_raw = _read_lock(lock_path)
-            if current != previous or current_raw != previous_raw:
-                raise LockHeldError("lock owner changed during recovery claim acquisition")
-
-            if event_type == "stale_lock_recovered":
-                assert worker_liveness is not None and slurm_liveness is not None
-                worker_state = worker_liveness(previous)
-                if worker_state is Liveness.LIVE:
-                    raise StaleRecoveryRefused("automatic recovery refused: prior owner is live")
-                if worker_state is Liveness.UNKNOWN:
-                    raise StaleRecoveryRefused(
-                        "automatic recovery refused: liveness is uncertain"
-                    )
-                slurm_state = slurm_liveness(previous)
-                if slurm_state is Liveness.LIVE:
-                    raise StaleRecoveryRefused("automatic recovery refused: prior owner is live")
-                if slurm_state is Liveness.UNKNOWN:
-                    raise StaleRecoveryRefused(
-                        "automatic recovery refused: liveness is uncertain"
-                    )
-                if worker_state is not Liveness.DEAD or slurm_state not in {
-                    Liveness.DEAD,
-                    Liveness.NOT_APPLICABLE,
-                }:
-                    raise StaleRecoveryRefused(
-                        "automatic recovery refused without conclusive stale evidence"
-                    )
-
-            current, current_raw = _read_lock(lock_path)
-            if current != previous or current_raw != previous_raw:
-                raise LockHeldError("lock owner changed during recovery verification")
-
+        controller = MutationController(root)
+        with controller.section():
+            _assert_not_finalized(root)
+            claim_path = root / RECOVERY_CLAIM_FILENAME
+            if claim_path.exists():
+                raise LockHeldError("another lock recovery is already in progress")
+            lock_path = root / LOCK_FILENAME
+            previous, previous_raw = _read_lock(lock_path)
+            if (
+                previous.study_id != owner.study_id
+                or previous.model_run_id != owner.model_run_id
+                or previous.shard_id != owner.shard_id
+            ):
+                raise CompatibilityError("replacement lock identity differs from prior lock")
+            try:
+                Part1ShardStore(
+                    root,
+                    shard_id=owner.shard_id,
+                    study_id=owner.study_id,
+                    model_run_id=owner.model_run_id,
+                    model_run_manifest_hash=model_run_manifest_hash,
+                )._assert_provenance_header()
+            except Exception as exc:
+                raise CompatibilityError(
+                    f"replacement manifest hash differs from shard provenance: {exc}"
+                ) from exc
             history_directory = root / LOCK_HISTORY_DIRECTORY
             history_directory.mkdir(parents=True, exist_ok=True)
             _fsync_directory(root)
-            history_path = history_directory / f"{previous.lock_id}.{event_type}.json"
-            history = {
-                "recovery_event_type": event_type,
-                "recovered_at": event_timestamp,
+            claim_id = uuid.uuid4().hex
+            claim = {
+                "claim_id": claim_id,
+                "requested_event_type": event_type,
                 "previous_lock": previous.to_dict(),
+                "previous_lock_sha256": hashlib.sha256(previous_raw).hexdigest(),
                 "replacement_lock": owner.to_dict(),
+                "model_run_manifest_hash": model_run_manifest_hash,
+                "event_timestamp": event_timestamp,
+                "execution_context": dict(execution_context),
                 "operator_reason": operator_reason,
             }
-            try:
-                _exclusive_create(history_path, _json_bytes(history))
-            except FileExistsError as exc:
-                if history_path.read_bytes() != _json_bytes(history):
-                    raise Part1RuntimeError("lock recovery history already exists") from exc
-
-            pending_path = root / f".{LOCK_FILENAME}.{owner.lock_id}.pending"
-            _exclusive_create(pending_path, _json_bytes(owner.to_dict()))
-            os.replace(pending_path, lock_path)
-            _fsync_directory(root)
-            replaced = True
-            if fault_at == "after_lock_replacement_before_event":
+            payload = _json_bytes(claim)
+            _exclusive_create(history_directory / f"{claim_id}.claim.json", payload)
+            _exclusive_create(claim_path, payload)
+            if fault_at == "after_claim_creation_before_liveness":
                 raise InjectedTakeoverCrash(fault_at)
-            return cls._finish_pending_takeover(root, fault_at=fault_at)
-        except Exception:
-            # If takeover already replaced the lock, keep the claim as durable
-            # fail-closed evidence. An operator must inspect the archived owner
-            # and complete recovery; no third writer can acquire meanwhile.
-            if not replaced and claim_path.exists():
-                claim_path.unlink()
-                _fsync_directory(root)
-            raise
+            try:
+                return cls._finish_pending_takeover_locked(
+                    root,
+                    worker_liveness=worker_liveness,
+                    slurm_liveness=slurm_liveness,
+                    operator_override_reason=None,
+                    fault_at=fault_at,
+                )
+            except InjectedTakeoverCrash:
+                raise
+            except Exception:
+                # Refusal/errors leave permanent history but release the active claim.
+                if claim_path.exists():
+                    claim_path.unlink()
+                    _fsync_directory(root)
+                raise
 
     @classmethod
-    def finish_pending_takeover(cls, root: Path) -> "LockedShardSession":
-        """Finish durable takeover evidence after a crash, without redoing liveness."""
-
-        return cls._finish_pending_takeover(root, fault_at=None)
-
-    @classmethod
-    def _finish_pending_takeover(
-        cls, root: Path, *, fault_at: str | None
+    def finish_pending_takeover(
+        cls,
+        root: Path,
+        *,
+        worker_liveness: LivenessProbe = default_worker_liveness,
+        slurm_liveness: LivenessProbe = default_slurm_liveness,
+        operator_override_reason: str | None = None,
     ) -> "LockedShardSession":
-        """Internal completion with a synthetic partial-event crash boundary."""
+        """Resume any durable pre- or post-replacement takeover state."""
+
+        root = Path(root)
+        with MutationController(root).section():
+            return cls._finish_pending_takeover_locked(
+                root,
+                worker_liveness=worker_liveness,
+                slurm_liveness=slurm_liveness,
+                operator_override_reason=operator_override_reason,
+                fault_at=None,
+            )
+
+    @classmethod
+    def _finish_pending_takeover_locked(
+        cls,
+        root: Path,
+        *,
+        worker_liveness: LivenessProbe | None,
+        slurm_liveness: LivenessProbe | None,
+        operator_override_reason: str | None,
+        fault_at: str | None,
+    ) -> "LockedShardSession":
+        """Complete a claim while the stable mutation section is held."""
 
         root = Path(root)
         claim_path = root / RECOVERY_CLAIM_FILENAME
@@ -517,18 +598,94 @@ class LockedShardSession:
             raise Part1RuntimeError(f"pending lock recovery claim is corrupt: {exc}") from exc
         if not isinstance(claim_value, dict):
             raise Part1RuntimeError("pending lock recovery claim must be an object")
+        required_claim_fields = {
+            "claim_id",
+            "requested_event_type",
+            "previous_lock",
+            "previous_lock_sha256",
+            "replacement_lock",
+            "model_run_manifest_hash",
+            "event_timestamp",
+            "execution_context",
+            "operator_reason",
+        }
+        if set(claim_value) != required_claim_fields:
+            raise Part1RuntimeError("pending lock recovery claim has invalid fields")
+        if not isinstance(claim_value["claim_id"], str) or not re.fullmatch(
+            r"[0-9a-f]{32}", claim_value["claim_id"]
+        ):
+            raise Part1RuntimeError("pending lock recovery claim_id is invalid")
+        if claim_value["requested_event_type"] not in {
+            "stale_lock_recovered",
+            "operator_unlock",
+        }:
+            raise Part1RuntimeError("pending lock recovery event type is invalid")
+        for field in ("previous_lock_sha256", "model_run_manifest_hash"):
+            if not isinstance(claim_value[field], str) or not re.fullmatch(
+                r"[0-9a-f]{64}", claim_value[field]
+            ):
+                raise Part1RuntimeError(f"pending lock recovery {field} is invalid")
+        if not isinstance(claim_value["execution_context"], dict):
+            raise Part1RuntimeError("pending lock recovery execution_context is invalid")
+        if claim_value["requested_event_type"] == "operator_unlock" and (
+            not isinstance(claim_value["operator_reason"], str)
+            or not claim_value["operator_reason"].strip()
+        ):
+            raise Part1RuntimeError("pending operator recovery reason is invalid")
         owner = LockMetadata.from_mapping(claim_value["replacement_lock"])
         previous = LockMetadata.from_mapping(claim_value["previous_lock"])
-        current, _ = _read_lock(root / LOCK_FILENAME)
+        current, current_raw = _read_lock(root / LOCK_FILENAME)
+        event_type = claim_value["requested_event_type"]
+        operator_reason = claim_value["operator_reason"]
+        if operator_override_reason is not None:
+            if not operator_override_reason.strip():
+                raise ValueError("operator override reason must be nonblank")
+            event_type = "operator_unlock"
+            operator_reason = operator_override_reason.strip()
+        if current == previous:
+            if hashlib.sha256(current_raw).hexdigest() != claim_value["previous_lock_sha256"]:
+                raise LockHeldError("lock bytes changed after takeover claim")
+            if event_type == "stale_lock_recovered":
+                assert worker_liveness is not None and slurm_liveness is not None
+                worker_state = worker_liveness(previous)
+                slurm_state = slurm_liveness(previous)
+                if worker_state is Liveness.LIVE or slurm_state is Liveness.LIVE:
+                    raise StaleRecoveryRefused("automatic recovery refused: prior owner is live")
+                conclusive = False
+                if previous.slurm_job_id is not None:
+                    conclusive = slurm_state is Liveness.DEAD or (
+                        slurm_state is Liveness.UNKNOWN
+                        and previous.hostname == socket.gethostname()
+                        and worker_state is Liveness.DEAD
+                    )
+                else:
+                    conclusive = (
+                        previous.hostname == socket.gethostname()
+                        and worker_state is Liveness.DEAD
+                    )
+                if not conclusive:
+                    raise StaleRecoveryRefused(
+                        "automatic recovery refused: liveness is uncertain"
+                    )
+            if fault_at == "after_verified_evidence_before_replacement":
+                raise InjectedTakeoverCrash(fault_at)
+            pending_path = root / f".{LOCK_FILENAME}.{owner.lock_id}.pending"
+            _exclusive_create(pending_path, _json_bytes(owner.to_dict()))
+            os.replace(pending_path, root / LOCK_FILENAME)
+            _fsync_directory(root)
+            current = owner
         if current != owner:
             raise LostLockOwnershipError("replacement writer no longer owns pending takeover")
+        if fault_at == "after_lock_replacement_before_event":
+            raise InjectedTakeoverCrash(fault_at)
         session = cls(
             root,
             owner,
             model_run_manifest_hash=claim_value["model_run_manifest_hash"],
         )
 
-        journal_path = root / TAKEOVER_EVENT_JOURNAL_FILENAME
+        history_directory = root / LOCK_HISTORY_DIRECTORY
+        journal_path = history_directory / f"{claim_value['claim_id']}.event.json"
         event: dict[str, Any] | None = None
         if journal_path.exists():
             try:
@@ -569,7 +726,6 @@ class LockedShardSession:
                 ),
                 default=-1,
             ) + 2
-            event_type = claim_value["requested_event_type"]
             event = {
                 "schema_name": "part1_audit_event",
                 "schema_version": "1.0.0",
@@ -603,7 +759,7 @@ class LockedShardSession:
                 "backoff_seconds": None,
                 "related_lock_owner": previous.to_dict(),
                 "terminal_record_id": None,
-                "operator_reason": claim_value["operator_reason"],
+                "operator_reason": operator_reason,
             }
             validate_instance("audit_event", event)
             _exclusive_create(journal_path, _json_bytes(event))
@@ -633,7 +789,8 @@ class LockedShardSession:
                 )
                 raise InjectedTakeoverCrash(fault_at)
             session.store.append_audit_event(event)
-        journal_path.unlink()
+        if fault_at == "after_event_before_claim_cleanup":
+            raise InjectedTakeoverCrash(fault_at)
         claim_path.unlink()
         _fsync_directory(root)
         return session
@@ -643,6 +800,7 @@ class LockedShardSession:
 class WorkSpec:
     study_id: str
     model_run_id: str
+    model_run_manifest_hash: str
     question_id: str
     run_id: int
     checkpoint_id: str | None
@@ -653,25 +811,58 @@ class WorkSpec:
         cls,
         study_id: str,
         model_run_id: str,
-        question_id: str,
-        run_id: int,
-        *,
+        *identity: Any,
         seed: int,
     ) -> "WorkSpec":
-        return cls(study_id, model_run_id, question_id, run_id, None, seed)
+        if len(identity) == 2:
+            model_run_manifest_hash_value, question_id, run_id = "", *identity
+        elif len(identity) == 3:
+            model_run_manifest_hash_value, question_id, run_id = identity
+        else:
+            raise TypeError("natural requires question/run and optional manifest hash")
+        return cls(
+            study_id,
+            model_run_id,
+            model_run_manifest_hash_value,
+            question_id,
+            run_id,
+            None,
+            seed,
+        )
 
     @classmethod
     def checkpoint(
         cls,
         study_id: str,
         model_run_id: str,
-        question_id: str,
-        run_id: int,
-        checkpoint_id: str,
-        *,
+        *identity: Any,
         seed: int,
     ) -> "WorkSpec":
-        return cls(study_id, model_run_id, question_id, run_id, checkpoint_id, seed)
+        if len(identity) == 3:
+            model_run_manifest_hash_value, question_id, run_id, checkpoint_id = "", *identity
+        elif len(identity) == 4:
+            model_run_manifest_hash_value, question_id, run_id, checkpoint_id = identity
+        else:
+            raise TypeError("checkpoint requires question/run/checkpoint and optional manifest hash")
+        return cls(
+            study_id,
+            model_run_id,
+            model_run_manifest_hash_value,
+            question_id,
+            run_id,
+            checkpoint_id,
+            seed,
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "WorkSpec":
+        required = {field.name for field in cls.__dataclass_fields__.values()}
+        if set(value) != required:
+            raise ValueError("work spec fields are incomplete or unknown")
+        return cls(**dict(value))
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
     @property
     def key(self) -> LogicalKey:
@@ -708,6 +899,7 @@ class RetryPlan:
     next_attempt_number: int | None
     requires_fresh_process: bool
     terminate_current_process: bool
+    backoff_seconds: int | None
 
 
 def plan_retry(work: WorkSpec, *, category: str, attempts_consumed: int) -> RetryPlan:
@@ -737,6 +929,11 @@ def plan_retry(work: WorkSpec, *, category: str, attempts_consumed: int) -> Retr
         next_attempt_number=next_attempt,
         requires_fresh_process=fresh,
         terminate_current_process=fresh,
+        backoff_seconds=(
+            BACKOFF_SECONDS[next_attempt - 1]
+            if decision == "retry" and next_attempt is not None
+            else None
+        ),
     )
 
 
@@ -754,6 +951,8 @@ class ResumeDecision:
     reason: str
     attempts_consumed: int
     next_attempt_number: int | None
+    terminalization_required: bool = False
+    failure_category: str | None = None
 
 
 def _events_for_key(index: ShardIndex, key: LogicalKey) -> list[Mapping[str, Any]]:
@@ -792,6 +991,8 @@ def plan_resume(
 ) -> dict[WorkSpec, ResumeDecision]:
     if index.lifecycle_errors:
         raise CompatibilityError("cannot resume from lifecycle-corrupt shard state")
+    if index.hierarchy_errors:
+        raise CompatibilityError("cannot resume from hierarchy-corrupt shard state")
     decisions: dict[WorkSpec, ResumeDecision] = {}
     known_provenance = {
         (record["study_id"], record["model_run_id"])
@@ -803,6 +1004,8 @@ def plan_resume(
         for event in events
     )
     for work in work_items:
+        if work.model_run_manifest_hash != index.model_run_manifest_hash:
+            raise CompatibilityError("requested work manifest hash is incompatible")
         if known_provenance and (work.study_id, work.model_run_id) not in known_provenance:
             raise CompatibilityError("requested work study/model-run identity is incompatible")
         terminal = _terminal_for_work(index, work)
@@ -868,9 +1071,15 @@ def plan_resume(
                 work, "terminal", "nonretryable_failure", attempts, None
             )
             continue
-        if attempts >= MAX_TOTAL_ATTEMPTS:
+        if work.key in index.terminalization_required:
             decisions[work] = ResumeDecision(
-                work, "terminal", "attempts_exhausted", attempts, None
+                work,
+                "terminalization_required",
+                "terminal_result_required",
+                attempts,
+                None,
+                True,
+                index.terminalization_required[work.key],
             )
             continue
         reason = "not_started" if attempts == 0 else "retryable_interruption_or_failure"
@@ -889,6 +1098,8 @@ def prepare_resume(
     for item in work:
         if item.study_id != store.study_id or item.model_run_id != store.model_run_id:
             raise CompatibilityError("requested work is incompatible with shard provenance")
+        if item.model_run_manifest_hash != store.model_run_manifest_hash:
+            raise CompatibilityError("requested work manifest hash differs from shard provenance")
     store.reconcile(
         event_timestamp=event_timestamp,
         execution_context=execution_context,
@@ -933,19 +1144,22 @@ def validate_manifest_compatibility(
 
 
 def validate_retry_policy_config(config: Mapping[str, Any]) -> None:
-    if config.get("max_total_attempts") != MAX_TOTAL_ATTEMPTS:
-        raise CompatibilityError("retry max_total_attempts differs from shared policy")
+    exact_scalars = {
+        "config_version": "1.0.0",
+        "max_total_attempts": MAX_TOTAL_ATTEMPTS,
+        "attempt_numbers": list(ATTEMPT_NUMBERS),
+        "cuda_retry_requires_fresh_process": True,
+        "preserve_seed_and_logical_identity": True,
+        "backoff_seconds": list(BACKOFF_SECONDS),
+    }
+    for field, expected in exact_scalars.items():
+        if config.get(field) != expected:
+            raise CompatibilityError(f"retry {field} differs from shared policy")
     configured_retryable = config.get("retryable_categories")
-    if not isinstance(configured_retryable, list) or (
-        len(configured_retryable) != len(RETRYABLE_CATEGORIES)
-        or set(configured_retryable) != RETRYABLE_CATEGORIES
-    ):
+    if configured_retryable != list(RETRYABLE_CATEGORY_ORDER):
         raise CompatibilityError("retryable_categories differ from shared policy")
     configured_terminal = config.get("terminal_categories")
-    if not isinstance(configured_terminal, list) or (
-        len(configured_terminal) != len(TERMINAL_CATEGORIES)
-        or set(configured_terminal) != TERMINAL_CATEGORIES
-    ):
+    if configured_terminal != list(TERMINAL_CATEGORY_ORDER):
         raise CompatibilityError("terminal_categories differ from shared policy")
 
 
@@ -959,6 +1173,8 @@ def run_dry_run(
     study_manifest: Mapping[str, Any] | None = None,
     model_run_manifest: Mapping[str, Any] | None = None,
     shard_root: Path | None = None,
+    work_items: Iterable[WorkSpec] = (),
+    retry_request: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     configs = {name: load_config(name) for name in CONFIG_NAMES}
     storage = dict(configs["storage"])
@@ -992,9 +1208,48 @@ def run_dry_run(
     if shard_root is not None:
         if manifest_report is None:
             raise CompatibilityError("shard inspection requires compatible manifest fixtures")
+        header_path = Path(shard_root) / ".shard-provenance.json"
+        if not header_path.exists():
+            return {
+                "is_valid": False,
+                "mode": mode,
+                "config": config_report,
+                "schemas_validated": sorted(SCHEMA_NAMES),
+                "manifest_compatibility": manifest_report,
+                "shard_plan": {
+                    "validation": {
+                        "is_valid": False,
+                        "error": "shard provenance header is missing",
+                    },
+                    "completed_logical_keys": None,
+                    "mutation_performed": False,
+                    "lock_present": False,
+                    "takeover_pending": False,
+                    "finalized": False,
+                },
+                "retry_policy": {
+                    "max_total_attempts": MAX_TOTAL_ATTEMPTS,
+                    "retryable_categories": sorted(RETRYABLE_CATEGORIES),
+                    "terminal_categories": sorted(TERMINAL_CATEGORIES),
+                    "cuda_retry_requires_fresh_process": True,
+                },
+                "resume_plan": [],
+                "retry_plan": None,
+                "would_create_production_manifest": False,
+                "imports_model_or_data_libraries": False,
+                "mutation_performed": False,
+            }
+        try:
+            header_value = json.loads(header_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CompatibilityError(f"shard provenance header is unavailable: {exc}") from exc
+        if not isinstance(header_value, dict) or not isinstance(
+            header_value.get("shard_id"), str
+        ):
+            raise CompatibilityError("shard provenance header is invalid")
         shard = Part1ShardStore(
             shard_root,
-            shard_id=Path(shard_root).name,
+            shard_id=header_value["shard_id"],
             study_id=manifest_report["study_id"],
             model_run_id=manifest_report["model_run_id"],
             model_run_manifest_hash=manifest_report["model_run_manifest_hash"],
@@ -1008,6 +1263,10 @@ def run_dry_run(
         index = None
         if not inspection.trailing_tails and not inspection.unterminated_streams:
             index = shard.build_index()
+        decisions = plan_resume(index, work_items) if index is not None else {}
+        lock_path = Path(shard_root) / LOCK_FILENAME
+        lock_owner = _read_lock(lock_path)[0].to_dict() if lock_path.exists() else None
+        history_directory = Path(shard_root) / LOCK_HISTORY_DIRECTORY
         shard_report = {
             "trailing_line_recovery_required": sorted(
                 set(inspection.trailing_tails) | set(inspection.unterminated_streams)
@@ -1026,10 +1285,34 @@ def run_dry_run(
             else [],
             "validation": validation,
             "mutation_performed": False,
+            "lock_present": (Path(shard_root) / LOCK_FILENAME).exists(),
+            "lock_owner": lock_owner,
+            "takeover_pending": (
+                Path(shard_root) / RECOVERY_CLAIM_FILENAME
+            ).exists(),
+            "takeover_history": sorted(
+                path.name for path in history_directory.glob("*.json")
+            )
+            if history_directory.exists()
+            else [],
+            "finalized": shard.finalization_path.exists(),
         }
+    else:
+        decisions = {}
+
+    retry_plan = None
+    if retry_request is not None:
+        retry_work = WorkSpec.from_mapping(retry_request["work"])
+        retry_plan = asdict(
+            plan_retry(
+                retry_work,
+                category=str(retry_request["category"]),
+                attempts_consumed=int(retry_request["attempts_consumed"]),
+            )
+        )
 
     return {
-        "is_valid": True,
+        "is_valid": shard_report is None or bool(shard_report["validation"]["is_valid"]),
         "mode": mode,
         "config": config_report,
         "schemas_validated": sorted(SCHEMA_NAMES),
@@ -1041,7 +1324,8 @@ def run_dry_run(
             "terminal_categories": sorted(TERMINAL_CATEGORIES),
             "cuda_retry_requires_fresh_process": True,
         },
-        "resume_plan": [],
+        "resume_plan": [asdict(decision) for decision in decisions.values()],
+        "retry_plan": retry_plan,
         "would_create_production_manifest": False,
         "imports_model_or_data_libraries": False,
         "mutation_performed": False,
