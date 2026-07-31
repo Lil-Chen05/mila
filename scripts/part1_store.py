@@ -23,6 +23,7 @@ from part1_contract import (
     canonical_json_bytes,
     checkpoint_record_id,
     natural_record_id,
+    shared_probe_id,
     validate_instance,
 )
 from part1_failure_policy import (
@@ -104,6 +105,8 @@ class StreamInspection:
 
 @dataclass(frozen=True)
 class ShardIndex:
+    study_id: str
+    model_run_id: str
     natural_terminal_by_key: dict[NaturalKey, dict[str, Any]]
     checkpoint_terminal_by_key: dict[CheckpointKey, dict[str, Any]]
     terminal_by_id: dict[str, dict[str, Any]]
@@ -219,6 +222,7 @@ class Part1ShardStore:
         model_run_manifest_hash: str,
         mutation_guard: Callable[[], None] | None = None,
         mutation_section: Callable[[], ContextManager[Any]] | None = None,
+        unsafe_for_tests: bool = False,
     ) -> None:
         self.root = Path(root)
         self.shard_id = shard_id
@@ -227,6 +231,7 @@ class Part1ShardStore:
         self.model_run_manifest_hash = model_run_manifest_hash
         self._mutation_guard = mutation_guard
         self._mutation_section = mutation_section or nullcontext
+        self._unsafe_for_tests = unsafe_for_tests
         self.provenance_header_path = self.root / PROVENANCE_HEADER_FILENAME
         self.natural_results_path = self.root / STREAM_FILES["natural_results"]
         self.checkpoint_results_path = self.root / STREAM_FILES["checkpoint_results"]
@@ -246,6 +251,12 @@ class Part1ShardStore:
     def _assert_mutation_authorized(self) -> None:
         if self._mutation_guard is not None:
             self._mutation_guard()
+            return
+        if not self._unsafe_for_tests:
+            raise Part1StoreError(
+                "store mutation requires a runtime lock capability; "
+                "synthetic tests must opt in with unsafe_for_tests=True"
+            )
 
     def _expected_provenance_header(self) -> dict[str, Any]:
         return {
@@ -358,22 +369,41 @@ class Part1ShardStore:
             )
         return parsed
 
-    @staticmethod
-    def _durable_append(path: Path, payload: bytes) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
+    def _durable_mkdirs(self, path: Path) -> None:
+        missing: list[Path] = []
+        cursor = path
+        while not cursor.exists():
+            missing.append(cursor)
+            if cursor == cursor.parent:
+                raise Part1StoreError(f"cannot find an existing parent for {path}")
+            cursor = cursor.parent
+        for directory in reversed(missing):
+            try:
+                directory.mkdir()
+            except FileExistsError:
+                continue
+            self._fsync_directory(directory.parent)
+
+    def _durable_append(self, path: Path, payload: bytes) -> None:
+        created = not path.exists()
+        self._durable_mkdirs(path.parent)
         with path.open("ab") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+        if created:
+            self._fsync_directory(path.parent)
 
-    @staticmethod
-    def _durable_partial_append(path: Path, payload: bytes) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
+    def _durable_partial_append(self, path: Path, payload: bytes) -> None:
+        created = not path.exists()
+        self._durable_mkdirs(path.parent)
         partial_length = max(1, len(payload) // 2)
         with path.open("ab") as handle:
             handle.write(payload[:partial_length])
             handle.flush()
             os.fsync(handle.fileno())
+        if created:
+            self._fsync_directory(path.parent)
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:
@@ -383,17 +413,13 @@ class Part1ShardStore:
         finally:
             os.close(descriptor)
 
-    @classmethod
-    def _durable_create(cls, path: Path, payload: bytes) -> None:
-        parent_existed = path.parent.exists()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if not parent_existed:
-            cls._fsync_directory(path.parent.parent)
+    def _durable_create(self, path: Path, payload: bytes) -> None:
+        self._durable_mkdirs(path.parent)
         with path.open("xb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        cls._fsync_directory(path.parent)
+        self._fsync_directory(path.parent)
 
     def _verify_terminal_identity(self, record: Mapping[str, Any]) -> None:
         checkpoint_id = record.get("checkpoint_id")
@@ -729,6 +755,51 @@ class Part1ShardStore:
         ):
             if checkpoint[field] != parent[field]:
                 raise ValueError(f"checkpoint {field} differs from parent natural result")
+        checkpoint_ids = parent["checkpoint_ids"]
+        requested_index = int(checkpoint["requested_checkpoint_index"])
+        if checkpoint_ids[requested_index] != checkpoint["checkpoint_id"]:
+            raise ValueError("checkpoint identity differs from parent requested placement")
+        reasoning_count = int(parent["reasoning_token_count"])
+        requested_fraction = float(checkpoint["requested_fraction"])
+        expected_k_keep = min(
+            max(int(round(requested_fraction * reasoning_count)), 0), reasoning_count
+        )
+        if checkpoint["k_keep"] != expected_k_keep:
+            raise ValueError("checkpoint k_keep differs from ties-even parent placement")
+        expected_actual_fraction = (
+            expected_k_keep / reasoning_count if reasoning_count > 0 else None
+        )
+        if checkpoint["actual_fraction"] != expected_actual_fraction:
+            raise ValueError("checkpoint actual fraction differs from parent placement")
+        expected_probe_id = shared_probe_id(
+            checkpoint["study_id"],
+            checkpoint["model_run_id"],
+            checkpoint["question_id"],
+            checkpoint["run_id"],
+            prefix_hash=checkpoint["prefix_hash"],
+            inducer_version=checkpoint["inducer_version"],
+        )
+        if checkpoint["shared_probe_id"] != expected_probe_id:
+            raise ValueError("checkpoint shared probe identity is invalid")
+        placements = [
+            min(max(int(round((index / 10) * reasoning_count)), 0), reasoning_count)
+            for index in range(len(checkpoint_ids))
+        ]
+        alias_members = [
+            checkpoint_ids[index]
+            for index, placement in enumerate(placements)
+            if placement == expected_k_keep
+        ]
+        expected_alias_metadata = {
+            "owner_checkpoint_id": alias_members[0],
+            "members": alias_members,
+        }
+        if checkpoint["alias_metadata"] != expected_alias_metadata:
+            raise ValueError("checkpoint alias metadata differs from parent placement")
+        if checkpoint["is_alias"] != (
+            checkpoint["checkpoint_id"] != expected_alias_metadata["owner_checkpoint_id"]
+        ):
+            raise ValueError("checkpoint alias flag differs from alias ownership")
 
     @_serialized_mutation
     def append_terminal_result(self, record: Mapping[str, Any]) -> None:
@@ -1234,6 +1305,8 @@ class Part1ShardStore:
             event["event_id"] for event in journal_events if event["event_id"] not in audit_event_ids
         )
         return ShardIndex(
+            study_id=self.study_id,
+            model_run_id=self.model_run_id,
             natural_terminal_by_key=natural_by_key,
             checkpoint_terminal_by_key=checkpoint_by_key,
             terminal_by_id=terminal_by_id,
@@ -1827,11 +1900,7 @@ class Part1ShardStore:
         )
         report_path = Path(path)
         self._assert_mutation_authorized()
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        with report_path.open("xb") as handle:
-            handle.write(_json_line_bytes(report)[:-1])
-            handle.flush()
-            os.fsync(handle.fileno())
+        self._durable_create(report_path, _json_line_bytes(report)[:-1])
         return report
 
     @_serialized_mutation
@@ -1853,7 +1922,6 @@ class Part1ShardStore:
             raise Part1StoreError(
                 "cannot finalize until terminal/event reconciliation is complete"
             )
-        self.root.mkdir(parents=True, exist_ok=True)
         marker = {
             "store_version": STORE_VERSION,
             "shard_id": self.shard_id,
@@ -1862,7 +1930,4 @@ class Part1ShardStore:
             "finalized_at": now,
         }
         self._assert_mutation_authorized()
-        with self.finalization_path.open("xb") as handle:
-            handle.write(_json_line_bytes(marker)[:-1])
-            handle.flush()
-            os.fsync(handle.fileno())
+        self._durable_create(self.finalization_path, _json_line_bytes(marker)[:-1])

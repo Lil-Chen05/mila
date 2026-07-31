@@ -36,6 +36,7 @@ def store(tmp_path: Path) -> Part1ShardStore:
         study_id=STUDY_ID,
         model_run_id=MODEL_RUN_ID,
         model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+        unsafe_for_tests=True,
     )
     shard.initialize_provenance_header()
     return shard
@@ -72,7 +73,7 @@ def test_separate_streams_durably_preserve_full_precision_and_alignment(
     shard.append_audit_event(started)
     shard.append_terminal_result(result)
 
-    assert fsync_calls == 2
+    assert fsync_calls == 4
     assert shard.natural_results_path.exists()
     assert shard.audit_events_path.exists()
     assert not shard.checkpoint_results_path.exists()
@@ -89,6 +90,189 @@ def test_separate_streams_durably_preserve_full_precision_and_alignment(
     checkpoint["ad_logits_float32"] = [0.1, 0.2, 0.3]
     with pytest.raises(ValueError, match="four|too short"):
         store(tmp_path / "bad-checkpoint").append_terminal_result(checkpoint)
+
+
+def test_first_stream_entries_and_final_artifacts_fsync_their_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shard = store(tmp_path)
+    synced_directories: list[Path] = []
+    monkeypatch.setattr(
+        shard,
+        "_fsync_directory",
+        lambda path: synced_directories.append(Path(path)),
+    )
+    result = natural_result()
+    shard.append_audit_event(attempt_event(result, "attempt_started", 0))
+    assert synced_directories == [shard.root]
+    synced_directories.clear()
+    shard.append_terminal_result(result)
+    assert synced_directories == [shard.root]
+    synced_directories.clear()
+    report_path = shard.root / "reports" / "report.json"
+    shard.write_validation_report(
+        report_path,
+        artifact_kind="natural_shard",
+        started_at="2026-07-31T00:00:00Z",
+        completed_at="2026-07-31T00:00:01Z",
+    )
+    assert report_path.parent in synced_directories
+
+    finalized = store(tmp_path / "finalized")
+    finalized_synced: list[Path] = []
+    monkeypatch.setattr(
+        finalized,
+        "_fsync_directory",
+        lambda path: finalized_synced.append(Path(path)),
+    )
+    finalized.finalize()
+    assert finalized.root in finalized_synced
+
+
+@pytest.mark.parametrize("is_checkpoint", [False, True])
+def test_nonretryable_interruption_cannot_be_published_or_validate(
+    tmp_path: Path, is_checkpoint: bool
+) -> None:
+    shard = store(tmp_path)
+    record = checkpoint_result() if is_checkpoint else natural_result()
+    if is_checkpoint:
+        parent = natural_result()
+        shard.append_audit_event(attempt_event(parent, "attempt_started", 0))
+        shard.commit_terminal_result(parent, attempt_event(parent, "attempt_completed", 1))
+    shard.append_audit_event(attempt_event(record, "attempt_started", 0))
+    interrupted = attempt_event(record, "attempt_interrupted", 1)
+    interrupted.update(
+        outcome_category="invalid_configuration",
+        retry_classification="terminal",
+        retry_decision="do_not_retry",
+        backoff_seconds=None,
+    )
+    with pytest.raises(ValueError, match="interrupted|terminalization"):
+        shard.append_audit_event(interrupted)
+
+
+def test_handwritten_nonretryable_interruption_cannot_validate_or_finalize(
+    tmp_path: Path,
+) -> None:
+    shard = store(tmp_path)
+    record = natural_result()
+    started = attempt_event(record, "attempt_started", 0)
+    interrupted = attempt_event(record, "attempt_interrupted", 1)
+    interrupted.update(
+        outcome_category="invalid_configuration",
+        retry_classification="terminal",
+        retry_decision="do_not_retry",
+        backoff_seconds=None,
+    )
+    shard.audit_events_path.write_text(
+        "".join(
+            json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
+            for event in (started, interrupted)
+        ),
+        encoding="utf-8",
+    )
+    report = shard.validate_shard(
+        artifact_kind="natural_shard",
+        started_at="2026-07-31T00:00:00Z",
+        completed_at="2026-07-31T00:00:01Z",
+    )
+    assert report["is_valid"] is False
+    with pytest.raises(Part1StoreError, match="invalid shard"):
+        shard.finalize()
+
+
+@pytest.mark.parametrize("is_checkpoint", [False, True])
+@pytest.mark.parametrize("attempt_number", [1, 2])
+def test_early_exhausted_interruption_is_rejected_for_every_key_kind(
+    tmp_path: Path, is_checkpoint: bool, attempt_number: int
+) -> None:
+    shard = store(tmp_path)
+    if is_checkpoint:
+        parent = natural_result()
+        shard.append_audit_event(attempt_event(parent, "attempt_started", 0))
+        shard.commit_terminal_result(parent, attempt_event(parent, "attempt_completed", 1))
+    factory = checkpoint_result if is_checkpoint else natural_result
+    if attempt_number == 2:
+        first = factory(attempt_number=1)
+        shard.append_audit_event(attempt_event(first, "attempt_started", 0))
+        shard.append_audit_event(attempt_event(first, "attempt_failed", 1))
+    record = factory(attempt_number=attempt_number)
+    shard.append_audit_event(attempt_event(record, "attempt_started", 0))
+    interrupted = attempt_event(record, "attempt_interrupted", 1)
+    interrupted.update(retry_decision="exhausted", backoff_seconds=None)
+    with pytest.raises(ValueError, match="retry decision|policy"):
+        shard.append_audit_event(interrupted)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("k_keep", 1),
+        ("actual_fraction", 0.5),
+        ("shared_probe_id", "2" * 64),
+        ("is_alias", False),
+        ("alias_metadata", {"owner_checkpoint_id": "cp-05", "members": ["cp-05"]}),
+    ],
+)
+def test_checkpoint_parent_recomputes_placement_probe_and_aliases(
+    tmp_path: Path, field: str, value
+) -> None:
+    shard = store(tmp_path)
+    parent = natural_result()
+    shard.append_audit_event(attempt_event(parent, "attempt_started", 0))
+    shard.commit_terminal_result(parent, attempt_event(parent, "attempt_completed", 1))
+    checkpoint = checkpoint_result()
+    checkpoint[field] = value
+    shard.append_audit_event(attempt_event(checkpoint, "attempt_started", 0))
+    with pytest.raises(ValueError, match="placement|fraction|probe|alias"):
+        shard.append_terminal_result(checkpoint)
+
+
+@pytest.mark.parametrize("reasoning_count", [0, 1, 2, 3])
+def test_checkpoint_parent_accepts_exact_zero_short_and_ties_even_placements(
+    tmp_path: Path, reasoning_count: int
+) -> None:
+    shard = store(tmp_path)
+    parent = natural_result()
+    parent["reasoning_token_count"] = reasoning_count
+    if reasoning_count == 0:
+        parent.update(
+            reasoning_status="no_reasoning",
+            reasoning_text="",
+            mean_reasoning_entropy_nats=None,
+            tail_reasoning_entropy_nats=None,
+        )
+    shard.append_audit_event(attempt_event(parent, "attempt_started", 0))
+    shard.commit_terminal_result(parent, attempt_event(parent, "attempt_completed", 1))
+
+    checkpoint = checkpoint_result()
+    k_keep = round(0.5 * reasoning_count)
+    placements = [round((index / 10) * reasoning_count) for index in range(11)]
+    members = [
+        f"cp-{index:02d}"
+        for index, placement in enumerate(placements)
+        if placement == k_keep
+    ]
+    checkpoint.update(
+        k_keep=k_keep,
+        actual_fraction=(k_keep / reasoning_count if reasoning_count else None),
+        is_alias=checkpoint["checkpoint_id"] != members[0],
+        alias_metadata={"owner_checkpoint_id": members[0], "members": members},
+    )
+    shard.append_audit_event(attempt_event(checkpoint, "attempt_started", 0))
+    shard.append_terminal_result(checkpoint)
+
+
+def test_unlocked_store_mutation_is_impossible_by_default(tmp_path: Path) -> None:
+    shard = Part1ShardStore(
+        tmp_path / "read-only",
+        shard_id=SHARD_ID,
+        study_id=STUDY_ID,
+        model_run_id=MODEL_RUN_ID,
+        model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+    )
+    with pytest.raises(Part1StoreError, match="lock capability|unsafe_for_tests"):
+        shard.initialize_provenance_header()
 
 
 def test_duplicate_conflict_and_premature_terminal_failure_are_rejected(tmp_path: Path) -> None:
@@ -920,6 +1104,7 @@ def test_validation_report_identity_excludes_mutable_report_state_and_is_domain_
         study_id=STUDY_ID,
         model_run_id=MODEL_RUN_ID,
         model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+        unsafe_for_tests=True,
     )
     different_shard.initialize_provenance_header()
     different = different_shard.validate_shard(

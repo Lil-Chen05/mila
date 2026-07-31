@@ -9,6 +9,7 @@ from part1_contract import (
     audit_event_id,
     checkpoint_record_id,
     natural_record_id,
+    shared_probe_id,
 )
 from part1_failure_policy import classify_failure
 
@@ -118,11 +119,21 @@ def checkpoint_result(*, attempt_number: int = 1, checkpoint_id: str = "cp-05") 
         "infrastructure_failure_reference": None,
         "requested_checkpoint_index": 5,
         "requested_fraction": 0.5,
-        "k_keep": 1,
-        "actual_fraction": 0.5,
-        "shared_probe_id": "2" * 64,
-        "is_alias": False,
-        "alias_metadata": {"owner_checkpoint_id": checkpoint_id, "members": [checkpoint_id]},
+        "k_keep": 0,
+        "actual_fraction": 0.0,
+        "shared_probe_id": shared_probe_id(
+            STUDY_ID,
+            MODEL_RUN_ID,
+            QUESTION_ID,
+            0,
+            prefix_hash="3" * 64,
+            inducer_version="smollm3-forced-close-v1",
+        ),
+        "is_alias": checkpoint_id != "cp-00",
+        "alias_metadata": {
+            "owner_checkpoint_id": "cp-00",
+            "members": [f"cp-{index:02d}" for index in range(6)],
+        },
         "prefix_hash": "3" * 64,
         "inducer_version": "smollm3-forced-close-v1",
         "inducer_text": "</think>\nAnswer:",

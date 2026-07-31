@@ -99,6 +99,14 @@
       "then": {"properties": {"raw_confidence_text": {"type": "string"}, "raw_parsed_confidence": {"type": "integer"}, "normalized_confidence": {"type": "null"}}}
     },
     {
+      "if": {"properties": {"confidence_parse_status": {"const": "missing"}}},
+      "then": {"properties": {"raw_confidence_text": {"type": "null"}, "raw_parsed_confidence": {"type": "null"}, "normalized_confidence": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"confidence_parse_status": {"const": "malformed"}}},
+      "then": {"properties": {"raw_parsed_confidence": {"type": "null"}, "normalized_confidence": {"type": "null"}}}
+    },
+    {
       "if": {"properties": {"answer_token_status": {"const": "located"}}},
       "then": {"properties": {"answer_token_index": {"type": "integer"}, "answer_token_id": {"type": "integer"}, "token_convention": {"type": "string", "minLength": 1}, "ad_token_ids": {"type": "array"}}},
       "else": {"properties": {"answer_token_index": {"type": "null"}, "answer_token_id": {"type": "null"}, "token_convention": {"type": "null"}, "ad_token_ids": {"type": "null"}}}

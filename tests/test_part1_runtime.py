@@ -135,6 +135,27 @@ def test_atomic_lock_rejects_second_writer_and_prevents_concurrent_append(tmp_pa
     first.close()
 
 
+def test_first_shard_root_creation_fsyncs_each_new_parent_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from part1_runtime import LockedShardSession
+
+    synced: list[Path] = []
+    monkeypatch.setattr(
+        "part1_runtime._fsync_directory", lambda path: synced.append(Path(path))
+    )
+    root = tmp_path / "level-one" / "level-two" / "shard"
+    session = LockedShardSession.acquire(
+        root,
+        owner=_owner(pid=101),
+        model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+    )
+    assert tmp_path in synced
+    assert root.parent.parent in synced
+    assert root.parent in synced
+    session.close()
+
+
 def test_verified_stale_recovery_is_race_safe_audited_and_displaces_old_writer(
     tmp_path: Path,
 ) -> None:
@@ -727,7 +748,14 @@ def test_resume_refuses_index_with_lifecycle_corruption(tmp_path: Path) -> None:
 
 
 def _compatible_manifests() -> tuple[dict, dict]:
-    from part1_contract import model_run_id, model_run_manifest_hash, study_id, study_manifest_hash
+    from part1_contract import (
+        FIXED_MODEL_REQUESTED_CONTRACT,
+        FIXED_STUDY_CONTRACT,
+        model_run_id,
+        model_run_manifest_hash,
+        study_id,
+        study_manifest_hash,
+    )
 
     subjects = [
         "high_school_mathematics",
@@ -740,23 +768,7 @@ def _compatible_manifests() -> tuple[dict, dict]:
         "schema_name": "part1_study_manifest",
         "schema_version": "1.0.0",
         "question_manifest_hash": "e" * 64,
-        "subjects": subjects,
-        "subject_quotas": {subject: 100 for subject in subjects},
-        "question_sampling_seed": 42,
-        "scientific_protocol_version": "part1-science-v1",
-        "checkpoint_fractions": [index / 10 for index in range(11)],
-        "checkpoint_placement_contract": {"version": "ties-even-v1"},
-        "entropy_contract": {"version": "entropy-v1"},
-        "natural_answer_validity_rule": {"version": "post-close-v1"},
-        "status_contract_version": "part1-status-v1",
-        "calibration_contract": {"version": "calibration-v1"},
-        "bootstrap_contract": {"version": "bootstrap-v1"},
-        "primary_auroc_feature_registry": ["negative_mean_reasoning_entropy"],
-        "within_question_analysis": {"version": "paired-v1"},
-        "switching_stabilization_contract": {"version": "trajectory-v1"},
-        "repetition_policy": "preserve-successful-output",
-        "compatible_raw_record_schema_versions": ["1.0.0"],
-        "analysis_contract_version": "part1-analysis-v1",
+        **FIXED_STUDY_CONTRACT,
     }
     study["study_id"] = study_id(study)
     study["study_manifest_hash"] = study_manifest_hash(study)
@@ -766,9 +778,8 @@ def _compatible_manifests() -> tuple[dict, dict]:
         "study_id": study["study_id"],
         "study_manifest_hash": study["study_manifest_hash"],
         "question_manifest_hash": study["question_manifest_hash"],
-        "model_repository": "HuggingFaceTB/SmolLM3-3B",
+        **FIXED_MODEL_REQUESTED_CONTRACT,
         "model_revision": "model-commit",
-        "tokenizer_repository": "HuggingFaceTB/SmolLM3-3B",
         "tokenizer_revision": "tokenizer-commit",
         "canonical_model_identity": "hf:HuggingFaceTB/SmolLM3-3B@model-commit",
         "adapter_version": "smollm3-v1",
@@ -782,15 +793,15 @@ def _compatible_manifests() -> tuple[dict, dict]:
         "reasoning_open_token_ids": [3],
         "reasoning_close_tag": "</think>",
         "reasoning_close_token_ids": [4],
-        "requested_natural_generation": {"do_sample": True},
-        "effective_natural_generation": {"do_sample": True},
-        "requested_checkpoint_generation": {"do_sample": False},
-        "effective_checkpoint_generation": {"do_sample": False},
+        "effective_natural_generation": dict(
+            FIXED_MODEL_REQUESTED_CONTRACT["requested_natural_generation"]
+        ),
+        "effective_checkpoint_generation": dict(
+            FIXED_MODEL_REQUESTED_CONTRACT["requested_checkpoint_generation"]
+        ),
         "ad_token_convention": "single-token",
         "ad_raw_token_sequences": {"A": [65], "B": [66], "C": [67], "D": [68]},
         "ad_token_ids": [65, 66, 67, 68],
-        "seed_algorithm_version": "part1-seed-v1",
-        "base_generation_seed": 42,
         "environment_versions": {"python": "3.12"},
         "final_production_git_commit": None,
         "production": False,
@@ -819,6 +830,40 @@ def test_manifest_compatibility_rejects_hash_schema_and_hierarchy_mismatches() -
     incompatible["study_manifest_hash"] = study["study_manifest_hash"]
     with pytest.raises(CompatibilityError, match="raw record schema"):
         validate_manifest_compatibility(incompatible, model)
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "value"),
+    [
+        ("study", "scientific_protocol_version", "drifted"),
+        ("study", "primary_auroc_feature_registry", ["one-feature"]),
+        ("model", "model_repository", "other/model"),
+        ("model", "base_generation_seed", 7),
+        ("model", "requested_natural_generation", {"do_sample": True}),
+        ("model", "requested_checkpoint_generation", {"do_sample": False}),
+    ],
+)
+def test_manifest_compatibility_rejects_fixed_contract_drift(
+    target: str, field: str, value
+) -> None:
+    from part1_contract import model_run_id, model_run_manifest_hash, study_id, study_manifest_hash
+    from part1_runtime import CompatibilityError, validate_manifest_compatibility
+
+    study, model = _compatible_manifests()
+    if target == "study":
+        study[field] = value
+        study["study_id"] = study_id(study)
+        study["study_manifest_hash"] = study_manifest_hash(study)
+        model.update(
+            study_id=study["study_id"],
+            study_manifest_hash=study["study_manifest_hash"],
+        )
+    else:
+        model[field] = value
+    model["model_run_id"] = model_run_id(model)
+    model["model_run_manifest_hash"] = model_run_manifest_hash(model)
+    with pytest.raises(CompatibilityError, match="fixed Part 1|requested"):
+        validate_manifest_compatibility(study, model)
 
 
 def test_dry_run_default_and_templates_are_read_only_and_login_safe(tmp_path: Path) -> None:
@@ -1736,7 +1781,7 @@ def test_dry_run_cli_reports_real_resume_and_fails_on_corrupt_shard(tmp_path: Pa
             {
                 "work": work.to_dict(),
                 "category": "temporary_filesystem_failure",
-                "attempts_consumed": 1,
+                "attempts_consumed": 0,
             }
         ),
         encoding="utf-8",
@@ -1762,7 +1807,49 @@ def test_dry_run_cli_reports_real_resume_and_fails_on_corrupt_shard(tmp_path: Pa
     payload = json.loads(valid.stdout)
     assert payload["resume_plan"][0]["status"] == "retryable"
     assert payload["is_valid"] is True
-    assert payload["retry_plan"]["backoff_seconds"] == 30
+    assert payload["retry_plan"]["backoff_seconds"] == 0
+
+    incompatible_work = WorkSpec.natural(
+        "0" * 64,
+        "1" * 64,
+        model["model_run_manifest_hash"],
+        QUESTION_ID,
+        0,
+        seed=123,
+    )
+    work_path.write_text(json.dumps([incompatible_work.to_dict()]), encoding="utf-8")
+    incompatible = subprocess.run(
+        command, cwd=repository, capture_output=True, text=True, check=False
+    )
+    assert incompatible.returncode != 0
+    assert json.loads(incompatible.stdout)["resume_plan"][0]["status"] == "ineligible"
+    work_path.write_text(json.dumps([work.to_dict()]), encoding="utf-8")
+
+    retry_path.write_text(
+        json.dumps(
+            {
+                "work": work.to_dict(),
+                "category": "invalid_configuration",
+                "attempts_consumed": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    terminal_retry = subprocess.run(
+        command, cwd=repository, capture_output=True, text=True, check=False
+    )
+    assert terminal_retry.returncode != 0
+    assert json.loads(terminal_retry.stdout)["retry_plan"]["eligible"] is False
+    retry_path.write_text(
+        json.dumps(
+            {
+                "work": work.to_dict(),
+                "category": "temporary_filesystem_failure",
+                "attempts_consumed": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
     session.store.audit_events_path.write_bytes(b'{"cut"')
     corrupt = subprocess.run(command, cwd=repository, capture_output=True, text=True, check=False)
     assert corrupt.returncode != 0
@@ -1788,6 +1875,124 @@ def test_dry_run_rejects_work_or_retry_without_manifest_bound_shard(
             allow_root_override=True,
             work_items=[work],
         )
+
+
+def test_dry_run_binds_empty_shard_work_to_manifest_identity(tmp_path: Path) -> None:
+    from part1_runtime import LockMetadata, LockedShardSession, WorkSpec, run_dry_run
+
+    study, model = _compatible_manifests()
+    session = LockedShardSession.acquire(
+        tmp_path / "shard",
+        owner=LockMetadata.new(
+            study_id=study["study_id"],
+            model_run_id=model["model_run_id"],
+            shard_id=SHARD_ID,
+            hostname="node",
+            pid=101,
+            slurm_job_id=None,
+            slurm_array_task_id=None,
+            acquired_at="2026-07-31T00:00:00Z",
+        ),
+        model_run_manifest_hash=model["model_run_manifest_hash"],
+    )
+    session.close()
+    wrong = WorkSpec.natural(
+        "0" * 64,
+        "1" * 64,
+        model["model_run_manifest_hash"],
+        QUESTION_ID,
+        0,
+        seed=123,
+    )
+    report = run_dry_run(
+        persistent_root=tmp_path / "smoke",
+        allow_root_override=True,
+        study_manifest=study,
+        model_run_manifest=model,
+        shard_root=session.store.root,
+        work_items=[wrong],
+    )
+    assert report["is_valid"] is False
+    assert report["resume_plan"][0]["status"] == "ineligible"
+
+
+def test_dry_run_retry_requires_retry_decision_and_exact_persisted_attempt_count(
+    tmp_path: Path,
+) -> None:
+    from part1_runtime import (
+        CompatibilityError,
+        LockMetadata,
+        LockedShardSession,
+        WorkSpec,
+        run_dry_run,
+    )
+
+    study, model = _compatible_manifests()
+    session = LockedShardSession.acquire(
+        tmp_path / "shard",
+        owner=LockMetadata.new(
+            study_id=study["study_id"],
+            model_run_id=model["model_run_id"],
+            shard_id=SHARD_ID,
+            hostname="node",
+            pid=101,
+            slurm_job_id=None,
+            slurm_array_task_id=None,
+            acquired_at="2026-07-31T00:00:00Z",
+        ),
+        model_run_manifest_hash=model["model_run_manifest_hash"],
+    )
+    work = WorkSpec.natural(
+        study["study_id"],
+        model["model_run_id"],
+        model["model_run_manifest_hash"],
+        QUESTION_ID,
+        0,
+        seed=123,
+    )
+    active = run_dry_run(
+        persistent_root=tmp_path / "smoke",
+        allow_root_override=True,
+        study_manifest=study,
+        model_run_manifest=model,
+        shard_root=session.store.root,
+        retry_request={
+            "work": work.to_dict(),
+            "category": "temporary_filesystem_failure",
+            "attempts_consumed": 0,
+        },
+    )
+    assert active["retry_plan"]["eligible"] is False
+    assert active["is_valid"] is False
+    session.close()
+    common = dict(
+        persistent_root=tmp_path / "smoke",
+        allow_root_override=True,
+        study_manifest=study,
+        model_run_manifest=model,
+        shard_root=session.store.root,
+    )
+    terminal = run_dry_run(
+        **common,
+        retry_request={
+            "work": work.to_dict(),
+            "category": "invalid_configuration",
+            "attempts_consumed": 0,
+        },
+    )
+    assert terminal["retry_plan"]["decision"] == "do_not_retry"
+    assert terminal["retry_plan"]["eligible"] is False
+    assert terminal["is_valid"] is False
+    wrong_count = run_dry_run(
+        **common,
+        retry_request={
+            "work": work.to_dict(),
+            "category": "temporary_filesystem_failure",
+            "attempts_consumed": 1,
+        },
+    )
+    assert wrong_count["retry_plan"]["eligible"] is False
+    assert wrong_count["is_valid"] is False
     with pytest.raises(CompatibilityError, match="retry.*manifests.*shard"):
         run_dry_run(
             persistent_root=tmp_path / "smoke",
@@ -1846,9 +2051,8 @@ def test_finalized_dry_run_keeps_completed_but_rejects_missing_work(
     session.store.commit_terminal_result(
         record, attempt_event(record, "attempt_completed", 1)
     )
-    session.store.finalize()
     session.close()
-    completed = WorkSpec.natural(
+    completed_work = WorkSpec.natural(
         record["study_id"],
         record["model_run_id"],
         record["model_run_manifest_hash"],
@@ -1856,6 +2060,37 @@ def test_finalized_dry_run_keeps_completed_but_rejects_missing_work(
         record["run_id"],
         seed=record["generation_seed"],
     )
+    completed_retry = run_dry_run(
+        persistent_root=tmp_path / "smoke",
+        allow_root_override=True,
+        study_manifest=study,
+        model_run_manifest=model,
+        shard_root=session.store.root,
+        retry_request={
+            "work": completed_work.to_dict(),
+            "category": "temporary_filesystem_failure",
+            "attempts_consumed": 1,
+        },
+    )
+    assert completed_retry["retry_plan"]["eligible"] is False
+    assert completed_retry["is_valid"] is False
+    session = LockedShardSession.acquire(
+        session.store.root,
+        owner=LockMetadata.new(
+            study_id=study["study_id"],
+            model_run_id=model["model_run_id"],
+            shard_id=SHARD_ID,
+            hostname="synthetic-node",
+            pid=202,
+            slurm_job_id="job-18",
+            slurm_array_task_id="4",
+            acquired_at="2026-07-31T00:01:00Z",
+        ),
+        model_run_manifest_hash=model["model_run_manifest_hash"],
+    )
+    session.store.finalize()
+    session.close()
+    completed = completed_work
     missing = WorkSpec.natural(
         record["study_id"],
         record["model_run_id"],

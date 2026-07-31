@@ -65,7 +65,7 @@
         "mean_reasoning_entropy_nats": {"type": "null"}, "tail_reasoning_entropy_nats": {"type": "null"},
         "terminal_answer_block_text": {"type": "null"}, "terminal_answer_block_span": {"type": "null"}, "natural_answer": {"type": "null"},
         "raw_confidence_text": {"type": "null"}, "raw_parsed_confidence": {"type": "null"}, "normalized_confidence": {"type": "null"},
-        "natural_correct": {"type": "null"}, "checkpoint_eligible": {"const": false}, "checkpoint_ids": {"type": "null"},
+        "natural_correct": {"type": "null"}, "diagnostic_answer_like_text": {"type": "null"}, "checkpoint_eligible": {"const": false}, "checkpoint_ids": {"type": "null"},
         "infrastructure_failure_reference": {"type": "string", "minLength": 1},
         "reasoning_status": {"const": "malformed"}, "answer_parse_status": {"const": "missing"}, "confidence_parse_status": {"const": "missing"},
         "terminal_error_details": {"type": "object", "minProperties": 1}
@@ -96,12 +96,28 @@
       "then": {"properties": {"raw_confidence_text": {"type": "string"}, "raw_parsed_confidence": {"type": "integer"}, "normalized_confidence": {"type": "null"}}}
     },
     {
+      "if": {"properties": {"confidence_parse_status": {"const": "missing"}}},
+      "then": {"properties": {"raw_confidence_text": {"type": "null"}, "raw_parsed_confidence": {"type": "null"}, "normalized_confidence": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"confidence_parse_status": {"const": "malformed"}}},
+      "then": {"properties": {"raw_parsed_confidence": {"type": "null"}, "normalized_confidence": {"type": "null"}}}
+    },
+    {
       "if": {"properties": {"reasoning_status": {"const": "missing_close"}}},
       "then": {"properties": {"answer_parse_status": {"not": {"const": "parsed"}}, "confidence_parse_status": {"not": {"const": "parsed"}}, "terminal_answer_block_text": {"type": "null"}, "terminal_answer_block_span": {"type": "null"}, "natural_answer": {"type": "null"}, "natural_correct": {"type": "null"}, "normalized_confidence": {"type": "null"}}}
     },
     {
       "if": {"properties": {"reasoning_status": {"const": "no_reasoning"}}},
       "then": {"properties": {"reasoning_token_count": {"const": 0}, "mean_reasoning_entropy_nats": {"type": "null"}, "tail_reasoning_entropy_nats": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"natural_execution_outcome": {"const": "complete"}, "reasoning_status": {"enum": ["closed", "missing_close", "malformed"]}}, "required": ["natural_execution_outcome", "reasoning_status"]},
+      "then": {"properties": {"reasoning_token_count": {"type": "integer", "minimum": 1}, "mean_reasoning_entropy_nats": {"type": "number"}, "tail_reasoning_entropy_nats": {"type": "number"}}}
+    },
+    {
+      "if": {"properties": {"reasoning_status": {"not": {"const": "missing_close"}}}, "required": ["reasoning_status"]},
+      "then": {"properties": {"diagnostic_answer_like_text": {"type": "null"}}}
     }
   ]
 }

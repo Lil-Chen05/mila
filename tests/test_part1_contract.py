@@ -181,6 +181,56 @@ def checkpoint(*, outcome: str = "complete", output_status: str = "valid") -> di
     }
 
 
+def audit_event_fixture() -> dict:
+    return {
+        "schema_name": "part1_audit_event",
+        "schema_version": "1.0.0",
+        "event_id": HEX_64,
+        "event_scope": "attempt",
+        "study_id": HEX_64_B,
+        "model_run_id": HEX_64_C,
+        "shard_id": None,
+        "question_id": "d" * 64,
+        "run_id": 0,
+        "checkpoint_id": None,
+        "attempt_id": "e" * 64,
+        "attempt_number": 1,
+        "event_sequence": 0,
+        "event_type": "attempt_started",
+        "event_timestamp": "2026-07-31T00:00:00Z",
+        "execution_context": {"hostname": "node", "pid": 123},
+        "outcome_category": None,
+        "error_details": None,
+        "retry_classification": None,
+        "retry_decision": None,
+        "backoff_seconds": None,
+        "related_lock_owner": None,
+        "terminal_record_id": None,
+        "operator_reason": None,
+    }
+
+
+def validation_report_fixture() -> dict:
+    return {
+        "schema_name": "part1_validation_report",
+        "schema_version": "1.0.0",
+        "validation_report_id": HEX_64,
+        "study_id": HEX_64_B,
+        "model_run_id": HEX_64_C,
+        "model_run_manifest_hash": "d" * 64,
+        "validated_artifact_kind": "natural_shard",
+        "validated_artifact_identity": "shard-000",
+        "validation_started_at": "2026-07-31T00:00:00Z",
+        "validation_completed_at": "2026-07-31T00:00:01Z",
+        "validator_version": "part1-validator-v1",
+        "is_valid": True,
+        "checks": [{"name": "schema", "outcome": "passed", "details": {}}],
+        "error_count": 0,
+        "warning_count": 0,
+        "summary": {"records": 1},
+    }
+
+
 def test_canonical_json_contract() -> None:
     left = {"z": "café\r\nline", "a": [2, 1], "nested": {"b": 2, "a": 1}}
     right = {"nested": {"a": 1, "b": 2}, "a": [2, 1], "z": "café\nline"}
@@ -986,6 +1036,89 @@ def test_config_validation_rejects_scientific_or_retry_drift(
             mode="smoke",
             persistent_root=Path(configs["storage"]["smoke_root"]),
         )
+
+
+@pytest.mark.parametrize(
+    ("config_name", "field", "bad_value"),
+    [
+        ("dataset_materialization", "streaming", False),
+        ("dataset_materialization", "question_sampling_seed", 7),
+        ("analysis", "bootstrap_seed", 7),
+        ("analysis", "primary_auroc_feature_registry", ["one-feature"]),
+        ("storage", "active_shards_append_only", False),
+        ("study_protocol", "scientific_protocol_version", "changed"),
+    ],
+)
+def test_every_tracked_fixed_config_field_is_enforced(
+    tmp_path: Path, config_name: str, field: str, bad_value: object
+) -> None:
+    configs = {name: load_config(name) for name in CONFIG_NAMES}
+    configs[config_name][field] = bad_value
+    with pytest.raises(ValueError, match=rf"{config_name}\.{field}"):
+        validate_phase1_config(
+            configs,
+            mode="smoke",
+            persistent_root=Path(configs["storage"]["smoke_root"]),
+        )
+
+
+@pytest.mark.parametrize(
+    ("schema_name", "factory", "mutator"),
+    [
+        (
+            "natural_terminal_result",
+            lambda: natural(outcome="terminal_infrastructure_failure"),
+            lambda value: value.update(diagnostic_answer_like_text="Answer: A"),
+        ),
+        (
+            "natural_terminal_result",
+            natural,
+            lambda value: value.update(
+                mean_reasoning_entropy_nats=None,
+                tail_reasoning_entropy_nats=None,
+            ),
+        ),
+        (
+            "natural_terminal_result",
+            natural,
+            lambda value: value.update(
+                confidence_parse_status="missing",
+                raw_confidence_text=None,
+                raw_parsed_confidence=80,
+                normalized_confidence=None,
+            ),
+        ),
+        (
+            "checkpoint_terminal_result",
+            checkpoint,
+            lambda value: value.update(
+                confidence_parse_status="missing",
+                raw_confidence_text=None,
+                raw_parsed_confidence=80,
+                normalized_confidence=None,
+            ),
+        ),
+    ],
+)
+def test_complete_outcome_and_confidence_null_matrices_reject_contradictions(
+    schema_name: str, factory, mutator
+) -> None:
+    value = factory()
+    mutator(value)
+    with pytest.raises(ValueError):
+        validate_instance(schema_name, value)
+
+
+@pytest.mark.parametrize("schema_name", ["audit_event", "validation_report"])
+def test_schema_date_times_enforce_rfc3339(schema_name: str) -> None:
+    if schema_name == "audit_event":
+        value = audit_event_fixture()
+        value["event_timestamp"] = "not-a-time"
+    else:
+        value = validation_report_fixture()
+        value["validation_started_at"] = "not-a-time"
+    with pytest.raises(ValueError, match="not a 'date-time'|date-time"):
+        validate_instance(schema_name, value)
 
 
 @pytest.mark.parametrize(

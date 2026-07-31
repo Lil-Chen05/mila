@@ -37,6 +37,8 @@ from part1_contract import (
     study_id,
     study_manifest_hash,
     validate_instance,
+    validate_fixed_model_requested_contract,
+    validate_fixed_study_contract,
     validate_phase1_config,
 )
 from part1_failure_policy import (
@@ -75,7 +77,7 @@ class MutationController:
 
     @contextmanager
     def section(self) -> Iterator[None]:
-        self.root.mkdir(parents=True, exist_ok=True)
+        _durable_mkdirs(self.root)
         with self._local_lock:
             depth = getattr(self._state, "depth", 0)
             if depth:
@@ -85,8 +87,11 @@ class MutationController:
                 finally:
                     self._state.depth -= 1
                 return
+            guard_created = not self.path.exists()
             descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
             try:
+                if guard_created:
+                    _fsync_directory(self.root)
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
                 self._state.depth = 1
                 yield
@@ -249,6 +254,24 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _durable_mkdirs(path: Path) -> None:
+    """Create each missing directory and persist its parent entry."""
+
+    missing: list[Path] = []
+    cursor = Path(path)
+    while not cursor.exists():
+        missing.append(cursor)
+        if cursor == cursor.parent:
+            raise Part1RuntimeError(f"cannot find an existing parent for {path}")
+        cursor = cursor.parent
+    for directory in reversed(missing):
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            continue
+        _fsync_directory(directory.parent)
+
+
 def _exclusive_create(path: Path, payload: bytes) -> None:
     """Publish complete bytes without ever exposing a partial target path."""
 
@@ -381,7 +404,7 @@ class LockedShardSession:
         model_run_manifest_hash: str,
     ) -> "LockedShardSession":
         root = Path(root)
-        root.mkdir(parents=True, exist_ok=True)
+        _durable_mkdirs(root)
         controller = MutationController(root)
         with controller.section():
             _assert_not_finalized(root)
@@ -503,7 +526,7 @@ class LockedShardSession:
         }:
             raise ValueError(f"unknown takeover fault boundary: {fault_at}")
         root = Path(root)
-        root.mkdir(parents=True, exist_ok=True)
+        _durable_mkdirs(root)
         controller = MutationController(root)
         with controller.section():
             _assert_not_finalized(root)
@@ -531,8 +554,7 @@ class LockedShardSession:
                     f"replacement manifest hash differs from shard provenance: {exc}"
                 ) from exc
             history_directory = root / LOCK_HISTORY_DIRECTORY
-            history_directory.mkdir(parents=True, exist_ok=True)
-            _fsync_directory(root)
+            _durable_mkdirs(history_directory)
             claim_id = uuid.uuid4().hex
             claim = {
                 "claim_id": claim_id,
@@ -1065,19 +1087,10 @@ def plan_resume(
     if index.hierarchy_errors:
         raise CompatibilityError("cannot resume from hierarchy-corrupt shard state")
     decisions: dict[WorkSpec, ResumeDecision] = {}
-    known_provenance = {
-        (record["study_id"], record["model_run_id"])
-        for record in index.terminal_by_id.values()
-    }
-    known_provenance.update(
-        (event["study_id"], event["model_run_id"])
-        for events in index.events_by_attempt.values()
-        for event in events
-    )
     for work in work_items:
         if work.model_run_manifest_hash != index.model_run_manifest_hash:
             raise CompatibilityError("requested work manifest hash is incompatible")
-        if known_provenance and (work.study_id, work.model_run_id) not in known_provenance:
+        if (work.study_id, work.model_run_id) != (index.study_id, index.model_run_id):
             raise CompatibilityError("requested work study/model-run identity is incompatible")
         terminal = _terminal_for_work(index, work)
         events = _events_for_key(index, work.key)
@@ -1184,6 +1197,8 @@ def validate_manifest_compatibility(
     try:
         validate_instance("study_manifest", study_manifest)
         validate_instance("model_run_manifest", model_manifest)
+        validate_fixed_study_contract(study_manifest)
+        validate_fixed_model_requested_contract(model_manifest)
     except ValueError as exc:
         raise CompatibilityError(f"schema incompatibility: {exc}") from exc
 
@@ -1343,7 +1358,28 @@ def run_dry_run(
         index = None
         if not inspection.trailing_tails and not inspection.unterminated_streams:
             index = shard.build_index()
-        decisions = plan_resume(index, requested_work) if index is not None else {}
+        decisions: dict[WorkSpec, ResumeDecision] = {}
+        compatible_work: list[WorkSpec] = []
+        work_identity_invalid = False
+        for work in requested_work:
+            if (
+                work.study_id != manifest_report["study_id"]
+                or work.model_run_id != manifest_report["model_run_id"]
+                or work.model_run_manifest_hash
+                != manifest_report["model_run_manifest_hash"]
+            ):
+                work_identity_invalid = True
+                decisions[work] = ResumeDecision(
+                    work=work,
+                    status="ineligible",
+                    reason="manifest_or_shard_identity_mismatch",
+                    attempts_consumed=0,
+                    next_attempt_number=None,
+                )
+            else:
+                compatible_work.append(work)
+        if index is not None:
+            decisions.update(plan_resume(index, compatible_work))
         lock_path = Path(shard_root) / LOCK_FILENAME
         lock_owner = _read_lock(lock_path)[0].to_dict() if lock_path.exists() else None
         history_directory = Path(shard_root) / LOCK_HISTORY_DIRECTORY
@@ -1390,31 +1426,57 @@ def run_dry_run(
             else [],
             "finalized": finalized,
             "finalized_blocked_work": finalized_blocked_work,
+            "work_identity_invalid": work_identity_invalid,
         }
     else:
         decisions = {}
+        index = None
 
     retry_plan = None
     if retry_request is not None:
         retry_work = WorkSpec.from_mapping(retry_request["work"])
         assert manifest_report is not None and shard_root is not None
-        if (
+        retry_identity_matches = not (
             retry_work.study_id != manifest_report["study_id"]
             or retry_work.model_run_id != manifest_report["model_run_id"]
             or retry_work.model_run_manifest_hash
             != manifest_report["model_run_manifest_hash"]
-        ):
-            raise CompatibilityError("retry work identity differs from manifest-bound shard")
-        retry_plan = asdict(
-            plan_retry(
-                retry_work,
-                category=str(retry_request["category"]),
-                attempts_consumed=int(retry_request["attempts_consumed"]),
-            )
         )
-        retry_plan["eligible"] = not bool(
-            shard_report is not None and shard_report["finalized"]
+        requested_attempts = int(retry_request["attempts_consumed"])
+        retry_policy_plan = plan_retry(
+            retry_work,
+            category=str(retry_request["category"]),
+            attempts_consumed=requested_attempts,
         )
+        retry_plan = asdict(retry_policy_plan)
+        persisted_attempts = (
+            len(index.attempts_consumed.get(retry_work.key, ()))
+            if index is not None and retry_identity_matches
+            else None
+        )
+        retry_resume = (
+            plan_resume(index, [retry_work])[retry_work]
+            if index is not None and retry_identity_matches
+            else None
+        )
+        blockers: list[str] = []
+        if not retry_identity_matches:
+            blockers.append("manifest_or_shard_identity_mismatch")
+        if persisted_attempts is None or requested_attempts != persisted_attempts:
+            blockers.append("attempt_count_mismatch")
+        if retry_policy_plan.decision != "retry":
+            blockers.append("retry_policy_does_not_allow_retry")
+        if retry_resume is None or retry_resume.status != "retryable":
+            blockers.append("persisted_state_is_not_retryable")
+        if shard_report is not None and shard_report["lock_present"]:
+            blockers.append("active_writer_lock")
+        if shard_report is not None and shard_report["takeover_pending"]:
+            blockers.append("lock_takeover_pending")
+        if shard_report is not None and shard_report["finalized"]:
+            blockers.append("finalized_shard")
+        retry_plan["persisted_attempts_consumed"] = persisted_attempts
+        retry_plan["eligible"] = not blockers
+        retry_plan["ineligibility_reasons"] = blockers
 
     return {
         "is_valid": (
@@ -1422,6 +1484,7 @@ def run_dry_run(
             or (
                 bool(shard_report["validation"]["is_valid"])
                 and not shard_report["finalized_blocked_work"]
+                and not shard_report["work_identity_invalid"]
                 and not (retry_plan is not None and not retry_plan["eligible"])
             )
         ),

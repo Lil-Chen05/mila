@@ -12,9 +12,30 @@ import json
 import math
 import os
 from pathlib import Path
+import re
+from datetime import datetime
 from typing import Any, Mapping, Sequence
 
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, FormatChecker
+
+
+_RFC3339_DATE_TIME = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+)
+
+
+def _is_rfc3339_date_time(value: object) -> bool:
+    if not isinstance(value, str) or _RFC3339_DATE_TIME.fullmatch(value) is None:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+FORMAT_CHECKER = FormatChecker()
+FORMAT_CHECKER.checkers["date-time"] = (_is_rfc3339_date_time, ())
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -89,6 +110,81 @@ FIXED_RETRYABLE_CATEGORIES = [
     "transient_worker_failure",
     "transient_cuda_runtime_failure",
 ]
+FIXED_PRIMARY_AUROC_FEATURE_REGISTRY = [
+    "negative_mean_reasoning_entropy",
+    "negative_tail_reasoning_entropy",
+    "negative_answer_entropy_fraction_0.0",
+    "negative_answer_entropy_fraction_0.5",
+    "negative_answer_entropy_fraction_1.0",
+    "natural_verbalized_confidence",
+    "maximum_ad_probability_fraction_0.0",
+    "maximum_ad_probability_fraction_0.5",
+    "maximum_ad_probability_fraction_1.0",
+    "negative_answer_switch_count",
+    "negative_stabilization_fraction",
+]
+FIXED_STUDY_CONTRACT = {
+    "subjects": FIXED_SUBJECTS,
+    "subject_quotas": {subject: 100 for subject in FIXED_SUBJECTS},
+    "question_sampling_seed": 42,
+    "scientific_protocol_version": "part1-science-v1",
+    "checkpoint_fractions": FIXED_CHECKPOINT_FRACTIONS,
+    "checkpoint_placement_contract": {
+        "version": "ties-even-v1",
+        "formula": "clamp(round(requested_fraction*n_reasoning),0,n_reasoning)",
+        "actual_fraction_zero_reasoning": None,
+    },
+    "entropy_contract": {
+        "version": "entropy-v1",
+        "natural": "raw_full_vocabulary_reasoning_token_entropy_nats",
+        "checkpoint": "renormalized_ad_answer_entropy_nats",
+        "tail": "last_20_percent_reasoning_tokens",
+    },
+    "natural_answer_validity_rule": {
+        "version": "post-close-v1",
+        "region": "after_first_valid_reasoning_close",
+        "domain": ["A", "B", "C", "D"],
+    },
+    "status_contract_version": "part1-status-v1",
+    "calibration_contract": {
+        "version": "calibration-v1",
+        "ece_bins": 10,
+        "main_checkpoint_fractions": [0.0, 0.5, 1.0],
+        "all_checkpoint_fractions": FIXED_CHECKPOINT_FRACTIONS,
+    },
+    "bootstrap_contract": {
+        "version": "bootstrap-v1",
+        "seed": 42,
+        "development_replicates": 1000,
+        "final_replicates": 5000,
+        "confidence_interval_percent": 95,
+        "minimum_valid_fraction": 0.95,
+        "unit": "subject_stratified_question",
+    },
+    "primary_auroc_feature_registry": FIXED_PRIMARY_AUROC_FEATURE_REGISTRY,
+    "within_question_analysis": {
+        "version": "paired-v1",
+        "eligibility": "at_least_one_correct_and_one_incorrect_natural_run",
+        "question_weighting": "equal",
+    },
+    "switching_stabilization_contract": {
+        "version": "trajectory-v1",
+        "aliases_are_transitions": False,
+        "missing_breaks_adjacency": True,
+        "stabilization_reference": "final_valid_forced_checkpoint_answer",
+    },
+    "repetition_policy": "preserve-successful-output",
+    "compatible_raw_record_schema_versions": ["1.0.0"],
+    "analysis_contract_version": "part1-analysis-v1",
+}
+FIXED_MODEL_REQUESTED_CONTRACT = {
+    "model_repository": "HuggingFaceTB/SmolLM3-3B",
+    "tokenizer_repository": "HuggingFaceTB/SmolLM3-3B",
+    "requested_natural_generation": FIXED_NATURAL_GENERATION,
+    "requested_checkpoint_generation": {"do_sample": False, "max_new_tokens": 32},
+    "seed_algorithm_version": SEED_ALGORITHM_VERSION,
+    "base_generation_seed": 42,
+}
 
 QUESTION_CONTENT_FIELDS = (
     "source_repository",
@@ -505,7 +601,7 @@ def load_config(name: str) -> dict[str, Any]:
 def validate_instance(schema_name: str, instance: Mapping[str, Any]) -> None:
     """Validate an instance and raise one concise, field-oriented ValueError."""
 
-    validator = Draft202012Validator(load_schema(schema_name))
+    validator = Draft202012Validator(load_schema(schema_name), format_checker=FORMAT_CHECKER)
     errors = sorted(validator.iter_errors(instance), key=lambda error: list(error.absolute_path))
     if errors:
         error = errors[0]
@@ -525,15 +621,56 @@ def validate_instance(schema_name: str, instance: Mapping[str, Any]) -> None:
                     "normalized_confidence must equal raw_parsed_confidence / 100"
                 )
 
+        confidence_status = instance["confidence_parse_status"]
+        if confidence_status == "missing" and (
+            instance["raw_confidence_text"] is not None
+            or instance["raw_parsed_confidence"] is not None
+            or instance["normalized_confidence"] is not None
+        ):
+            raise ValueError("missing confidence requires all confidence fields to be null")
+        if confidence_status == "malformed" and (
+            instance["raw_parsed_confidence"] is not None
+            or instance["normalized_confidence"] is not None
+        ):
+            raise ValueError("malformed confidence cannot retain a parsed integer")
+
     if schema_name == "question_record":
         expected_letter = "ABCD"[instance["gold_index"]]
         if instance["gold_letter"] != expected_letter:
             raise ValueError("gold_letter must agree with gold_index")
-    elif schema_name == "natural_terminal_result" and instance["generated_token_ids"] is not None:
-        if len(instance["generated_token_ids"]) != len(instance["per_token_entropy_nats"]):
-            raise ValueError("generated_token_ids and per_token_entropy_nats must be aligned")
-        if instance["generated_token_count"] != len(instance["generated_token_ids"]):
-            raise ValueError("generated_token_count must equal generated_token_ids length")
+    elif schema_name == "natural_terminal_result":
+        if instance["natural_execution_outcome"] == "terminal_infrastructure_failure":
+            if instance["diagnostic_answer_like_text"] is not None:
+                raise ValueError("infrastructure failure diagnostic output must be null")
+        else:
+            assert instance["generated_token_ids"] is not None
+            if len(instance["generated_token_ids"]) != len(instance["per_token_entropy_nats"]):
+                raise ValueError("generated_token_ids and per_token_entropy_nats must be aligned")
+            if instance["generated_token_count"] != len(instance["generated_token_ids"]):
+                raise ValueError("generated_token_count must equal generated_token_ids length")
+            if instance["reasoning_status"] == "no_reasoning":
+                if instance["reasoning_token_count"] != 0 or any(
+                    instance[field] is not None
+                    for field in (
+                        "mean_reasoning_entropy_nats",
+                        "tail_reasoning_entropy_nats",
+                    )
+                ):
+                    raise ValueError("no_reasoning requires zero count and null summaries")
+            elif (
+                instance["reasoning_token_count"] is None
+                or instance["reasoning_token_count"] < 1
+                or instance["mean_reasoning_entropy_nats"] is None
+                or instance["tail_reasoning_entropy_nats"] is None
+            ):
+                raise ValueError(
+                    "nonempty complete reasoning requires count and entropy summaries"
+                )
+            if (
+                instance["reasoning_status"] != "missing_close"
+                and instance["diagnostic_answer_like_text"] is not None
+            ):
+                raise ValueError("diagnostic answer-like text is only valid for missing_close")
     elif schema_name == "checkpoint_terminal_result":
         if instance["checkpoint_model_output_status"] == "invalid" and (
             instance["answer_parse_status"] == "parsed"
@@ -552,6 +689,34 @@ def validate_instance(schema_name: str, instance: Mapping[str, Any]) -> None:
                     raise ValueError(f"{field} must contain exactly four A-D values")
 
 
+def validate_fixed_study_contract(study_manifest: Mapping[str, Any]) -> None:
+    for field, expected in FIXED_STUDY_CONTRACT.items():
+        if study_manifest.get(field) != expected:
+            if field == "compatible_raw_record_schema_versions":
+                raise ValueError(
+                    "study_manifest.compatible_raw_record_schema_versions differs from "
+                    "the fixed Part 1 raw record schema contract"
+                )
+            raise ValueError(f"study_manifest.{field} differs from the fixed Part 1 contract")
+
+
+def validate_fixed_model_requested_contract(model_manifest: Mapping[str, Any]) -> None:
+    for field, expected in FIXED_MODEL_REQUESTED_CONTRACT.items():
+        if model_manifest.get(field) != expected:
+            raise ValueError(f"model_run_manifest.{field} differs from the fixed Part 1 requested contract")
+    natural_effective = model_manifest.get("effective_natural_generation")
+    checkpoint_effective = model_manifest.get("effective_checkpoint_generation")
+    if not isinstance(natural_effective, Mapping) or set(natural_effective) != set(
+        FIXED_NATURAL_GENERATION
+    ):
+        raise ValueError("model_run_manifest.effective_natural_generation has incomplete shape")
+    if not isinstance(checkpoint_effective, Mapping) or set(checkpoint_effective) != {
+        "do_sample",
+        "max_new_tokens",
+    }:
+        raise ValueError("model_run_manifest.effective_checkpoint_generation has incomplete shape")
+
+
 def validate_phase1_config(
     configs: Mapping[str, Mapping[str, Any]], *, mode: str, persistent_root: Path | None
 ) -> dict[str, Any]:
@@ -564,6 +729,15 @@ def validate_phase1_config(
         config = configs[name]
         if config.get("schema_name") != f"part1_{name}_config" or config.get("config_version") != "1.0.0":
             raise ValueError(f"invalid schema_name/config_version for {name}")
+        expected_config = load_config(name)
+        ignored_fields = {"smoke_root", "production_root"} if name == "storage" else set()
+        if set(config).difference(ignored_fields) != set(expected_config).difference(
+            ignored_fields
+        ):
+            raise ValueError(f"{name}.fields differ from the fixed Part 1 contract")
+        for field, expected_value in expected_config.items():
+            if field not in ignored_fields and config.get(field) != expected_value:
+                raise ValueError(f"{name}.{field} differs from the fixed Part 1 contract")
     protocol = configs["study_protocol"]
     fixed_protocol = {
         "question_sampling_seed": 42,

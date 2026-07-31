@@ -66,3 +66,8 @@ def validate_failure_event_policy(event: Mapping[str, Any]) -> None:
         raise ValueError(
             "attempt_failed is retry evidence; terminalization requires a terminal result"
         )
+    if event.get("event_type") == "attempt_interrupted" and category != "interrupted_process":
+        raise ValueError(
+            "attempt_interrupted is limited to interrupted_process; "
+            "terminal failures require result-first terminalization"
+        )
