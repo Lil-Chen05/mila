@@ -28,6 +28,7 @@ from part1_contract import (
 
 STORE_VERSION = "part1-store-v1"
 VALIDATOR_VERSION = "part1-shard-validator-v1"
+VALIDATION_REPORT_IDENTITY_VERSION = "part1-validation-report-identity-v1"
 MAX_TOTAL_ATTEMPTS = 3
 
 STREAM_FILES = {
@@ -46,6 +47,11 @@ FAULT_BOUNDARIES = {
     "after_result_fsync_before_completion_event",
     "during_completion_event_append",
     "after_both_fsyncs",
+}
+RECOVERY_FAULT_BOUNDARIES = {
+    "before_recovery_evidence",
+    "after_recovery_evidence_before_mutation",
+    "after_recovery_mutation_before_audit_append",
 }
 
 NaturalKey = tuple[str, str, str, int]
@@ -102,6 +108,8 @@ class ShardIndex:
     missing_started_attempt_ids: frozenset[str]
     inconsistent_completion_attempt_ids: frozenset[str]
     orphaned_attempt_ids: frozenset[str]
+    lifecycle_errors: tuple[str, ...]
+    pending_recovery_event_ids: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -198,6 +206,7 @@ class Part1ShardStore:
         self.natural_results_path = self.root / STREAM_FILES["natural_results"]
         self.checkpoint_results_path = self.root / STREAM_FILES["checkpoint_results"]
         self.audit_events_path = self.root / STREAM_FILES["audit_events"]
+        self.recovery_journal_directory = self.root / "recovery_journal"
         self.finalization_path = self.root / ".finalized"
         self.stream_paths = {
             "natural_results": self.natural_results_path,
@@ -301,6 +310,26 @@ class Part1ShardStore:
             handle.flush()
             os.fsync(handle.fileno())
 
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def _durable_create(cls, path: Path, payload: bytes) -> None:
+        parent_existed = path.parent.exists()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not parent_existed:
+            cls._fsync_directory(path.parent.parent)
+        with path.open("xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        cls._fsync_directory(path.parent)
+
     def _verify_terminal_identity(self, record: Mapping[str, Any]) -> None:
         checkpoint_id = record.get("checkpoint_id")
         if checkpoint_id is None:
@@ -355,6 +384,50 @@ class Part1ShardStore:
         if event["event_id"] != expected_event_id:
             raise ValueError("audit event ID does not match its identity payload")
 
+    def _recovery_journal_path(self, event_id_value: str) -> Path:
+        return self.recovery_journal_directory / f"{event_id_value}.json"
+
+    def _load_recovery_journal_event(self, path: Path) -> dict[str, Any]:
+        try:
+            event = json.loads(path.read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise InvalidRecordError(f"invalid recovery journal {path}: {exc}") from exc
+        if not isinstance(event, dict):
+            raise InvalidRecordError(f"recovery journal {path} is not a JSON object")
+        try:
+            validate_instance("audit_event", event)
+            self._assert_provenance(event)
+            self._verify_event_identity(event)
+        except (KeyError, ValueError) as exc:
+            raise InvalidRecordError(f"invalid recovery journal {path}: {exc}") from exc
+        if (
+            event["event_type"] != "trailing_line_recovered"
+            or event["event_scope"] != "shard"
+            or event["shard_id"] != self.shard_id
+            or path.name != f"{event['event_id']}.json"
+        ):
+            raise InvalidRecordError(f"recovery journal {path} has incompatible identity")
+        return event
+
+    def _load_recovery_journal_events(self) -> tuple[dict[str, Any], ...]:
+        if not self.recovery_journal_directory.exists():
+            return ()
+        return tuple(
+            self._load_recovery_journal_event(path)
+            for path in sorted(self.recovery_journal_directory.glob("*.json"))
+        )
+
+    def _persist_recovery_journal_event(self, event: Mapping[str, Any]) -> Path:
+        path = self._recovery_journal_path(event["event_id"])
+        payload = _json_line_bytes(event)[:-1]
+        if path.exists():
+            existing = self._load_recovery_journal_event(path)
+            if existing != dict(event):
+                raise Part1StoreError("existing recovery journal has conflicting evidence")
+            return path
+        self._durable_create(path, payload)
+        return path
+
     @staticmethod
     def _validate_scientific_alignment(record: Mapping[str, Any]) -> None:
         if record["schema_name"] == "part1_natural_terminal_result":
@@ -394,6 +467,24 @@ class Part1ShardStore:
             for event in parsed.records
         )
 
+    def _terminal_records(self) -> tuple[dict[str, Any], ...]:
+        natural = self._assert_stream_appendable("natural_results").records
+        checkpoint = self._assert_stream_appendable("checkpoint_results").records
+        return (*natural, *checkpoint)
+
+    @staticmethod
+    def _matching_terminal_record(
+        event: Mapping[str, Any], terminal_records: tuple[Mapping[str, Any], ...]
+    ) -> Mapping[str, Any] | None:
+        for record in terminal_records:
+            if (
+                _record_id(record) == event.get("terminal_record_id")
+                and record["terminal_attempt_id"] == event["attempt_id"]
+                and _logical_key(record) == _event_logical_key(event)
+            ):
+                return record
+        return None
+
     def _consumed_attempts(self, logical_key: LogicalKey) -> set[int]:
         parsed = self._assert_stream_appendable("audit_events")
         return {
@@ -429,6 +520,24 @@ class Part1ShardStore:
                 raise DuplicateTerminalResultError(
                     f"logical key {logical_key!r} already has a terminal result"
                 )
+        audit_records = self._assert_stream_appendable("audit_events").records
+        terminal_lifecycle_events = [
+            event
+            for event in audit_records
+            if event["event_scope"] == "attempt"
+            and event["attempt_id"] == record["terminal_attempt_id"]
+            and event["event_type"]
+            in {
+                "attempt_failed",
+                "attempt_interrupted",
+                "attempt_completed",
+                "terminal_result_recovered",
+            }
+        ]
+        if terminal_lifecycle_events:
+            raise ValueError(
+                "attempt already has a terminal lifecycle event; result publication is forbidden"
+            )
         if outcome == "terminal_infrastructure_failure":
             consumed = self._consumed_attempts(logical_key)
             if consumed != set(range(1, MAX_TOTAL_ATTEMPTS + 1)):
@@ -446,6 +555,9 @@ class Part1ShardStore:
         self,
         event: Mapping[str, Any],
         existing_records: tuple[dict[str, Any], ...],
+        *,
+        terminal_records: tuple[Mapping[str, Any], ...] = (),
+        prospective_terminal: Mapping[str, Any] | None = None,
     ) -> None:
         self._assert_active()
         validate_instance("audit_event", event)
@@ -467,9 +579,100 @@ class Part1ShardStore:
             ):
                 raise ValueError("audit event_sequence must increase within an attempt")
 
-    def _preflight_audit_event(self, event: Mapping[str, Any]) -> None:
+            event_type = event["event_type"]
+            started = [item for item in same_attempt if item["event_type"] == "attempt_started"]
+            candidate_records: tuple[Mapping[str, Any], ...] = terminal_records
+            if prospective_terminal is not None:
+                candidate_records = (*candidate_records, prospective_terminal)
+            attempt_has_terminal_result = any(
+                record["terminal_attempt_id"] == event["attempt_id"]
+                for record in candidate_records
+            )
+            if event_type in {
+                "attempt_started",
+                "attempt_failed",
+                "attempt_interrupted",
+            } and event["terminal_record_id"] is not None:
+                raise ValueError(f"{event_type} requires terminal_record_id to be null")
+            if event_type in {
+                "attempt_completed",
+                "terminal_result_recovered",
+            } and event["terminal_record_id"] is None:
+                raise ValueError(f"{event_type} requires terminal_record_id")
+            if event_type == "attempt_started":
+                if attempt_has_terminal_result:
+                    raise ValueError("attempt_started cannot be appended after a terminal result")
+                if same_attempt:
+                    raise ValueError("attempt_started must be the first and only start event")
+                if event["event_sequence"] != 0:
+                    raise ValueError("attempt_started must use event_sequence 0")
+                return
+            if not started:
+                raise ValueError(f"{event_type} requires prior attempt_started evidence")
+
+            terminal_types = {
+                "attempt_failed",
+                "attempt_interrupted",
+                "attempt_completed",
+                "terminal_result_recovered",
+            }
+            prior_terminal = [
+                item for item in same_attempt if item["event_type"] in terminal_types
+            ]
+            matching_record = self._matching_terminal_record(event, candidate_records)
+
+            if event_type == "terminal_result_recovered":
+                if prior_terminal:
+                    raise ValueError("attempt already has a terminal lifecycle event")
+                if matching_record is None:
+                    raise ValueError("terminal_result_recovered requires its matching terminal result")
+            elif event_type == "attempt_completed":
+                if prior_terminal:
+                    if (
+                        len(prior_terminal) != 1
+                        or prior_terminal[0]["event_type"] != "terminal_result_recovered"
+                        or self._matching_terminal_record(prior_terminal[0], candidate_records)
+                        is None
+                        or matching_record is None
+                    ):
+                        raise ValueError("attempt already has a conflicting terminal lifecycle event")
+                # A completion without a result is retained as corrupt evidence so
+                # reconciliation can append attempt_interrupted. Normal commit passes
+                # prospective_terminal and therefore requires an exact match.
+                if prospective_terminal is not None and matching_record is None:
+                    raise ValueError("attempt_completed must match the proposed terminal result")
+            elif event_type == "attempt_interrupted":
+                if attempt_has_terminal_result:
+                    raise ValueError("attempt interruption cannot follow a terminal result")
+                if prior_terminal:
+                    completion_without_result = (
+                        len(prior_terminal) == 1
+                        and prior_terminal[0]["event_type"] == "attempt_completed"
+                        and self._matching_terminal_record(prior_terminal[0], terminal_records)
+                        is None
+                    )
+                    if not completion_without_result:
+                        raise ValueError("attempt already has a conflicting terminal lifecycle event")
+            elif event_type == "attempt_failed":
+                if attempt_has_terminal_result:
+                    raise ValueError("attempt failure cannot follow a terminal result")
+                if prior_terminal:
+                    raise ValueError("attempt already has a conflicting terminal lifecycle event")
+
+    def _preflight_audit_event(
+        self,
+        event: Mapping[str, Any],
+        *,
+        prospective_terminal: Mapping[str, Any] | None = None,
+    ) -> None:
         parsed = self._assert_stream_appendable("audit_events")
-        self._validate_audit_event_against_records(event, parsed.records)
+        terminal_records = self._terminal_records() if event.get("event_scope") == "attempt" else ()
+        self._validate_audit_event_against_records(
+            event,
+            parsed.records,
+            terminal_records=terminal_records,
+            prospective_terminal=prospective_terminal,
+        )
 
     def append_audit_event(self, event: Mapping[str, Any]) -> None:
         self._preflight_audit_event(event)
@@ -499,7 +702,7 @@ class Part1ShardStore:
         if not self._attempt_started(record["terminal_attempt_id"]):
             raise ValueError("commit requires a durable matching attempt_started event")
         self._preflight_terminal_result(record)
-        self._preflight_audit_event(completion_event)
+        self._preflight_audit_event(completion_event, prospective_terminal=record)
 
     def commit_terminal_result(
         self,
@@ -614,6 +817,7 @@ class Part1ShardStore:
         )
         inconsistent_completion: set[str] = set()
         orphaned: set[str] = set()
+        lifecycle_errors: list[str] = []
         for attempt_id_value, events in events_by_attempt.items():
             event_types = {event["event_type"] for event in events}
             interrupted = "attempt_interrupted" in event_types
@@ -634,7 +838,77 @@ class Part1ShardStore:
             ):
                 orphaned.add(attempt_id_value)
 
+            starts = [event for event in events if event["event_type"] == "attempt_started"]
+            terminals = [
+                event
+                for event in events
+                if event["event_type"]
+                in {
+                    "attempt_failed",
+                    "attempt_interrupted",
+                    "attempt_completed",
+                    "terminal_result_recovered",
+                }
+            ]
+            attempt_record = (
+                terminal_by_id.get(terminal_attempt_ids[attempt_id_value])
+                if attempt_id_value in terminal_attempt_ids
+                else None
+            )
+            if len(starts) != 1 or events[0]["event_type"] != "attempt_started":
+                lifecycle_errors.append(
+                    f"attempt {attempt_id_value} must have exactly one leading attempt_started"
+                )
+            for event in events:
+                if event["event_type"] in {
+                    "attempt_started",
+                    "attempt_failed",
+                    "attempt_interrupted",
+                } and event["terminal_record_id"] is not None:
+                    lifecycle_errors.append(
+                        f"attempt {attempt_id_value} event {event['event_type']} "
+                        "must not reference a terminal record"
+                    )
+                if event["event_type"] in {
+                    "attempt_completed",
+                    "terminal_result_recovered",
+                } and event["terminal_record_id"] is None:
+                    lifecycle_errors.append(
+                        f"attempt {attempt_id_value} event {event['event_type']} "
+                        "requires a terminal record reference"
+                    )
+            terminal_types_in_order = [event["event_type"] for event in terminals]
+            matching_terminals = [event_matches_terminal(event) for event in terminals]
+            coherent = False
+            if not terminals:
+                coherent = attempt_record is None or attempt_id_value in terminal_attempt_ids
+            elif terminal_types_in_order in (["attempt_failed"], ["attempt_interrupted"]):
+                coherent = attempt_record is None
+            elif terminal_types_in_order == ["attempt_completed"]:
+                coherent = matching_terminals == [True]
+            elif terminal_types_in_order == ["terminal_result_recovered"]:
+                coherent = matching_terminals == [True]
+            elif terminal_types_in_order == [
+                "terminal_result_recovered",
+                "attempt_completed",
+            ]:
+                coherent = matching_terminals == [True, True]
+            elif terminal_types_in_order == ["attempt_completed", "attempt_interrupted"]:
+                # Required corruption-classification exception: completion was
+                # durable without its result, then resume classified interruption.
+                coherent = matching_terminals == [False, False] and attempt_record is None
+            if not coherent:
+                lifecycle_errors.append(
+                    f"attempt {attempt_id_value} has contradictory terminal lifecycle: "
+                    f"{terminal_types_in_order!r}"
+                )
+
         completed_keys: set[LogicalKey] = set(natural_by_key) | set(checkpoint_by_key)
+        journal_events = self._load_recovery_journal_events()
+        audit_event_ids = {event["event_id"] for event in inspection.audit_events}
+        pending_recovery_event_ids = frozenset(
+            event["event_id"] for event in journal_events if event["event_id"] not in audit_event_ids
+        )
         return ShardIndex(
             natural_terminal_by_key=natural_by_key,
             checkpoint_terminal_by_key=checkpoint_by_key,
@@ -648,6 +922,8 @@ class Part1ShardStore:
             missing_started_attempt_ids=missing_started,
             inconsistent_completion_attempt_ids=frozenset(inconsistent_completion),
             orphaned_attempt_ids=frozenset(orphaned),
+            lifecycle_errors=tuple(lifecycle_errors),
+            pending_recovery_event_ids=pending_recovery_event_ids,
         )
 
     def _make_attempt_event(
@@ -764,97 +1040,186 @@ class Part1ShardStore:
         event_sequence: int,
         event_timestamp: str,
         execution_context: Mapping[str, Any],
+        fault_at: str | None = None,
     ) -> Path | None:
-        """Repair only the final line, preserving every valid record byte."""
+        """Durably journal and idempotently finish one final-line repair."""
 
         self._assert_active()
-        parsed = self._parse_stream(stream_name)
-        if parsed.trailing_tail is None and not parsed.unterminated_valid_record:
-            return None
+        if fault_at is not None and fault_at not in RECOVERY_FAULT_BOUNDARIES:
+            raise ValueError(f"unknown recovery fault boundary: {fault_at}")
+        if stream_name not in self.stream_paths:
+            raise ValueError(f"unknown Part 1 shard stream: {stream_name}")
+
+        event_id_value = audit_event_id(
+            None,
+            "trailing_line_recovered",
+            event_sequence,
+            study_id_value=self.study_id,
+            model_run_id_value=self.model_run_id,
+            shard_id=self.shard_id,
+        )
+        journal_path = self._recovery_journal_path(event_id_value)
         path = self.stream_paths[stream_name]
-        quarantine_path: Path | None = None
-        if parsed.unterminated_valid_record:
-            recovery_kind = "valid_record_missing_newline"
-            recovered_bytes = 0
-            recovered_hash = hashlib.sha256(b"").hexdigest()
-        else:
-            assert parsed.trailing_tail is not None
-            assert parsed.trailing_offset is not None
-            tail = parsed.trailing_tail
-            recovery_kind = "invalid_final_line"
-            recovered_bytes = len(tail)
-            recovered_hash = hashlib.sha256(tail).hexdigest()
-            quarantine_directory = self.root / "quarantine"
-            quarantine_path = quarantine_directory / (
-                f"{stream_name}.{recovered_hash}.trailing-bytes.bin"
-            )
 
-        event = {
-            "schema_name": "part1_audit_event",
-            "schema_version": "1.0.0",
-            "event_id": audit_event_id(
-                None,
-                "trailing_line_recovered",
-                event_sequence,
-                study_id_value=self.study_id,
-                model_run_id_value=self.model_run_id,
-                shard_id=self.shard_id,
-            ),
-            "event_scope": "shard",
-            "study_id": self.study_id,
-            "model_run_id": self.model_run_id,
-            "shard_id": self.shard_id,
-            "question_id": None,
-            "run_id": None,
-            "checkpoint_id": None,
-            "attempt_id": None,
-            "attempt_number": None,
-            "event_sequence": event_sequence,
-            "event_type": "trailing_line_recovered",
-            "event_timestamp": event_timestamp,
-            "execution_context": dict(execution_context),
-            "outcome_category": recovery_kind,
-            "error_details": {
-                "stream": stream_name,
-                "recovered_byte_count": recovered_bytes,
-                "recovered_bytes_sha256": recovered_hash,
-                "quarantine_artifact": quarantine_path.name if quarantine_path else None,
-            },
-            "retry_classification": None,
-            "retry_decision": None,
-            "backoff_seconds": None,
-            "related_lock_owner": None,
-            "terminal_record_id": None,
-            "operator_reason": None,
-        }
-        if stream_name == "audit_events":
-            existing_audit_records = parsed.records
+        if journal_path.exists():
+            event = self._load_recovery_journal_event(journal_path)
+            if event["error_details"].get("stream") != stream_name:
+                raise Part1StoreError("recovery journal stream differs from requested stream")
         else:
-            existing_audit_records = self._assert_stream_appendable("audit_events").records
-        self._validate_audit_event_against_records(event, existing_audit_records)
-
-        if parsed.unterminated_valid_record:
-            self._durable_append(path, b"\n")
-        else:
-            assert parsed.trailing_tail is not None
-            assert parsed.trailing_offset is not None
-            tail = parsed.trailing_tail
-            assert quarantine_path is not None
-            quarantine_path.parent.mkdir(parents=True, exist_ok=True)
-            if quarantine_path.exists():
-                if quarantine_path.read_bytes() != tail:
-                    raise Part1StoreError("existing quarantine artifact has conflicting bytes")
+            parsed = self._parse_stream(stream_name)
+            if parsed.trailing_tail is None and not parsed.unterminated_valid_record:
+                return None
+            original_bytes = path.read_bytes()
+            if parsed.unterminated_valid_record:
+                recovery_kind = "valid_record_missing_newline"
+                recovered_bytes = 0
+                recovered_hash = hashlib.sha256(b"").hexdigest()
+                valid_prefix = original_bytes
+                quarantine_path = None
             else:
-                with quarantine_path.open("xb") as handle:
-                    handle.write(tail)
+                assert parsed.trailing_tail is not None
+                assert parsed.trailing_offset is not None
+                recovery_kind = "invalid_final_line"
+                recovered_bytes = len(parsed.trailing_tail)
+                recovered_hash = hashlib.sha256(parsed.trailing_tail).hexdigest()
+                valid_prefix = original_bytes[: parsed.trailing_offset]
+                quarantine_path = self.root / "quarantine" / (
+                    f"{stream_name}.{recovered_hash}.trailing-bytes.bin"
+                )
+            event = {
+                "schema_name": "part1_audit_event",
+                "schema_version": "1.0.0",
+                "event_id": event_id_value,
+                "event_scope": "shard",
+                "study_id": self.study_id,
+                "model_run_id": self.model_run_id,
+                "shard_id": self.shard_id,
+                "question_id": None,
+                "run_id": None,
+                "checkpoint_id": None,
+                "attempt_id": None,
+                "attempt_number": None,
+                "event_sequence": event_sequence,
+                "event_type": "trailing_line_recovered",
+                "event_timestamp": event_timestamp,
+                "execution_context": dict(execution_context),
+                "outcome_category": recovery_kind,
+                "error_details": {
+                    "stream": stream_name,
+                    "recovered_byte_count": recovered_bytes,
+                    "recovered_bytes_sha256": recovered_hash,
+                    "quarantine_artifact": quarantine_path.name if quarantine_path else None,
+                    "original_size": len(original_bytes),
+                    "valid_prefix_size": len(valid_prefix),
+                    "valid_prefix_sha256": hashlib.sha256(valid_prefix).hexdigest(),
+                },
+                "retry_classification": None,
+                "retry_decision": None,
+                "backoff_seconds": None,
+                "related_lock_owner": None,
+                "terminal_record_id": None,
+                "operator_reason": None,
+            }
+            if stream_name == "audit_events":
+                existing_audit_records = parsed.records
+            else:
+                existing_audit_records = self._assert_stream_appendable("audit_events").records
+            self._validate_audit_event_against_records(event, existing_audit_records)
+
+            if quarantine_path is not None:
+                tail = parsed.trailing_tail
+                assert tail is not None
+                if quarantine_path.exists():
+                    if quarantine_path.read_bytes() != tail:
+                        raise Part1StoreError("existing quarantine artifact has conflicting bytes")
+                else:
+                    self._durable_create(quarantine_path, tail)
+            if fault_at == "before_recovery_evidence":
+                raise InjectedCrash(fault_at)
+            self._persist_recovery_journal_event(event)
+
+        details = event["error_details"]
+        quarantine_name = details.get("quarantine_artifact")
+        quarantine_path = (
+            self.root / "quarantine" / quarantine_name if quarantine_name is not None else None
+        )
+        if fault_at == "after_recovery_evidence_before_mutation":
+            raise InjectedCrash(fault_at)
+
+        valid_prefix_size = details["valid_prefix_size"]
+        valid_prefix_hash = details["valid_prefix_sha256"]
+        current_bytes = path.read_bytes()
+        if event["outcome_category"] == "invalid_final_line":
+            if quarantine_path is None or not quarantine_path.exists():
+                raise Part1StoreError("recovery quarantine artifact is missing")
+            quarantined = quarantine_path.read_bytes()
+            if (
+                len(quarantined) != details["recovered_byte_count"]
+                or hashlib.sha256(quarantined).hexdigest()
+                != details["recovered_bytes_sha256"]
+            ):
+                raise Part1StoreError("recovery quarantine bytes do not match durable evidence")
+            prefix = current_bytes[:valid_prefix_size]
+            prefix_matches = (
+                len(prefix) == valid_prefix_size
+                and hashlib.sha256(prefix).hexdigest() == valid_prefix_hash
+            )
+            if not prefix_matches:
+                raise Part1StoreError("raw stream valid prefix differs from recovery evidence")
+            if current_bytes == prefix + quarantined:
+                with path.open("r+b") as handle:
+                    handle.truncate(valid_prefix_size)
                     handle.flush()
                     os.fsync(handle.fileno())
-            with path.open("r+b") as handle:
-                handle.truncate(parsed.trailing_offset)
-                handle.flush()
-                os.fsync(handle.fileno())
-        self._durable_append(self.audit_events_path, _json_line_bytes(event))
+            elif current_bytes != prefix:
+                raise Part1StoreError("raw stream is neither pre- nor post-recovery state")
+        elif event["outcome_category"] == "valid_record_missing_newline":
+            if (
+                len(current_bytes) == valid_prefix_size
+                and hashlib.sha256(current_bytes).hexdigest() == valid_prefix_hash
+            ):
+                self._durable_append(path, b"\n")
+            elif not (
+                len(current_bytes) == valid_prefix_size + 1
+                and current_bytes.endswith(b"\n")
+                and hashlib.sha256(current_bytes[:-1]).hexdigest() == valid_prefix_hash
+            ):
+                raise Part1StoreError("newline repair state differs from durable evidence")
+        else:
+            raise Part1StoreError("recovery journal has an unsupported recovery kind")
+
+        if fault_at == "after_recovery_mutation_before_audit_append":
+            raise InjectedCrash(fault_at)
+
+        audit_parsed = self._assert_stream_appendable("audit_events")
+        existing = [
+            candidate for candidate in audit_parsed.records if candidate["event_id"] == event_id_value
+        ]
+        if existing:
+            if len(existing) != 1 or existing[0] != event:
+                raise Part1StoreError("main audit recovery evidence conflicts with journal")
+        else:
+            self._validate_audit_event_against_records(event, audit_parsed.records)
+            self._durable_append(self.audit_events_path, _json_line_bytes(event))
         return quarantine_path
+
+    def finish_pending_recoveries(self) -> list[str]:
+        """Idempotently finish every durable recovery journal not yet in main audit."""
+
+        self._assert_active()
+        finished: list[str] = []
+        for event in self._load_recovery_journal_events():
+            audit_records = self._parse_stream("audit_events").records
+            if any(record["event_id"] == event["event_id"] for record in audit_records):
+                continue
+            self.recover_trailing_line(
+                event["error_details"]["stream"],
+                event_sequence=event["event_sequence"],
+                event_timestamp=event["event_timestamp"],
+                execution_context=event["execution_context"],
+            )
+            finished.append(event["event_id"])
+        return finished
 
     @staticmethod
     def _check(name: str, outcome: str, **details: Any) -> dict[str, Any]:
@@ -872,6 +1237,12 @@ class Part1ShardStore:
         checks: list[dict[str, Any]] = []
         inspection: StreamInspection | None = None
         parse_error: Exception | None = None
+        journal_error: Exception | None = None
+        journal_events: tuple[dict[str, Any], ...] = ()
+        try:
+            journal_events = self._load_recovery_journal_events()
+        except InvalidRecordError as exc:
+            journal_error = exc
         try:
             inspection = self.inspect()
         except (MalformedMiddleError, InvalidRecordError) as exc:
@@ -879,7 +1250,17 @@ class Part1ShardStore:
 
         if parse_error is None:
             assert inspection is not None
-            tail_count = len(inspection.trailing_tails) + len(inspection.unterminated_streams)
+            audit_event_ids = {event["event_id"] for event in inspection.audit_events}
+            pending_recovery_ids = sorted(
+                event["event_id"]
+                for event in journal_events
+                if event["event_id"] not in audit_event_ids
+            )
+            tail_count = (
+                len(inspection.trailing_tails)
+                + len(inspection.unterminated_streams)
+                + len(pending_recovery_ids)
+            )
             checks.extend(
                 [
                     self._check(
@@ -887,20 +1268,26 @@ class Part1ShardStore:
                         "failed" if inspection.trailing_tails else "passed",
                         invalid_trailing_streams=sorted(inspection.trailing_tails),
                     ),
-                    self._check("schema_validity", "passed", records_validated=sum(
-                        len(records)
-                        for records in (
-                            inspection.natural_results,
-                            inspection.checkpoint_results,
-                            inspection.audit_events,
-                        )
-                    )),
+                    self._check(
+                        "schema_validity",
+                        "failed" if journal_error else "passed",
+                        records_validated=sum(
+                            len(records)
+                            for records in (
+                                inspection.natural_results,
+                                inspection.checkpoint_results,
+                                inspection.audit_events,
+                            )
+                        ),
+                        recovery_journal_error=str(journal_error) if journal_error else None,
+                    ),
                     self._check("malformed_middle", "passed", malformed_middle_count=0),
                     self._check(
                         "trailing_tail_state",
                         "failed" if tail_count else "passed",
                         invalid_tails=sorted(inspection.trailing_tails),
                         valid_records_missing_newline=sorted(inspection.unterminated_streams),
+                        pending_recovery_event_ids=pending_recovery_ids,
                     ),
                 ]
             )
@@ -982,6 +1369,7 @@ class Part1ShardStore:
                 len(index.missing_started_attempt_ids)
                 + len(index.inconsistent_completion_attempt_ids)
                 + len(index.orphaned_attempt_ids)
+                + len(index.lifecycle_errors)
             )
             warnings = len(index.missing_completion_record_ids)
             consistency_outcome = "failed" if failures else ("warning" if warnings else "passed")
@@ -991,6 +1379,7 @@ class Part1ShardStore:
                     index.inconsistent_completion_attempt_ids
                 ),
                 "orphaned_attempt_ids": sorted(index.orphaned_attempt_ids),
+                "lifecycle_errors": list(index.lifecycle_errors),
                 "authoritative_results_missing_completion": sorted(
                     index.missing_completion_record_ids
                 ),
@@ -1037,7 +1426,22 @@ class Part1ShardStore:
             "warning_count": warning_count,
             "summary": summary,
         }
-        report_id = hashlib.sha256(canonical_json_bytes(report_without_id)).hexdigest()
+        validation_target_identity = {
+            "identity_type": "validation_report_id",
+            "identity_version": VALIDATION_REPORT_IDENTITY_VERSION,
+            "payload": {
+                "study_id": self.study_id,
+                "model_run_id": self.model_run_id,
+                "model_run_manifest_hash": self.model_run_manifest_hash,
+                "shard_id": self.shard_id,
+                "validated_artifact_kind": artifact_kind,
+                "validator_version": VALIDATOR_VERSION,
+                "store_contract_version": STORE_VERSION,
+            },
+        }
+        report_id = hashlib.sha256(
+            canonical_json_bytes(validation_target_identity)
+        ).hexdigest()
         report = {
             **report_without_id,
             "validation_report_id": report_id,

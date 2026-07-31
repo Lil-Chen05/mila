@@ -365,7 +365,7 @@ def test_commit_preflights_completion_before_writing_terminal_bytes(tmp_path: Pa
     shard.append_audit_event(started)
     shard.append_audit_event(completion)
 
-    with pytest.raises(ValueError, match="duplicate audit event"):
+    with pytest.raises(ValueError, match="duplicate audit event|terminal lifecycle"):
         shard.commit_terminal_result(result, completion)
     assert not shard.natural_results_path.exists()
 
@@ -448,3 +448,330 @@ def test_recovery_event_is_preflighted_before_trailing_bytes_are_changed(tmp_pat
         )
     assert shard.natural_results_path.read_bytes() == partial
     assert not (shard.root / "quarantine").exists()
+
+
+@pytest.mark.parametrize(
+    "fault_at",
+    [
+        "before_recovery_evidence",
+        "after_recovery_evidence_before_mutation",
+        "after_recovery_mutation_before_audit_append",
+    ],
+)
+def test_result_tail_recovery_resumes_from_every_durable_boundary(
+    tmp_path: Path, fault_at: str
+) -> None:
+    shard = store(tmp_path)
+    result = natural_result()
+    shard.append_terminal_result(result)
+    valid_prefix = shard.natural_results_path.read_bytes()
+    partial = b'{"schema_name":"part1_natural_terminal_result","cut"'
+    with shard.natural_results_path.open("ab") as handle:
+        handle.write(partial)
+
+    with pytest.raises(InjectedCrash, match=fault_at):
+        shard.recover_trailing_line(
+            "natural_results",
+            event_sequence=7,
+            event_timestamp="2026-07-31T00:00:08Z",
+            execution_context={"hostname": "node", "pid": 123},
+            fault_at=fault_at,
+        )
+
+    quarantine_files = list((shard.root / "quarantine").glob("*.bin"))
+    assert len(quarantine_files) == 1
+    assert quarantine_files[0].read_bytes() == partial
+    journal_files = list(shard.recovery_journal_directory.glob("*.json"))
+    if fault_at == "before_recovery_evidence":
+        assert journal_files == []
+        assert shard.natural_results_path.read_bytes() == valid_prefix + partial
+    else:
+        assert len(journal_files) == 1
+        if fault_at == "after_recovery_evidence_before_mutation":
+            assert shard.natural_results_path.read_bytes() == valid_prefix + partial
+        else:
+            assert shard.natural_results_path.read_bytes() == valid_prefix
+            report = shard.validate_shard(
+                artifact_kind="natural_shard",
+                started_at="2026-07-31T00:00:00Z",
+                completed_at="2026-07-31T00:00:01Z",
+            )
+            assert report["is_valid"] is False
+            with pytest.raises(Part1StoreError, match="invalid|recovery"):
+                shard.finalize()
+
+    recovered_path = shard.recover_trailing_line(
+        "natural_results",
+        event_sequence=7,
+        event_timestamp="2026-07-31T00:00:08Z",
+        execution_context={"hostname": "node", "pid": 123},
+    )
+    assert recovered_path == quarantine_files[0]
+    assert shard.natural_results_path.read_bytes() == valid_prefix
+    recovery_events = [
+        event
+        for event in shard.inspect().audit_events
+        if event["event_type"] == "trailing_line_recovered"
+    ]
+    assert len(recovery_events) == 1
+    assert shard.recover_trailing_line(
+        "natural_results",
+        event_sequence=7,
+        event_timestamp="2026-07-31T00:00:08Z",
+        execution_context={"hostname": "node", "pid": 123},
+    ) == quarantine_files[0]
+    assert len(
+        [event for event in shard.inspect().audit_events if event["event_type"] == "trailing_line_recovered"]
+    ) == 1
+
+
+@pytest.mark.parametrize(
+    "fault_at",
+    [
+        "after_recovery_evidence_before_mutation",
+        "after_recovery_mutation_before_audit_append",
+    ],
+)
+def test_audit_tail_recovery_uses_external_durable_evidence(
+    tmp_path: Path, fault_at: str
+) -> None:
+    shard = store(tmp_path)
+    result = natural_result()
+    shard.append_audit_event(attempt_event(result, "attempt_started", 0))
+    valid_prefix = shard.audit_events_path.read_bytes()
+    partial = b'{"schema_name":"part1_audit_event","cut"'
+    with shard.audit_events_path.open("ab") as handle:
+        handle.write(partial)
+
+    with pytest.raises(InjectedCrash, match=fault_at):
+        shard.recover_trailing_line(
+            "audit_events",
+            event_sequence=8,
+            event_timestamp="2026-07-31T00:00:09Z",
+            execution_context={"hostname": "node", "pid": 123},
+            fault_at=fault_at,
+        )
+    assert len(list(shard.recovery_journal_directory.glob("*.json"))) == 1
+
+    shard.recover_trailing_line(
+        "audit_events",
+        event_sequence=8,
+        event_timestamp="2026-07-31T00:00:09Z",
+        execution_context={"hostname": "node", "pid": 123},
+    )
+    assert shard.audit_events_path.read_bytes().startswith(valid_prefix)
+    assert partial not in shard.audit_events_path.read_bytes()
+    assert sum(
+        event["event_type"] == "trailing_line_recovered"
+        for event in shard.inspect().audit_events
+    ) == 1
+
+
+def test_pending_recovery_journals_can_be_finished_without_reconstructing_arguments(
+    tmp_path: Path,
+) -> None:
+    shard = store(tmp_path)
+    shard.root.mkdir(parents=True)
+    partial = b'{"schema_name":"part1_natural_terminal_result","cut"'
+    shard.natural_results_path.write_bytes(partial)
+    with pytest.raises(InjectedCrash):
+        shard.recover_trailing_line(
+            "natural_results",
+            event_sequence=11,
+            event_timestamp="2026-07-31T00:00:10Z",
+            execution_context={"hostname": "node", "pid": 123},
+            fault_at="after_recovery_mutation_before_audit_append",
+        )
+
+    assert shard.finish_pending_recoveries() == [
+        next(shard.recovery_journal_directory.glob("*.json")).stem
+    ]
+    assert shard.finish_pending_recoveries() == []
+
+
+def test_attempt_terminal_lifecycle_rejects_results_after_failure_or_interruption(
+    tmp_path: Path,
+) -> None:
+    for terminal_type in ("attempt_failed", "attempt_interrupted"):
+        shard = store(tmp_path / terminal_type)
+        result = natural_result()
+        shard.append_audit_event(attempt_event(result, "attempt_started", 0))
+        shard.append_audit_event(attempt_event(result, terminal_type, 1))
+        with pytest.raises(ValueError, match="terminal lifecycle|already.*terminal"):
+            shard.append_terminal_result(result)
+        with pytest.raises(ValueError, match="terminal lifecycle|already.*terminal"):
+            shard.commit_terminal_result(result, attempt_event(result, "attempt_completed", 2))
+
+
+def test_attempt_events_require_start_and_reject_conflicting_terminal_states(
+    tmp_path: Path,
+) -> None:
+    shard = store(tmp_path)
+    result = natural_result()
+    with pytest.raises(ValueError, match="attempt_started"):
+        shard.append_audit_event(attempt_event(result, "attempt_failed", 1))
+
+    shard.append_audit_event(attempt_event(result, "attempt_started", 0))
+    shard.append_audit_event(attempt_event(result, "attempt_failed", 1))
+    with pytest.raises(ValueError, match="terminal lifecycle|already.*terminal"):
+        shard.append_audit_event(attempt_event(result, "attempt_interrupted", 2))
+    with pytest.raises(ValueError, match="terminal lifecycle|already.*terminal"):
+        shard.append_audit_event(attempt_event(result, "attempt_completed", 2))
+
+
+@pytest.mark.parametrize("event_type", ["attempt_failed", "attempt_interrupted"])
+def test_failure_or_interruption_cannot_follow_an_existing_terminal_result(
+    tmp_path: Path, event_type: str
+) -> None:
+    shard = store(tmp_path)
+    result = natural_result()
+    shard.append_audit_event(attempt_event(result, "attempt_started", 0))
+    shard.append_terminal_result(result)
+    with pytest.raises(ValueError, match="terminal result|terminal lifecycle"):
+        shard.append_audit_event(attempt_event(result, event_type, 1))
+
+
+def test_start_cannot_be_appended_retroactively_after_a_terminal_result(tmp_path: Path) -> None:
+    shard = store(tmp_path)
+    result = natural_result()
+    shard.append_terminal_result(result)
+    with pytest.raises(ValueError, match="attempt_started.*terminal result|terminal result.*start"):
+        shard.append_audit_event(attempt_event(result, "attempt_started", 0))
+
+
+def test_attempt_terminal_event_record_references_follow_lifecycle_contract(
+    tmp_path: Path,
+) -> None:
+    result = natural_result()
+    shard = store(tmp_path / "failed")
+    shard.append_audit_event(attempt_event(result, "attempt_started", 0))
+    failed = attempt_event(result, "attempt_failed", 1)
+    failed["terminal_record_id"] = result["raw_record_id"]
+    with pytest.raises(ValueError, match="terminal_record_id"):
+        shard.append_audit_event(failed)
+
+    shard = store(tmp_path / "completed")
+    shard.append_audit_event(attempt_event(result, "attempt_started", 0))
+    completion = attempt_event(result, "attempt_completed", 1)
+    completion["terminal_record_id"] = None
+    with pytest.raises(ValueError, match="terminal_record_id"):
+        shard.append_audit_event(completion)
+
+
+def test_recovered_result_may_receive_one_matching_completion(tmp_path: Path) -> None:
+    shard = store(tmp_path)
+    result = natural_result()
+    shard.append_audit_event(attempt_event(result, "attempt_started", 0))
+    shard.append_terminal_result(result)
+    appended = shard.reconcile(
+        event_timestamp="2026-07-31T00:00:01Z",
+        execution_context={"hostname": "node", "pid": 123},
+        append_missing_completion=True,
+    )
+    assert [event["event_type"] for event in appended] == [
+        "terminal_result_recovered",
+        "attempt_completed",
+    ]
+    assert shard.validate_shard(
+        artifact_kind="natural_shard",
+        started_at="2026-07-31T00:00:00Z",
+        completed_at="2026-07-31T00:00:01Z",
+    )["is_valid"] is True
+    with pytest.raises(ValueError, match="terminal lifecycle|duplicate"):
+        shard.append_audit_event(attempt_event(result, "attempt_completed", 3))
+
+
+def test_read_only_validation_rejects_handwritten_contradictory_lifecycle(tmp_path: Path) -> None:
+    shard = store(tmp_path)
+    result = natural_result()
+    events = [
+        attempt_event(result, "attempt_started", 0),
+        attempt_event(result, "attempt_failed", 1),
+        attempt_event(result, "attempt_completed", 2),
+    ]
+    shard.root.mkdir(parents=True)
+    shard.natural_results_path.write_text(
+        json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    shard.audit_events_path.write_text(
+        "".join(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n" for event in events),
+        encoding="utf-8",
+    )
+    report = shard.validate_shard(
+        artifact_kind="natural_shard",
+        started_at="2026-07-31T00:00:00Z",
+        completed_at="2026-07-31T00:00:01Z",
+    )
+    assert report["is_valid"] is False
+    consistency = next(
+        check for check in report["checks"] if check["name"] == "terminal_event_consistency"
+    )
+    assert consistency["outcome"] == "failed"
+    assert consistency["details"]["lifecycle_errors"]
+
+
+def test_completion_without_result_can_be_classified_interrupted_and_then_validated(
+    tmp_path: Path,
+) -> None:
+    shard = store(tmp_path)
+    result = natural_result()
+    shard.append_audit_event(attempt_event(result, "attempt_started", 0))
+    shard.append_audit_event(attempt_event(result, "attempt_completed", 1))
+    shard.reconcile(
+        event_timestamp="2026-07-31T00:00:01Z",
+        execution_context={"hostname": "node", "pid": 123},
+    )
+    report = shard.validate_shard(
+        artifact_kind="natural_shard",
+        started_at="2026-07-31T00:00:00Z",
+        completed_at="2026-07-31T00:00:01Z",
+    )
+    assert report["is_valid"] is True
+
+
+def test_validation_report_identity_excludes_mutable_report_state_and_is_domain_separated(
+    tmp_path: Path,
+) -> None:
+    shard = store(tmp_path)
+    first = shard.validate_shard(
+        artifact_kind="natural_shard",
+        started_at="2026-07-31T00:00:00Z",
+        completed_at="2026-07-31T00:00:01Z",
+    )
+    second = shard.validate_shard(
+        artifact_kind="natural_shard",
+        started_at="2030-01-01T00:00:00Z",
+        completed_at="2030-01-01T00:00:01Z",
+    )
+    assert first["validation_report_id"] == second["validation_report_id"]
+
+    shard.root.mkdir(parents=True, exist_ok=True)
+    shard.natural_results_path.write_bytes(b'{"incomplete"')
+    invalid = shard.validate_shard(
+        artifact_kind="natural_shard",
+        started_at="2040-01-01T00:00:00Z",
+        completed_at="2040-01-01T00:00:01Z",
+    )
+    assert invalid["is_valid"] is False
+    assert invalid["validation_report_id"] == first["validation_report_id"]
+    checkpoint_kind = shard.validate_shard(
+        artifact_kind="checkpoint_shard",
+        started_at="2040-01-01T00:00:00Z",
+        completed_at="2040-01-01T00:00:01Z",
+    )
+    assert checkpoint_kind["validation_report_id"] != first["validation_report_id"]
+
+    different_shard = Part1ShardStore(
+        tmp_path / "other",
+        shard_id="shard-001",
+        study_id=STUDY_ID,
+        model_run_id=MODEL_RUN_ID,
+        model_run_manifest_hash=MODEL_RUN_MANIFEST_HASH,
+    )
+    different = different_shard.validate_shard(
+        artifact_kind="natural_shard",
+        started_at="2026-07-31T00:00:00Z",
+        completed_at="2026-07-31T00:00:01Z",
+    )
+    assert different["validation_report_id"] != first["validation_report_id"]
