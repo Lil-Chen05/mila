@@ -185,6 +185,101 @@ FIXED_MODEL_REQUESTED_CONTRACT = {
     "seed_algorithm_version": SEED_ALGORITHM_VERSION,
     "base_generation_seed": 42,
 }
+_FIXED_PHASE1_CONFIGS = {
+    "study_protocol": {
+        "schema_name": "part1_study_protocol_config",
+        "config_version": "1.0.0",
+        "scientific_protocol_version": "part1-science-v1",
+        "question_sampling_seed": 42,
+        "base_generation_seed": 42,
+        "bootstrap_seed": 42,
+        "subjects": FIXED_SUBJECTS,
+        "quota_per_subject": 100,
+        "natural_runs_per_question": 10,
+        "run_ids": list(range(10)),
+        "checkpoint_fractions": FIXED_CHECKPOINT_FRACTIONS,
+        "primary_target": "natural_correct",
+    },
+    "model_run_execution": {
+        "schema_name": "part1_model_run_execution_config",
+        "config_version": "1.0.0",
+        "mode": "smoke",
+        "production": False,
+        "model_repository": "HuggingFaceTB/SmolLM3-3B",
+        "model_revision": None,
+        "tokenizer_revision": None,
+        "thinking_mode": True,
+        "dtype": "bfloat16",
+        "batch_size": 1,
+        "natural_generation": FIXED_NATURAL_GENERATION,
+        "checkpoint_generation": {"do_sample": False, "max_new_tokens": 32},
+        "immutable_revision_required_before_execution": True,
+    },
+    "dataset_materialization": {
+        "schema_name": "part1_dataset_materialization_config",
+        "config_version": "1.0.0",
+        "source_repository": "cais/mmlu",
+        "source_revision": None,
+        "source_config": "all",
+        "source_split": "test",
+        "streaming": True,
+        "bounded_take_required": True,
+        "question_sampling_seed": 42,
+        "subjects": FIXED_SUBJECTS,
+        "quota_per_subject": 100,
+        "source_revision_required_before_materialization": True,
+    },
+    "storage": {
+        "schema_name": "part1_storage_config",
+        "config_version": "1.0.0",
+        "phase1_production_allowed": False,
+        "persistent_root_required": True,
+        "smoke_root": "results/part1-smoke",
+        "production_root": "results/part1",
+        "natural_shard_filename": "natural_results.jsonl",
+        "checkpoint_shard_filename": "checkpoint_results.jsonl",
+        "audit_filename": "audit_events.jsonl",
+        "validation_report_directory": "validation_reports",
+        "active_shards_append_only": True,
+        "immutable_after_finalization": True,
+        "ephemeral_roots_forbidden": ["$SLURM_TMPDIR", "/tmp", "/private/tmp"],
+    },
+    "retries": {
+        "schema_name": "part1_retries_config",
+        "config_version": "1.0.0",
+        "max_total_attempts": 3,
+        "attempt_numbers": [1, 2, 3],
+        "retryable_categories": FIXED_RETRYABLE_CATEGORIES,
+        "terminal_categories": [
+            "invalid_configuration",
+            "schema_incompatibility",
+            "manifest_incompatibility",
+            "tokenizer_preflight_incompatibility",
+            "deterministic_context_overflow",
+            "reproducible_cuda_oom",
+            "unsupported_model_or_tokenizer_behaviour",
+            "corrupt_immutable_manifest",
+        ],
+        "cuda_retry_requires_fresh_process": True,
+        "preserve_seed_and_logical_identity": True,
+        "backoff_seconds": [0, 30, 120],
+    },
+    "analysis": {
+        "schema_name": "part1_analysis_config",
+        "config_version": "1.0.0",
+        "analysis_contract_version": "part1-analysis-v1",
+        "primary_target": "natural_correct",
+        "primary_auroc_feature_registry": FIXED_PRIMARY_AUROC_FEATURE_REGISTRY,
+        "bootstrap_seed": 42,
+        "development_bootstrap_replicates": 1000,
+        "final_bootstrap_replicates": 5000,
+        "confidence_interval_percent": 95,
+        "minimum_valid_bootstrap_fraction": 0.95,
+        "ece_bins": 10,
+        "main_checkpoint_fractions": [0.0, 0.5, 1.0],
+        "all_checkpoint_fractions": FIXED_CHECKPOINT_FRACTIONS,
+    },
+}
 
 QUESTION_CONTENT_FIELDS = (
     "source_repository",
@@ -601,6 +696,14 @@ def load_config(name: str) -> dict[str, Any]:
 def validate_instance(schema_name: str, instance: Mapping[str, Any]) -> None:
     """Validate an instance and raise one concise, field-oriented ValueError."""
 
+    if schema_name in {"natural_terminal_result", "checkpoint_terminal_result"} and (
+        instance.get("confidence_parse_status") == "out_of_range"
+        and isinstance(instance.get("raw_parsed_confidence"), int)
+        and 0 <= instance["raw_parsed_confidence"] <= 100
+    ):
+        raise ValueError(
+            "out-of-range confidence requires raw_parsed_confidence <= -1 or >= 101"
+        )
     validator = Draft202012Validator(load_schema(schema_name), format_checker=FORMAT_CHECKER)
     errors = sorted(validator.iter_errors(instance), key=lambda error: list(error.absolute_path))
     if errors:
@@ -689,9 +792,18 @@ def validate_instance(schema_name: str, instance: Mapping[str, Any]) -> None:
                     raise ValueError(f"{field} must contain exactly four A-D values")
 
 
+def _fixed_value_matches(actual: Any, expected: Any) -> bool:
+    try:
+        return canonical_json_bytes({"value": actual}) == canonical_json_bytes(
+            {"value": expected}
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def validate_fixed_study_contract(study_manifest: Mapping[str, Any]) -> None:
     for field, expected in FIXED_STUDY_CONTRACT.items():
-        if study_manifest.get(field) != expected:
+        if not _fixed_value_matches(study_manifest.get(field), expected):
             if field == "compatible_raw_record_schema_versions":
                 raise ValueError(
                     "study_manifest.compatible_raw_record_schema_versions differs from "
@@ -702,19 +814,33 @@ def validate_fixed_study_contract(study_manifest: Mapping[str, Any]) -> None:
 
 def validate_fixed_model_requested_contract(model_manifest: Mapping[str, Any]) -> None:
     for field, expected in FIXED_MODEL_REQUESTED_CONTRACT.items():
-        if model_manifest.get(field) != expected:
+        if not _fixed_value_matches(model_manifest.get(field), expected):
             raise ValueError(f"model_run_manifest.{field} differs from the fixed Part 1 requested contract")
-    natural_effective = model_manifest.get("effective_natural_generation")
-    checkpoint_effective = model_manifest.get("effective_checkpoint_generation")
-    if not isinstance(natural_effective, Mapping) or set(natural_effective) != set(
-        FIXED_NATURAL_GENERATION
+    for field, required in (
+        ("effective_natural_generation", FIXED_NATURAL_GENERATION),
+        (
+            "effective_checkpoint_generation",
+            FIXED_MODEL_REQUESTED_CONTRACT["requested_checkpoint_generation"],
+        ),
     ):
-        raise ValueError("model_run_manifest.effective_natural_generation has incomplete shape")
-    if not isinstance(checkpoint_effective, Mapping) or set(checkpoint_effective) != {
-        "do_sample",
-        "max_new_tokens",
-    }:
-        raise ValueError("model_run_manifest.effective_checkpoint_generation has incomplete shape")
+        effective = model_manifest.get(field)
+        if not isinstance(effective, Mapping):
+            raise ValueError(f"model_run_manifest.{field} must be an object")
+        for setting, expected in required.items():
+            if setting not in effective:
+                raise ValueError(
+                    f"model_run_manifest.{field} is missing required setting {setting}"
+                )
+            if not _fixed_value_matches(effective[setting], expected):
+                raise ValueError(
+                    f"model_run_manifest.{field} required setting {setting} differs"
+                )
+        try:
+            canonical_json_bytes(effective)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"model_run_manifest.{field} contains a non-serializable resolved setting"
+            ) from exc
 
 
 def validate_phase1_config(
@@ -729,14 +855,16 @@ def validate_phase1_config(
         config = configs[name]
         if config.get("schema_name") != f"part1_{name}_config" or config.get("config_version") != "1.0.0":
             raise ValueError(f"invalid schema_name/config_version for {name}")
-        expected_config = load_config(name)
+        expected_config = _FIXED_PHASE1_CONFIGS[name]
         ignored_fields = {"smoke_root", "production_root"} if name == "storage" else set()
         if set(config).difference(ignored_fields) != set(expected_config).difference(
             ignored_fields
         ):
             raise ValueError(f"{name}.fields differ from the fixed Part 1 contract")
         for field, expected_value in expected_config.items():
-            if field not in ignored_fields and config.get(field) != expected_value:
+            if field not in ignored_fields and not _fixed_value_matches(
+                config.get(field), expected_value
+            ):
                 raise ValueError(f"{name}.{field} differs from the fixed Part 1 contract")
     protocol = configs["study_protocol"]
     fixed_protocol = {

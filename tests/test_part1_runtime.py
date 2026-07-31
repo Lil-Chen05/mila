@@ -866,6 +866,63 @@ def test_manifest_compatibility_rejects_fixed_contract_drift(
         validate_manifest_compatibility(study, model)
 
 
+def test_manifest_compatibility_accepts_effective_generation_supersets() -> None:
+    from part1_contract import model_run_id, model_run_manifest_hash
+    from part1_runtime import validate_manifest_compatibility
+
+    study, model = _compatible_manifests()
+    model["effective_natural_generation"].update(
+        eos_token_id=2,
+        pad_token_id=0,
+        resolved_stopping={"eos_token_ids": [2, 3]},
+    )
+    model["effective_checkpoint_generation"].update(
+        eos_token_id=2,
+        pad_token_id=0,
+    )
+    model["model_run_id"] = model_run_id(model)
+    model["model_run_manifest_hash"] = model_run_manifest_hash(model)
+    validate_manifest_compatibility(study, model)
+
+
+@pytest.mark.parametrize(
+    ("effective_field", "required_field", "operation"),
+    [
+        ("effective_natural_generation", "top_p", "remove"),
+        ("effective_natural_generation", "temperature", "change"),
+        ("effective_checkpoint_generation", "do_sample", "change"),
+    ],
+)
+def test_manifest_compatibility_rejects_missing_or_changed_required_effective_setting(
+    effective_field: str, required_field: str, operation: str
+) -> None:
+    from part1_contract import model_run_id, model_run_manifest_hash
+    from part1_runtime import CompatibilityError, validate_manifest_compatibility
+
+    study, model = _compatible_manifests()
+    if operation == "remove":
+        del model[effective_field][required_field]
+    else:
+        current = model[effective_field][required_field]
+        model[effective_field][required_field] = not current if isinstance(current, bool) else 0.7
+    model["model_run_id"] = model_run_id(model)
+    model["model_run_manifest_hash"] = model_run_manifest_hash(model)
+    with pytest.raises(CompatibilityError, match="effective.*required|effective.*setting"):
+        validate_manifest_compatibility(study, model)
+
+
+def test_effective_generation_boolean_rejects_numeric_lookalike() -> None:
+    from part1_contract import model_run_id, model_run_manifest_hash
+    from part1_runtime import CompatibilityError, validate_manifest_compatibility
+
+    study, model = _compatible_manifests()
+    model["effective_checkpoint_generation"]["do_sample"] = 0
+    model["model_run_id"] = model_run_id(model)
+    model["model_run_manifest_hash"] = model_run_manifest_hash(model)
+    with pytest.raises(CompatibilityError, match="effective.*required.*do_sample"):
+        validate_manifest_compatibility(study, model)
+
+
 def test_dry_run_default_and_templates_are_read_only_and_login_safe(tmp_path: Path) -> None:
     from part1_runtime import run_dry_run
 
@@ -2003,6 +2060,97 @@ def test_dry_run_retry_requires_retry_decision_and_exact_persisted_attempt_count
                 "attempts_consumed": 1,
             },
         )
+
+
+@pytest.mark.parametrize(
+    ("persisted_category", "requested_category", "expected_eligible"),
+    [
+        ("transient_cuda_runtime_failure", "temporary_filesystem_failure", False),
+        ("temporary_filesystem_failure", "transient_cuda_runtime_failure", False),
+        ("transient_cuda_runtime_failure", "transient_cuda_runtime_failure", True),
+    ],
+)
+def test_dry_run_retry_category_must_match_latest_persisted_failure(
+    tmp_path: Path,
+    persisted_category: str,
+    requested_category: str,
+    expected_eligible: bool,
+) -> None:
+    from part1_contract import attempt_id, natural_record_id
+    from part1_failure_policy import classify_failure
+    from part1_runtime import LockMetadata, LockedShardSession, WorkSpec, run_dry_run
+
+    study, model = _compatible_manifests()
+    session = LockedShardSession.acquire(
+        tmp_path / "shard",
+        owner=LockMetadata.new(
+            study_id=study["study_id"],
+            model_run_id=model["model_run_id"],
+            shard_id=SHARD_ID,
+            hostname="node",
+            pid=101,
+            slurm_job_id=None,
+            slurm_array_task_id=None,
+            acquired_at="2026-07-31T00:00:00Z",
+        ),
+        model_run_manifest_hash=model["model_run_manifest_hash"],
+    )
+    record = natural_result()
+    record.update(
+        study_id=study["study_id"],
+        model_run_id=model["model_run_id"],
+        model_run_manifest_hash=model["model_run_manifest_hash"],
+        question_manifest_hash=study["question_manifest_hash"],
+    )
+    record["raw_record_id"] = natural_record_id(
+        record["study_id"], record["model_run_id"], record["question_id"], record["run_id"]
+    )
+    record["terminal_attempt_id"] = attempt_id(
+        record["study_id"],
+        record["model_run_id"],
+        record["question_id"],
+        record["run_id"],
+        1,
+    )
+    session.store.append_audit_event(attempt_event(record, "attempt_started", 0))
+    failure = attempt_event(record, "attempt_failed", 1)
+    persisted_policy = classify_failure(persisted_category, 1)
+    failure.update(
+        outcome_category=persisted_category,
+        retry_classification=persisted_policy.classification,
+        retry_decision=persisted_policy.retry_decision,
+        backoff_seconds=persisted_policy.backoff_seconds,
+    )
+    session.store.append_audit_event(failure)
+    session.close()
+
+    work = WorkSpec.natural(
+        record["study_id"],
+        record["model_run_id"],
+        record["model_run_manifest_hash"],
+        record["question_id"],
+        record["run_id"],
+        seed=record["generation_seed"],
+    )
+    report = run_dry_run(
+        persistent_root=tmp_path / "smoke",
+        allow_root_override=True,
+        study_manifest=study,
+        model_run_manifest=model,
+        shard_root=session.store.root,
+        retry_request={
+            "work": work.to_dict(),
+            "category": requested_category,
+            "attempts_consumed": 1,
+        },
+    )
+    assert report["retry_plan"]["persisted_failure_category"] == persisted_category
+    assert report["retry_plan"]["eligible"] is expected_eligible
+    assert report["is_valid"] is expected_eligible
+    if persisted_category == "transient_cuda_runtime_failure" and expected_eligible:
+        assert report["retry_plan"]["requires_fresh_process"] is True
+    if not expected_eligible:
+        assert "failure_category_mismatch" in report["retry_plan"]["ineligibility_reasons"]
 
 
 def test_finalized_dry_run_keeps_completed_but_rejects_missing_work(

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from part1_contract import shared_probe_id
 from part1_store import (
     DuplicateTerminalResultError,
     FinalizedShardError,
@@ -55,6 +56,35 @@ def _write_synthetic_raw_terminal(shard: Part1ShardStore, result: dict) -> None:
         json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
     )
+
+
+def _aliased_checkpoint(
+    *, checkpoint_index: int, prefix_hash: str, inducer_version: str, inducer_text: str
+) -> dict:
+    checkpoint = checkpoint_result(checkpoint_id=f"cp-{checkpoint_index:02d}")
+    checkpoint.update(
+        requested_checkpoint_index=checkpoint_index,
+        requested_fraction=checkpoint_index / 10,
+        k_keep=0,
+        actual_fraction=0.0,
+        prefix_hash=prefix_hash,
+        inducer_version=inducer_version,
+        inducer_text=inducer_text,
+        is_alias=checkpoint_index != 0,
+        alias_metadata={
+            "owner_checkpoint_id": "cp-00",
+            "members": [f"cp-{index:02d}" for index in range(6)],
+        },
+    )
+    checkpoint["shared_probe_id"] = shared_probe_id(
+        checkpoint["study_id"],
+        checkpoint["model_run_id"],
+        checkpoint["question_id"],
+        checkpoint["run_id"],
+        prefix_hash=prefix_hash,
+        inducer_version=inducer_version,
+    )
+    return checkpoint
 
 
 def test_separate_streams_durably_preserve_full_precision_and_alignment(
@@ -261,6 +291,66 @@ def test_checkpoint_parent_accepts_exact_zero_short_and_ties_even_placements(
     )
     shard.append_audit_event(attempt_event(checkpoint, "attempt_started", 0))
     shard.append_terminal_result(checkpoint)
+
+
+def test_alias_group_rejects_cross_record_physical_probe_disagreement_on_append(
+    tmp_path: Path,
+) -> None:
+    shard = store(tmp_path)
+    parent = natural_result()
+    shard.append_audit_event(attempt_event(parent, "attempt_started", 0))
+    shard.commit_terminal_result(parent, attempt_event(parent, "attempt_completed", 1))
+    owner = _aliased_checkpoint(
+        checkpoint_index=0,
+        prefix_hash="3" * 64,
+        inducer_version="smollm3-forced-close-v1",
+        inducer_text="</think>\nAnswer:",
+    )
+    member = _aliased_checkpoint(
+        checkpoint_index=1,
+        prefix_hash="4" * 64,
+        inducer_version="smollm3-forced-close-v2",
+        inducer_text="</think>\nDifferent:",
+    )
+    shard.append_audit_event(attempt_event(owner, "attempt_started", 0))
+    shard.append_terminal_result(owner)
+    shard.append_audit_event(attempt_event(member, "attempt_started", 0))
+    with pytest.raises(ValueError, match="alias.*physical|physical.*alias"):
+        shard.append_terminal_result(member)
+
+
+def test_alias_group_disagreement_is_reported_when_read_from_disk(tmp_path: Path) -> None:
+    shard = store(tmp_path)
+    parent = natural_result()
+    shard.append_audit_event(attempt_event(parent, "attempt_started", 0))
+    shard.commit_terminal_result(parent, attempt_event(parent, "attempt_completed", 1))
+    owner = _aliased_checkpoint(
+        checkpoint_index=0,
+        prefix_hash="3" * 64,
+        inducer_version="smollm3-forced-close-v1",
+        inducer_text="</think>\nAnswer:",
+    )
+    member = _aliased_checkpoint(
+        checkpoint_index=1,
+        prefix_hash="4" * 64,
+        inducer_version="smollm3-forced-close-v2",
+        inducer_text="</think>\nDifferent:",
+    )
+    shard.checkpoint_results_path.write_text(
+        "".join(
+            json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+            for record in (owner, member)
+        ),
+        encoding="utf-8",
+    )
+    index = shard.build_index()
+    assert any("alias" in error and "physical" in error for error in index.hierarchy_errors)
+    report = shard.validate_shard(
+        artifact_kind="checkpoint_shard",
+        started_at="2026-07-31T00:00:00Z",
+        completed_at="2026-07-31T00:00:01Z",
+    )
+    assert report["is_valid"] is False
 
 
 def test_unlocked_store_mutation_is_impossible_by_default(tmp_path: Path) -> None:

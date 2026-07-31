@@ -634,6 +634,8 @@ class Part1ShardStore:
             natural_records = self._assert_stream_appendable("natural_results").records
             self._validate_checkpoint_parent(record, natural_records)
         parsed = self._assert_stream_appendable(stream_name)
+        if schema_name_value == "part1_checkpoint_terminal_result":
+            self._validate_alias_group_physical_consistency(record, parsed.records)
         logical_key = _logical_key(record)
         record_id_value = _record_id(record)
         for existing in parsed.records:
@@ -800,6 +802,39 @@ class Part1ShardStore:
             checkpoint["checkpoint_id"] != expected_alias_metadata["owner_checkpoint_id"]
         ):
             raise ValueError("checkpoint alias flag differs from alias ownership")
+
+    @staticmethod
+    def _validate_alias_group_physical_consistency(
+        checkpoint: Mapping[str, Any],
+        existing_checkpoints: tuple[Mapping[str, Any], ...],
+    ) -> None:
+        alias_group = (
+            checkpoint["study_id"],
+            checkpoint["model_run_id"],
+            checkpoint["question_id"],
+            checkpoint["run_id"],
+            checkpoint["k_keep"],
+        )
+        physical_fields = (
+            "prefix_hash",
+            "inducer_version",
+            "inducer_text",
+            "shared_probe_id",
+        )
+        for existing in existing_checkpoints:
+            existing_group = (
+                existing["study_id"],
+                existing["model_run_id"],
+                existing["question_id"],
+                existing["run_id"],
+                existing["k_keep"],
+            )
+            if existing_group == alias_group and any(
+                checkpoint[field] != existing[field] for field in physical_fields
+            ):
+                raise ValueError(
+                    "alias group physical probe fields differ across checkpoint records"
+                )
 
     @_serialized_mutation
     def append_terminal_result(self, record: Mapping[str, Any]) -> None:
@@ -1098,6 +1133,17 @@ class Part1ShardStore:
                 self._validate_checkpoint_parent(
                     checkpoint, tuple(natural_by_key.values())
                 )
+            except ValueError as exc:
+                hierarchy_errors.append(f"checkpoint {key!r}: {exc}")
+        physical_by_alias_group: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for key, checkpoint in checkpoint_by_key.items():
+            alias_group = (*key[:4], checkpoint["k_keep"])
+            existing = physical_by_alias_group.get(alias_group)
+            if existing is None:
+                physical_by_alias_group[alias_group] = checkpoint
+                continue
+            try:
+                self._validate_alias_group_physical_consistency(checkpoint, (existing,))
             except ValueError as exc:
                 hierarchy_errors.append(f"checkpoint {key!r}: {exc}")
 

@@ -1063,6 +1063,85 @@ def test_every_tracked_fixed_config_field_is_enforced(
 
 
 @pytest.mark.parametrize(
+    ("config_name", "field", "bad_value"),
+    [
+        ("dataset_materialization", "streaming", False),
+        ("analysis", "bootstrap_seed", 7),
+        ("storage", "active_shards_append_only", False),
+    ],
+)
+def test_fixed_config_oracle_is_independent_of_tracked_template_loader(
+    monkeypatch: pytest.MonkeyPatch,
+    config_name: str,
+    field: str,
+    bad_value: object,
+) -> None:
+    configs = {name: load_config(name) for name in CONFIG_NAMES}
+    configs[config_name][field] = bad_value
+    monkeypatch.setattr(
+        "part1_contract.load_config",
+        lambda name: copy.deepcopy(configs[name]),
+    )
+    with pytest.raises(ValueError, match=rf"{config_name}\.{field}"):
+        validate_phase1_config(
+            configs,
+            mode="smoke",
+            persistent_root=Path(configs["storage"]["smoke_root"]),
+        )
+
+
+def test_fixed_config_boolean_rejects_numeric_lookalike() -> None:
+    configs = {name: load_config(name) for name in CONFIG_NAMES}
+    configs["storage"]["active_shards_append_only"] = 1
+    with pytest.raises(ValueError, match="storage.active_shards_append_only"):
+        validate_phase1_config(
+            configs,
+            mode="smoke",
+            persistent_root=Path(configs["storage"]["smoke_root"]),
+        )
+
+
+@pytest.mark.parametrize("schema_name,factory", [
+    ("natural_terminal_result", natural),
+    ("checkpoint_terminal_result", checkpoint),
+])
+@pytest.mark.parametrize(
+    ("raw_value", "parse_status", "normalized"),
+    [(-1, "out_of_range", None), (0, "parsed", 0.0), (100, "parsed", 1.0), (101, "out_of_range", None)],
+)
+def test_confidence_boundary_statuses_are_coherent(
+    schema_name: str, factory, raw_value: int, parse_status: str, normalized: float | None
+) -> None:
+    value = factory()
+    value.update(
+        confidence_parse_status=parse_status,
+        raw_confidence_text=str(raw_value),
+        raw_parsed_confidence=raw_value,
+        normalized_confidence=normalized,
+    )
+    validate_instance(schema_name, value)
+
+
+@pytest.mark.parametrize("schema_name,factory", [
+    ("natural_terminal_result", natural),
+    ("checkpoint_terminal_result", checkpoint),
+])
+@pytest.mark.parametrize("raw_value", [0, 50, 100])
+def test_out_of_range_confidence_rejects_in_domain_boundaries_and_values(
+    schema_name: str, factory, raw_value: int
+) -> None:
+    value = factory()
+    value.update(
+        confidence_parse_status="out_of_range",
+        raw_confidence_text=str(raw_value),
+        raw_parsed_confidence=raw_value,
+        normalized_confidence=None,
+    )
+    with pytest.raises(ValueError, match="out.of.range|less than|greater than"):
+        validate_instance(schema_name, value)
+
+
+@pytest.mark.parametrize(
     ("schema_name", "factory", "mutator"),
     [
         (

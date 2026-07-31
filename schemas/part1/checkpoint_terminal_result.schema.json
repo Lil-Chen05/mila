@@ -96,7 +96,7 @@
     },
     {
       "if": {"properties": {"confidence_parse_status": {"const": "out_of_range"}}},
-      "then": {"properties": {"raw_confidence_text": {"type": "string"}, "raw_parsed_confidence": {"type": "integer"}, "normalized_confidence": {"type": "null"}}}
+      "then": {"properties": {"raw_confidence_text": {"type": "string"}, "raw_parsed_confidence": {"type": "integer", "anyOf": [{"maximum": -1}, {"minimum": 101}]}, "normalized_confidence": {"type": "null"}}}
     },
     {
       "if": {"properties": {"confidence_parse_status": {"const": "missing"}}},
