@@ -52,17 +52,23 @@ An initialized shard is bound before its first stream append:
   .writer.guard
   .writer.lock
   .writer-lock-recovery.claim
+  ..writer.lock.<lock-id>.pending
   .lock_history/<claim-id>.claim.json
   .lock_history/<claim-id>.event.json
   .lock_history/<claim-id>.pending-quarantine
   .finalized
 ```
 
-Files appear only when their state requires them. `.writer.lock` and the active
-claim are normally removed when their operation finishes; `.writer.guard` is a
-stable advisory-lock inode; history, recovery journals, and quarantine evidence
-are retained. Validation reports are written to an explicit external path; the
-configured report directory name is `validation_reports`.
+Files appear only when their state requires them. The
+`..writer.lock.<lock-id>.pending` replacement exists only during a pending
+takeover and is reused or resumed idempotently after a crash. A conflicting
+pending replacement may be preserved as
+`.lock_history/<claim-id>.pending-quarantine`, which is retained evidence.
+`.writer.lock` and the active claim are normally removed when their operation
+finishes; `.writer.guard` is a stable advisory-lock inode; history, recovery
+journals, and quarantine evidence are retained. Validation reports are written
+to an explicit external path; the configured report directory name is
+`validation_reports`.
 
 `.shard-provenance.json` immutably binds `study_id`, `model_run_id`, complete
 `model_run_manifest_hash`, and `shard_id`. Mismatched or missing provenance

@@ -192,14 +192,20 @@ A bound active shard may contain:
   .writer.guard
   .writer.lock
   .writer-lock-recovery.claim
+  ..writer.lock.<lock-id>.pending
   .lock_history/<claim-id>.claim.json
   .lock_history/<claim-id>.event.json
+  .lock_history/<claim-id>.pending-quarantine
   .finalized
 ```
 
 Some entries exist only while a lock/takeover is active or after a particular
-recovery. Validation reports are written externally at an explicitly supplied
-path; the configured directory name is `validation_reports`.
+recovery. The `..writer.lock.<lock-id>.pending` replacement exists only during
+a pending takeover and is reused or resumed idempotently after a crash. A
+conflicting pending replacement may be preserved as
+`.lock_history/<claim-id>.pending-quarantine`, which remains retained evidence.
+Validation reports are written externally at an explicitly supplied path; the
+configured directory name is `validation_reports`.
 
 ## Phase 2 blockers and risks
 
