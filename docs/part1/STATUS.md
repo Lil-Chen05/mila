@@ -54,13 +54,15 @@ golden vectors.
 
 ### Storage and recovery
 
-Commits `10d2f95`, `34c4c90`, and `a850ee2` added
+Commits `10d2f95`, `34c4c90`, `a850ee2`, `e6e0dee`, and `1ca5661` added and
+hardened
 `scripts/part1_store.py` plus fixtures/tests. The implementation uses three
-separate append-only streams, per-record flush/fsync, result-before-completion
-ordering, terminal-result authority, reconciliation, exact-byte tail
-quarantine, immutable recovery journals, validation reports, duplicate/
-conflict detection, complete checkpoint-parent validation, and a `.finalized`
-marker that blocks further raw-shard mutation.
+separate append-only streams, per-record flush/fsync, durable directory-entry
+creation, result-before-completion ordering, terminal-result authority,
+reconciliation, exact-byte tail quarantine, immutable recovery journals,
+validation reports, duplicate/conflict detection, complete checkpoint-parent
+and alias-group validation, and a `.finalized` marker that blocks further
+raw-shard mutation.
 
 The public result API requires a matching durable `attempt_started` before it
 can create authoritative result bytes. Malformed middle lines are fatal; only
@@ -69,7 +71,8 @@ its newline is repaired by append, not rewrite.
 
 ### Locking, retry, and resume
 
-Commits `c066bff`, `d15ba85`, and `68926ec` added:
+Commits `c066bff`, `d15ba85`, `68926ec`, `e6e0dee`, `1ca5661`, `260fb44`, and
+`12dd6a9` added and hardened:
 
 - `scripts/part1_failure_policy.py`;
 - `scripts/part1_runtime.py`;
@@ -92,16 +95,31 @@ dead and may resolve unknown scheduler state. Operator recovery requires a
 nonblank reason and records `operator_unlock`.
 
 Retry policy has exactly three attempts and backoffs `[0, 30, 120]`.
-`attempt_failed` authorizes only a subsequent retry. Final/nonretryable
-failures publish a terminal infrastructure result followed by completion;
-retryable attempt-3 interruption remains terminalization-required until that
-publication. Transient CUDA retry requires worker termination and a fresh
-process. Every retry preserves seed and logical identity.
+`attempt_failed` authorizes only a subsequent retry, and
+`attempt_interrupted` is restricted to `interrupted_process`.
+Final/nonretryable failures publish a terminal infrastructure result followed
+by completion; retryable attempt-3 interruption remains
+terminalization-required until that publication. Transient CUDA retry requires
+worker termination and a fresh process. Every retry preserves seed and logical
+identity.
 
 Resume is idempotent at natural and checkpoint granularity. It counts durable
 starts, reconciles orphan/completion anomalies, rejects corrupt provenance or
 hierarchy, skips terminal keys, and never regenerates a successful natural
-chain because a checkpoint is missing.
+chain because a checkpoint is missing. Read-only retry planning derives its
+category and consumed-attempt count only from exactly one retry-authorizing
+closure on the latest persisted attempt; caller values are equality checks,
+and `attempts_consumed` must be a true integer in `[0, 3]`.
+
+The final correction chain also makes the six fixed Phase 1 configuration
+oracles independent of their loaded templates, enforces the fixed structured
+study and requested model contracts, accepts additional resolved effective
+generation fields only when every requested field retains its exact JSON-typed
+value, enforces RFC 3339 timestamps and complete result null/status matrices,
+and requires a runtime lock capability for store mutation by default. The
+fixed tail-entropy oracle is the arithmetic mean over the final
+`max(1, ceil(0.10 * n_reasoning))` recognized reasoning tokens, with `null` for
+zero reasoning tokens; even a self-consistent rehashed 20% manifest is rejected.
 
 ## Manifest hierarchy status
 
@@ -120,16 +138,21 @@ and smoke/production aliasing.
 
 ## Verification evidence
 
-The final independent closure review of `68926ec` found no remaining P0, P1,
-or P2 issue in the Phase 1 runtime scope. Fresh reported evidence was:
+The final independent re-review of `5969080` inspected the complete correction
+chain through `e6e0dee`, `1ca5661`, `260fb44`, `12dd6a9`, and `5969080`. It
+found no remaining Critical, Important, Minor, P0, P1, P2, or P3 Phase 1 code
+finding. Fresh reported evidence was:
 
-- `uv run pytest -q` — **188 passed**;
-- focused takeover/dry-run/POSIX-lock closure slice — **11 passed, 86
+- `uv run pytest -q` — **265 passed**;
+- focused tail/fixed-contract compatibility slice — **12 passed, 168
   deselected**;
-- Python compile checks — exit 0;
-- CLI help and default dry run — exit 0;
-- `git diff --check` — exit 0; and
-- tracked worktree clean on `codex/phase1-infrastructure`.
+- real two-process local POSIX `flock` regression — **1 passed**;
+- Python compile and JSON parsing checks — exit 0;
+- CLI help and default dry run — exit 0, read-only, valid, and
+  non-production;
+- diff/scope/static-import scans — clean; and
+- tracked worktree clean on `codex/phase1-infrastructure` before this
+  documentation refresh.
 
 Coverage includes:
 
@@ -142,9 +165,12 @@ Coverage includes:
   rejection, and finalization;
 - full-precision persistence and token/entropy/A–D alignment;
 - duplicate/conflict and checkpoint-parent rejection;
+- ties-to-even checkpoint placement and cross-record physical alias coherence;
 - writer contention, liveness, operator recovery, every takeover durability
   boundary, and a real two-process local POSIX `flock` regression;
-- retry taxonomy/backoff/fresh-process CUDA policy; and
+- directory-entry durability, retry-evidence/count/category authority,
+  retry taxonomy/backoff/fresh-process CUDA policy, fixed-contract oracles,
+  RFC 3339 timestamps, and complete confidence/null-status matrices; and
 - manifest compatibility, resume, idempotent rerun, and smoke/production path
   separation.
 
@@ -184,8 +210,9 @@ gated on:
    the tracked fixed question/study manifests on a compute node where required;
 2. resolving immutable model/tokenizer revisions, prompt/tag/token conventions,
    and effective generation settings through SmolLM3 compute-node preflight;
-3. confirming stable POSIX `flock` behavior on the selected Mila persistent
-   filesystem;
+3. confirming directory `fsync`, no-overwrite hard-link publication, atomic
+   replacement, and stable POSIX `flock` behavior on the selected Mila
+   persistent filesystem;
 4. confirming the actual Mila `squeue` array selector/output and completed-job
    absence semantics used by the fail-closed liveness probe;
 5. integrating generation only through `LockedShardSession`, complete compatible

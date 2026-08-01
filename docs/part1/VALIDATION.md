@@ -64,35 +64,59 @@ Independent final storage review approved the slice. In particular, public
 terminal append requires a prior durable matching start and creates no result
 bytes when that precondition fails.
 
-### Runtime gate
+### Runtime and final-correction gates
 
 Commits `c066bff`, `d15ba85`, and `68926ec` implemented guarded sessions,
 takeover durability, stale/operator recovery, retry policy, terminalization,
-parent/provenance enforcement, resume, dry run, and operator CLI.
+parent/provenance enforcement, resume, dry run, and operator CLI. Subsequent
+independent reviews drove the bounded correction chain:
 
-The final independent closure review ran:
+- `e6e0dee`: directory-entry durability, terminal interruption policy,
+  recomputed checkpoint placement/aliases, manifest-bound dry run, fixed
+  science/configuration oracles, complete null/status matrices, RFC 3339
+  enforcement, and lock-capability-by-default storage;
+- `1ca5661`: cross-record alias physical coherence, persisted retry-category
+  authority, independent complete six-config oracles, effective-settings
+  compatibility, and confidence boundary enforcement;
+- `260fb44`: exactly one retry-authorizing closure on the latest persisted
+  attempt;
+- `12dd6a9`: strict integer `[0, 3]` caller attempt-count validation; and
+- `5969080`: exact structured 10% tail-entropy oracle and rejection of fully
+  rehashed 20% alternatives.
+
+The final independent re-review ran:
 
 ```text
-uv run pytest -q tests/test_part1_runtime.py -k \
-  'atomic_exclusive_create or pending_replacement_file or \
-   corrupt_pending_replacement or ordinary_post_replacement or \
-   every_takeover_claim_state or finalized_dry_run or \
-   dry_run_rejects_work_or_retry or posix_flock'
-11 passed, 86 deselected
+UV_CACHE_DIR=/private/tmp/mila-uv-cache uv run pytest -q \
+  tests/test_part1_contract.py tests/test_part1_runtime.py \
+  -k 'fixed_tail_entropy_contract or self_consistent_twenty_percent \
+      or manifest_compatibility_rejects_fixed_contract_drift \
+      or fixed_config_oracle' --tb=short
+12 passed, 168 deselected
 
-uv run pytest -q
-188 passed
+UV_CACHE_DIR=/private/tmp/mila-uv-cache uv run pytest -q --tb=short
+265 passed in 36.18s
 
-git diff --check 68926ec^ 68926ec
+UV_CACHE_DIR=/private/tmp/mila-uv-cache uv run pytest -q \
+  tests/test_part1_runtime.py::test_posix_flock_blocks_takeover_in_a_second_process \
+  --tb=short
+1 passed
+
+UV_CACHE_DIR=/private/tmp/mila-uv-cache uv run python \
+  scripts/part1_dry_run.py
+exit 0; is_valid=true; mutation_performed=false;
+would_create_production_manifest=false;
+imports_model_or_data_libraries=false
+
+git diff --check 12dd6a9 5969080
 exit 0
-
-git status --short --branch
-## codex/phase1-infrastructure
 ```
 
-The reviewer approved `68926ec` with no remaining P0, P1, or P2 finding. The
-real two-process local POSIX regression showed that a second process could not
-complete takeover while the first held `.writer.guard`.
+Compile, JSON parsing, scope, result-absence, and static-import scans were also
+clean. The reviewer found no remaining Critical, Important, Minor, P0, P1, P2,
+or P3 Phase 1 code finding. The real two-process local POSIX regression showed
+that a second process could not complete takeover while the first held
+`.writer.guard`. All correction work remained synthetic and login-safe.
 
 ### CLI/static gates
 
@@ -126,19 +150,24 @@ The default dry run returned success, `is_valid=true`, and
 | Validation-report identity | Independent immutable target payload; mutable timestamps/results do not change its ID. |
 | Seeds | `part1-seed-v1` golden values, deterministic first-eight-byte big-endian conversion/mask, range, and model/question/run/version separation. |
 | Schemas | All eight Draft 2020-12 schemas load; required fields, enums, no-extra-property rules, confidence arithmetic, index/fraction relation, and successful/invalid/failure nullability pass negative tests. |
+| Fixed configuration oracle | Every tracked field in all six Phase 1 configs is compared to an independent canonical JSON-typed oracle; only storage roots vary; self-referential template drift and boolean/integer lookalikes fail. |
+| Fixed science/model oracle | Complete structured study and requested model/generation contracts are exact; effective settings retain every requested key/value while allowing additional canonical resolved fields; direct and fully rehashed drift fail. |
+| Tail entropy | Fixed arithmetic mean over the final `max(1,ceil(0.10*n_reasoning))` recognized reasoning tokens, null at zero; historical and structured 20% variants are rejected. |
+| Date-time/null matrices | RFC 3339 annotations are procedurally enforced; infrastructure diagnostics, reasoning-summary states, confidence missing/malformed/parsed/out-of-range boundaries, and natural/checkpoint nullability pass positive/negative tests. |
 | Lifecycle separation | Only terminal records in result streams; exactly eight event types and two scopes; starts consume sequential attempts; event references/transitions checked. |
 | Five commit crash boundaries | Before result append, during result append, after result fsync/before completion, during completion append, and after both fsyncs. |
 | Result authority | Durable result without completion is not retried; recovery evidence and optional completion are idempotent. Completion without result is interruption. |
 | Orphans/terminalization | Orphan starts are interrupted and counted. Nonretryable/final retryable failures require a terminal result; exhausted interruption remains terminalization-required until published. |
-| Raw append/recovery | Per-record fsync; valid bytes never overwritten; only final line repaired; exact-byte quarantine, immutable journals, valid-missing-newline append repair, malformed-middle rejection, and recovery crash matrix. |
+| Raw append/recovery | Per-record fsync; first file and every new directory entry are durably linked; valid bytes never overwritten; only final line repaired; exact-byte quarantine, immutable journals, valid-missing-newline append repair, malformed-middle rejection, and recovery crash matrix. |
 | Scientific persistence | Full-precision finite values; generated-token/entropy and answer-token alignment; four A–D vectors/probability sum/entropy/max checks; selected-token log probabilities absent. |
-| Duplicates/hierarchy | Duplicate/conflicting terminal/event IDs rejected; one complete eligible natural parent with exact ID/seed/provenance/checkpoint membership required. |
+| Duplicates/hierarchy | Duplicate/conflicting terminal/event IDs rejected; one complete eligible natural parent required; ties-to-even placement, actual fraction, IDs, prefix and aliases are recomputed; aliases of one physical prefix must agree across records. |
 | Finalization/reports | Machine-readable stable-target reports; pending tails/recoveries, lifecycle/hierarchy errors, and terminalization block finalization; `.finalized` blocks mutation. |
-| Exclusive writer | Second owner rejection, guarded mutation/report/finalize/close/takeover, displaced-writer refusal, and local two-process POSIX `flock` regression. |
+| Exclusive writer | Store mutation requires a runtime lock capability by default; second owner rejection, guarded mutation/report/finalize/close/takeover, displaced-writer refusal, explicit test-only unsafe opt-in, and local two-process POSIX `flock` regression. |
 | Takeover durability | Every claim/replacement/event/cleanup crash boundary, partial event, exact pending reuse, conflicting-pending quarantine with operator reason, one-event idempotence, and active-claim-last cleanup. |
 | Liveness | Any LIVE refuses; conclusive SLURM DEAD and same-host PID DEAD rules; remote/ambiguous/error/timeout/missing-command refusal; age never used. |
 | Operator recovery | Nonblank reason required; prior owner archived; `operator_unlock` durable; `--finish-pending` completes a durable claim. |
-| Retry policy | Exact category lists, attempts 1–3, backoffs `[0,30,120]`, same identity/seed, nonretryable current-attempt terminalization, and fresh-process CUDA guard. |
+| Retry policy | Exact category lists, attempts 1–3, backoffs `[0,30,120]`, same identity/seed, `attempt_interrupted` only for interrupted process, nonretryable current-attempt terminalization, and fresh-process CUDA guard. |
+| Retry evidence/input | Operative policy derives from exactly one retry-authorizing closure on the latest persisted attempt; caller category/count are equality checks only; count is a true integer `[0,3]`; pristine/orphan/ambiguous/completed/terminal/exhausted/locked/pending/finalized cases fail closed. |
 | Resume/idempotence | Natural/checkpoint granularity, completed skip, parent eligibility, orphan reconciliation once, same full resubmission, manifest/hash/seed mismatch rejection, finalized-work refusal. |
 | Path separation | Smoke/production roots are separate and narrowly ignored; ephemeral and aliased roots fail closed; historical tracked outputs are unaffected. |
 
@@ -168,7 +197,7 @@ warning until reconciliation; it never authorizes retry.
 | MMLU revision/selection | CPU compute job | Immutable revision, streaming + bounded take, exactly five ordered 100-question blocks, no replacement, indices 0–499, seed 42, stable source-row identities and hashes. |
 | Question/study manifests | Compute output + login-safe validator | Tracked outside ignored data, exact science, recomputed IDs/hashes, and no mutable/unresolved source facts. |
 | SmolLM3 preflight | Single-GPU compute job | Immutable model/tokenizer revisions, bf16/eval/batch-one, tags/tokens, prompt, inducer, A–D convention, answer-step location, environment, and requested/effective settings. |
-| Mila lock operation | Selected persistent filesystem | Confirm two-process POSIX `flock` exclusion on the actual target filesystem. |
+| Mila filesystem operation | Selected persistent filesystem | Confirm directory `fsync`, no-overwrite hard-link publication, atomic replacement, and two-process POSIX `flock` exclusion on the actual target filesystem. |
 | Mila scheduler liveness | Mila shell/compute context | Confirm `squeue --jobs=<job>[_<array>] --noheader --format=%i`, exact live output, completed/absent output, permissions, return codes, and timeout behavior before automatic takeover. |
 | Runtime integration | Pure mocks + bounded smoke | All writes through `LockedShardSession`; complete manifests/WorkSpec hashes; policy-complete start/failure/result/completion events; same-seed retry; fresh process after transient CUDA. |
 | Natural generation | Authorized bounded GPU smoke | Ten configured stochastic run identities when the smoke scope calls for them, no extra greedy run, fixed settings, raw pre-warper float32 entropy, exact token alignment, abnormal-output retention. |

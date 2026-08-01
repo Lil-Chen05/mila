@@ -201,6 +201,14 @@ probe the unique prefix once, but it must emit all eleven requested identities.
 Each aliased record carries a shared-probe ID and explicit alias metadata.
 Aliases are not independent transitions in switching or stabilization.
 
+Phase 1 publication and reconstructed indexing recompute `k_keep` with Python
+ties-to-even semantics, recompute `actual_fraction`, verify the requested
+checkpoint ID at its parent index, derive the canonical shared-probe ID, and
+derive alias owner/members and `is_alias` from all eleven parent identities.
+Records for one natural parent and `k_keep` must also agree on `prefix_hash`,
+inducer version/text, and shared-probe ID; aliased logical rows cannot describe
+different physical probes.
+
 Any successfully executed natural chain remains checkpoint-eligible, including
 chains that are capped, missing a close, missing a natural answer or confidence,
 short, zero-reasoning, or otherwise malformed at the model-output level. Only a
@@ -252,7 +260,9 @@ and a fresh process. All retries preserve logical identity and seed.
 Never silently clamp confidence. Preserve the raw confidence text, raw parsed
 integer, and normalized value only when the integer is valid in `[0,100]`. For
 example, `250` yields `confidence_parse_status = out_of_range` and normalized
-confidence null.
+confidence null. `out_of_range` is true only for an integer `<= -1` or `>= 101`;
+integers 0 through 100 must not be mislabeled. `missing` nulls all confidence
+fields. `malformed` may preserve raw text but nulls parsed/normalized values.
 
 ECE is used only for probability-like values, with these calibration pairs:
 
@@ -432,6 +442,22 @@ templates and validators, not concrete immutable Phase 2 revisions or
 manifests. Dataset/model/tokenizer revisions remain unresolved until their
 compute-node work.
 
+All six templates are compared against a complete executable oracle that is
+independent of the files being checked and uses canonical JSON-typed equality,
+so boolean/integer lookalikes do not pass. Only configured smoke and production
+root values are variable. Manifest compatibility separately requires the exact
+structured model-independent study contract and exact requested model
+repository, tokenizer repository, base seed, seed version, natural settings,
+and checkpoint settings. Effective generation objects must contain every
+requested key with its exact JSON-typed value; additional serializable resolved
+fields from preflight are allowed.
+
+The fixed study entropy contract explicitly represents tail reasoning entropy
+as the arithmetic mean over the final
+`max(1, ceil(0.10 * n_reasoning))` recognized reasoning tokens, null when
+`n_reasoning = 0`. The structured oracle rejects a 20% alternative even when
+study/model IDs and complete hashes are self-consistently recomputed.
+
 ### Canonical serialization and identity
 
 `part1-canonical-json-v1` emits UTF-8 JSON inside a
@@ -474,6 +500,9 @@ The event taxonomy is exactly:
 - shard scope: `stale_lock_recovered`, `trailing_line_recovered`, and
   `operator_unlock`.
 
+Audit-event and validation-report date-time fields are validated as real
+timezone-bearing RFC 3339 timestamps, not treated as annotation-only strings.
+
 `attempt_started` consumes its number. Starts are sequential. `attempt_failed`
 exists only when policy authorizes another retry; nonretryable current-attempt
 and retryable attempt-3 exhaustion are terminalized by durable terminal result
@@ -483,12 +512,28 @@ published. An authoritative result without completion receives recovery
 evidence and may receive the missing completion. Completion without result and
 an orphaned start are interruptions and still consume the attempt.
 
+`attempt_interrupted` is limited to category `interrupted_process`; a terminal
+category cannot be represented as an audit-only interruption. A dry-run retry
+is eligible only when the latest persisted started attempt has exactly one
+coherent `attempt_failed` or `attempt_interrupted` closure whose policy is
+retryable/retry. The persisted category and maximum started attempt number are
+authoritative. Caller `category` and `attempts_consumed` are equality checks
+only; the count must have exact integer type (booleans excluded) and lie in
+`[0,3]`. Pristine, orphaned-latest, ambiguous, completed, terminal, exhausted,
+locked, takeover-pending, and finalized states are ineligible.
+
 ### Crash consistency, recovery, and finalization
 
 A successful or terminal outcome is committed in this order: append the result,
 flush and fsync it, append `attempt_completed`, then flush and fsync the event.
 The result is authoritative at the intervening crash boundary. Existing valid
 stream bytes and logical records are never overwritten.
+
+When an append first creates a stream, its parent directory is fsynced after the
+file fsync. Validation reports and `.finalized` use the same durable-create
+primitive, and each newly created shard-root/history/quarantine/journal
+directory component is made durable by fsyncing its parent. This closes both
+content and directory-entry crash boundaries.
 
 Only a final physical line may be repaired. Invalid tail bytes are preserved
 byte-for-byte under `quarantine/`; immutable evidence is first fsynced under
@@ -506,6 +551,10 @@ SLURM job/array IDs, and acquisition time. One stable `.writer.guard` POSIX
 `flock` spans ownership validation and the entire mutation, close, or takeover;
 a displaced writer cannot mutate or remove its replacement's lock.
 
+Mutating `Part1ShardStore` without a runtime lock capability fails by default.
+Only synthetic tests may explicitly construct it with
+`unsafe_for_tests=True`; Phase 2 generation must never use that escape hatch.
+
 Takeover creates a durable active `.writer-lock-recovery.claim`, immutable
 claim/event records under `.lock_history/`, and atomically publishes complete
 control files. Pending replacement bytes are reused idempotently; conflicting
@@ -520,10 +569,10 @@ scheduler state is unknown. A non-SLURM owner requires same-host PID DEAD.
 Every ambiguous or failed probe refuses. Operator takeover always requires a
 nonblank reason and writes `operator_unlock`.
 
-The local two-process POSIX lock regression passed. Actual `flock` behavior on
-the selected Mila persistent filesystem and the exact Mila `squeue` array-job
-behavior remain Phase 2 operational readiness checks, not completed cluster
-validation.
+The local two-process POSIX lock regression passed. Actual `flock`, directory
+fsync, no-overwrite hard-link, and atomic-replacement behavior on the selected
+Mila persistent filesystem, plus exact Mila `squeue` array-job behavior, remain
+Phase 2 operational readiness checks, not completed cluster validation.
 
 ### Resume and shard hierarchy
 

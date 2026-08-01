@@ -38,7 +38,11 @@ The six `1.0.0` templates are `study_protocol.json`,
 `model_run_execution.json`, `dataset_materialization.json`, `storage.json`,
 `retries.json`, and `analysis.json`. Validators reject drift from fixed science,
 retry policy, production prohibition, root separation, and persistent-root
-safety.
+safety. Every tracked field in all six templates is compared with an
+independent executable fixed-value oracle using canonical JSON-typed equality;
+only the configured smoke and production storage roots are intentionally
+variable. Loading a modified template cannot redefine the oracle, and JSON
+type lookalikes such as integer `1` for boolean `true` are rejected.
 
 Common rules:
 
@@ -188,6 +192,13 @@ answer-validity/status/calibration/bootstrap contracts, exact primary registry,
 within-question and switching/stabilization contracts, repetition policy,
 compatible raw schema versions, and analysis-contract version.
 
+These fields are checked against an independent structured fixed-study oracle,
+not only against recomputed IDs and hashes. In particular, tail reasoning
+entropy is exactly the arithmetic mean over the final recognized reasoning
+tokens with window size `max(1,ceil(0.10*n_reasoning))`, and it is `null` when
+`n_reasoning` is zero. A direct or fully rehashed internally consistent 20%
+alternative is incompatible.
+
 ### Model-run manifest
 
 One operational immutable manifest represents one exact model revision and
@@ -201,6 +212,15 @@ Production requires a final 40-hex Git commit and null smoke provenance. Smoke
 requires null final-production commit and non-null smoke provenance. Output
 paths and mutable progress stay outside the immutable manifest. The schema is
 implemented, but no production instance exists.
+
+Compatibility also checks an independent fixed requested-model oracle:
+`HuggingFaceTB/SmolLM3-3B` for model and tokenizer, base seed 42,
+`part1-seed-v1`, ten requested stochastic natural runs with
+`do_sample=true`, temperature 0.6, top-p 0.95, top-k 50, and at most 8192 new
+tokens, plus the fixed greedy checkpoint settings. Effective natural and
+checkpoint settings must contain every corresponding requested key with the
+exact JSON-typed requested value. They may additionally contain canonical,
+JSON-serializable resolved fields discovered by Phase 2 preflight.
 
 ## Normalized terminal result schemas
 
@@ -245,13 +265,18 @@ Enums are exact:
 | terminal infrastructure failure | logical identity, seed, attempt, `stop_reason=error`, failure reference/details, malformed/missing statuses, `checkpoint_eligible=false` | prompt/output/parsing/correctness/entropy/checkpoint IDs |
 | `missing_close` | executed diagnostic boundaries/reasoning measures | terminal block/span, natural answer/correctness, normalized confidence; parsed answer/confidence forbidden |
 | `no_reasoning` | complete output and `reasoning_token_count=0` | mean and tail reasoning entropy |
+| complete with recognized reasoning | `reasoning_token_count >= 1`, mean reasoning entropy, and exact 10% tail reasoning entropy | none of those summaries |
 | parsed answer | A–D natural answer, correctness, terminal block/span | none of these |
 | nonparsed answer | diagnostic fields/status | natural answer and correctness |
 | parsed confidence | raw text, integer 0–100, exact integer/100 normalized value | none of these |
-| missing/malformed/out-of-range confidence | available raw diagnostics/status; out-of-range integer is preserved | normalized confidence |
+| missing confidence | explicit missing status | raw text, parsed integer, normalized confidence |
+| malformed confidence | raw diagnostic text may remain | parsed integer and normalized confidence |
+| out-of-range confidence | raw text and a true integer `<= -1` or `>= 101` | normalized confidence |
 
 Generated token IDs and per-token entropy must have equal lengths, and
 `generated_token_count` must match them. Scientific floats remain unrounded.
+Terminal infrastructure failure additionally nulls all executed-output
+diagnostics, not just the parsed scientific products.
 
 ### Checkpoint terminal result
 
@@ -290,7 +315,9 @@ Enums are exact:
 | terminal infrastructure failure | identity/placement/alias, seed/attempt, failure reference/details; invalid/missing/unsupported/unavailable statuses | output, parse products, correctness, answer-step fields, logits/probabilities/entropies/agreement |
 | answer token not located | diagnostic output/status | token index/ID/convention/A–D IDs and all computed measurements |
 | entropy not computed | explicit entropy status | logits, probabilities, both entropies, maximum probability |
-| confidence out of range | raw text and parsed integer | normalized confidence |
+| confidence missing | explicit missing status | raw text, parsed integer, normalized confidence |
+| confidence malformed | raw diagnostic text may remain | parsed integer and normalized confidence |
+| confidence out of range | raw text and a true integer `<= -1` or `>= 101` | normalized confidence |
 
 When computed, A–D token/logit/probability arrays contain exactly four aligned
 values; probabilities sum to one; maximum and entropy recompute; the answer
@@ -299,7 +326,12 @@ is valid data.
 
 Checkpoint publication additionally requires exactly one complete eligible
 natural parent and matching parent record ID, seed, manifest provenance,
-question/sample/subject/run fields, and checkpoint membership.
+question/sample/subject/run fields, and checkpoint membership. The store
+recomputes the checkpoint record ID, ties-to-even clamped `k_keep`, actual
+fraction, prefix hash, shared-probe identity, alias owner/member set, and
+`is_alias` from that parent. Across records sharing a natural parent and
+`k_keep`, `prefix_hash`, inducer version/text, and `shared_probe_id` must be
+identical.
 
 ## Audit event schema and lifecycle
 
@@ -321,11 +353,15 @@ record reference; starts/failures/interruptions forbid one.
 
 `attempt_started` at sequence zero consumes its attempt number. Starts are
 sequential. `attempt_failed` is valid only for a retry-authorizing failure.
+`attempt_interrupted` is valid only for the `interrupted_process` category.
 Final/nonretryable work is represented by result then `attempt_completed`.
 `terminal_result_recovered` records an authoritative result whose completion
 was missing; an optional matching completion can follow. Completion without
 result and an orphaned start are classified as interruptions and count toward
 the limit.
+
+Audit-event and validation-report date-time fields are procedurally checked as
+RFC 3339 in addition to their JSON Schema `date-time` annotations.
 
 ## Validation reports, append-only layout, and evolution
 
@@ -336,9 +372,14 @@ cover JSON syntax, schema validity, duplicate/conflict detection, malformed
 middle, trailing/pending recovery, array alignment, terminal/event consistency,
 hierarchy/terminalization, and outcome nullability.
 
-Active raw streams are append-only and per-record fsynced. Recovery may modify
-only an incomplete final physical line after exact-byte quarantine and durable
-journal evidence. `.finalized` blocks further raw-shard mutation. Renaming fields,
-changing status meaning/nullability, identity payloads, metric formulas, parser
-validity, or checkpoint semantics requires a new incompatible version; prior
-manifests/results are preserved.
+Active raw streams are append-only and per-record fsynced. First file creation
+also fsyncs its containing directory, and creation of each missing directory
+component fsyncs the parent directory entry. Validation reports, recovery
+evidence, and `.finalized` use the same durable-create discipline. Recovery may
+modify only an incomplete final physical line after exact-byte quarantine and
+durable journal evidence. Mutating `Part1ShardStore` requires a runtime lock
+capability by default; only synthetic tests may opt into
+`unsafe_for_tests=True`. `.finalized` blocks further raw-shard mutation.
+Renaming fields, changing status meaning/nullability, identity payloads, metric
+formulas, parser validity, or checkpoint semantics requires a new incompatible
+version; prior manifests/results are preserved.

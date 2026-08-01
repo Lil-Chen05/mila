@@ -70,6 +70,12 @@ The implementation was delivered in the scoped commit sequence:
 - storage: `10d2f95`, corrected by `34c4c90` and `a850ee2`; and
 - runtime: `c066bff`, corrected by `d15ba85` and `68926ec`.
 
+Final independent review corrections are `e6e0dee`, `1ca5661`, `260fb44`,
+`12dd6a9`, and `5969080`. They close directory-entry durability, lifecycle,
+checkpoint/alias integrity, fixed-contract/null-matrix/timestamp enforcement,
+locked-store defaults, retry evidence/count validation, and the exact 10% tail
+entropy oracle.
+
 ### Locked engineering decisions
 
 - Canonical bytes use `part1-canonical-json-v1`; scientific identity uses
@@ -79,6 +85,9 @@ The implementation was delivered in the scoped commit sequence:
   separate in `audit_events.jsonl`.
 - A terminal result is fsynced before `attempt_completed` is appended and
   fsynced. The result is authoritative if the completion event is absent.
+- First stream/report/finalization files and every newly created root/directory
+  component are directory-fsynced after publication so their names are durable,
+  not only their file contents.
 - Every attempt is consumed by its durable `attempt_started`. Orphans and
   completion-without-result states are classified on resume.
 - Only an incomplete final line may be repaired. Exact invalid bytes are
@@ -93,6 +102,19 @@ The implementation was delivered in the scoped commit sequence:
   identity and seed, with backoffs `[0, 30, 120]`; transient CUDA retry requires
   a fresh process. Final failures are terminalized by result then completion,
   not by a final `attempt_failed` event.
+- `attempt_interrupted` is restricted to `interrupted_process`. Executable
+  retry eligibility comes from exactly one coherent retry-authorizing closure
+  on the latest persisted attempt; caller category/count only check equality,
+  and `attempts_consumed` must be a real integer in `[0,3]`.
+- Checkpoint publication/indexing recompute ties-to-even placement, actual
+  fraction, checkpoint/shared-probe identities, alias ownership/membership, and
+  cross-record physical-probe coherence from the persisted natural parent.
+- All fixed templates are checked against an independent complete oracle
+  (storage roots are the only variable fields). Study science and requested
+  model settings are exact; effective settings require every requested key and
+  exact value while permitting additional resolved serializable fields.
+- Store mutation requires a runtime lock capability by default; only synthetic
+  tests may explicitly opt into `unsafe_for_tests=True`.
 - Resume is independent at natural-run and checkpoint granularity. A completed
   natural result is never regenerated because checkpoint work is absent.
 
@@ -101,11 +123,13 @@ state transitions are in [RUNBOOK.md](RUNBOOK.md).
 
 ### Verified completion gate
 
-The Prompt 1 baseline had 21 passing login-safe tests. Phase 1 concluded with
-188 passing login-safe synthetic tests, including the five terminal-append
-crash boundaries, storage-recovery and takeover boundary matrices, and a real
-two-process local POSIX `flock` regression. No real SLURM command, CUDA runtime,
-model, tokenizer, dataset, production manifest, or experiment output was used.
+The Prompt 1 baseline had 21 passing login-safe tests. Phase 1 concluded at
+`5969080` with 265 passing login-safe synthetic tests, including the five
+terminal-append crash boundaries, storage-recovery and takeover boundary
+matrices, and a real two-process local POSIX `flock` regression. Independent
+final re-review found no remaining Critical, Important, or Minor Phase 1 code
+finding. No real SLURM command, CUDA runtime, model, tokenizer, dataset,
+production manifest, or experiment output was used.
 
 The repository-level implementation gate is satisfied, subject to the
 operational Phase 2 checks below. Phase 1 does not claim Mila filesystem or
@@ -139,6 +163,8 @@ Phase 2 must:
   convention, and effective generation settings require compute-node preflight.
 - The stable guard passed a local two-process test, but POSIX `flock` behavior
   on the selected persistent Mila filesystem must be confirmed.
+- Directory fsync, no-overwrite hard links, and atomic replacement must also be
+  exercised on that exact persistent Mila filesystem before operational use.
 - The fail-closed `squeue` probe and array selector are synthetically tested;
   Mila's actual array-job output/absence behavior must be confirmed.
 - Generation integration must never bypass `LockedShardSession` or construct

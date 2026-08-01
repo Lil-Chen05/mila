@@ -77,8 +77,9 @@ stream append or recovery.
 uv run pytest -q
 ```
 
-This is the primary repository gate. Phase 1 concluded with 188 passing tests.
-The suite is synthetic and imports no model/dataset execution path.
+This is the primary repository gate. The final independently re-reviewed Phase
+1 head, `5969080`, passed all 265 tests. The suite is synthetic and imports no
+model/dataset execution path.
 
 ### Read-only dry run
 
@@ -112,6 +113,17 @@ manifests must be supplied together. `--work-specs` is a JSON array of complete
 `WorkSpec` objects; `--retry-request` is one JSON object with `work`,
 `category`, and `attempts_consumed`. Work/retry inputs require both compatible
 manifests and a manifest-bound `--shard-root`.
+
+For `--retry-request`, `attempts_consumed` must be a JSON integer from 0 through
+3; booleans, floats, strings, negative values, and values above 3 are rejected
+without conversion. The caller's category and attempt count are assertions,
+not authorities. The report derives the operative category and count from the
+maximum persisted `attempt_started` and exactly one coherent retry-authorizing
+`attempt_failed` or `attempt_interrupted` closure on that latest attempt. A
+pristine key, orphaned latest attempt, ambiguous closure, completed or terminal
+key, exhausted state, active lock, pending takeover, or finalized shard is not
+retry eligible. Requested and persisted values, latest attempt, closure count,
+and blockers remain visible in the machine-readable report.
 
 Example read-only inspection of later synthetic/smoke artifacts:
 
@@ -162,10 +174,11 @@ by hand.
 
 ## Writer ownership and stale recovery
 
-Production integration must acquire `LockedShardSession`; direct unguarded
-store use is for internal read/testing only. Lock metadata contains lock ID,
-study/model-run/shard, hostname, PID, optional SLURM job/array task IDs, and RFC
-3339 acquisition time.
+Production integration must acquire `LockedShardSession`; mutating
+`Part1ShardStore` requires a runtime lock capability by default. Only synthetic
+tests may explicitly opt into `unsafe_for_tests=True`. Lock metadata contains
+lock ID, study/model-run/shard, hostname, PID, optional SLURM job/array task
+IDs, and RFC 3339 acquisition time.
 
 The stable `.writer.guard` uses reentrant process/thread serialization plus
 POSIX `flock`. It spans ownership validation and the complete append, tail
@@ -195,6 +208,13 @@ append, event-before-cleanup, and pending-replacement states are resumable.
 Conflicting pending bytes fail automatic recovery; a reasoned operator path
 quarantines them before continuing. The active claim is removed last.
 
+First creation of a stream/control/report/finalization file fsyncs both the
+file and its containing directory. Creating a missing shard-root or history
+directory component also fsyncs the parent directory entry. Before Phase 2
+relies on this protocol, exercise directory `fsync`, no-overwrite hard-link
+publication, atomic replacement, and two-process POSIX `flock` on the selected
+Mila persistent filesystem.
+
 ## Result, event, retry, and resume ordering
 
 For every successful or terminal outcome:
@@ -221,14 +241,20 @@ and corrupt immutable manifest. Backoffs are `[0, 30, 120]` indexed by attempt.
 nonretryable current attempt or exhausted third attempt writes the terminal
 infrastructure-failure result followed by completion. An exhausted interruption
 is `terminalization_required` until that result is durable. CUDA retry never
-continues in the failed process.
+continues in the failed process. `attempt_interrupted` is reserved for the
+`interrupted_process` category; terminal categories cannot be represented by a
+fabricated interruption and instead use result-first terminalization.
 
 Before work, resume finishes durable recovery evidence as appropriate,
 reconciles orphaned lifecycle states, validates shard/manifests/hierarchy,
 counts starts, and classifies each complete `WorkSpec`. It skips every terminal
 key. Checkpoints require a complete eligible parent with exact ID, seed,
 provenance, sample/subject, and checkpoint membership. A completed natural
-chain is independent of later checkpoint absence/failure.
+chain is independent of later checkpoint absence/failure. Checkpoint preflight
+recomputes ties-to-even placement, actual fraction, prefix/shared-probe
+identity, alias membership/ownership, and alias flag from the natural parent;
+all aliases of one physical prefix must agree on prefix hash, inducer
+version/text, and shared-probe ID.
 
 ## Trailing-line recovery and validation
 
@@ -249,6 +275,12 @@ scientific-array misalignment, lifecycle/hierarchy errors, or required
 terminalization block finalization. A valid result missing only completion is
 authoritative but remains a validation warning until reconciled; finalization
 requires full terminal/event consistency.
+
+Validation also enforces RFC 3339 event/report timestamps, the exact fixed
+configuration/study/requested-model contracts, required requested values in
+effective generation settings, confidence boundary/null matrices, and the
+structured final-10%-of-reasoning tail-entropy rule. Recomputing IDs and hashes
+does not make drifted science compatible.
 
 ## Phase 2/3 lifecycle, still deferred
 
