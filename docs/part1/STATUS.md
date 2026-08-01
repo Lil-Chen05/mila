@@ -193,9 +193,11 @@ A bound active shard may contain:
   .writer.lock
   .writer-lock-recovery.claim
   ..writer.lock.<lock-id>.pending
+  .<target-name>.<uuid>.tmp
   .lock_history/<claim-id>.claim.json
   .lock_history/<claim-id>.event.json
   .lock_history/<claim-id>.pending-quarantine
+  .lock_history/.<target-name>.<uuid>.tmp
   .finalized
 ```
 
@@ -204,6 +206,14 @@ recovery. The `..writer.lock.<lock-id>.pending` replacement exists only during
 a pending takeover and is reused or resumed idempotently after a crash. A
 conflicting pending replacement may be preserved as
 `.lock_history/<claim-id>.pending-quarantine`, which remains retained evidence.
+Runtime exclusive publication may also leave a complete, uniquely named
+`.<target-name>.<uuid>.tmp` in the shard root or `.lock_history/` after a
+failure or crash following temporary-file fsync but before or around
+no-overwrite hard-link publication. Such a temp is non-authoritative orphan
+evidence: the authoritative target is absent or complete, never partial. It is
+safe to leave because the state machines ignore it, and it must not be removed
+manually while any writer or takeover may be active. Cleanup is a deliberate
+post-liveness/operator-evidence step, not ordinary recovery.
 Validation reports are written externally at an explicitly supplied path; the
 configured directory name is `validation_reports`.
 

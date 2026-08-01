@@ -53,9 +53,11 @@ An initialized shard is bound before its first stream append:
   .writer.lock
   .writer-lock-recovery.claim
   ..writer.lock.<lock-id>.pending
+  .<target-name>.<uuid>.tmp
   .lock_history/<claim-id>.claim.json
   .lock_history/<claim-id>.event.json
   .lock_history/<claim-id>.pending-quarantine
+  .lock_history/.<target-name>.<uuid>.tmp
   .finalized
 ```
 
@@ -64,6 +66,14 @@ Files appear only when their state requires them. The
 takeover and is reused or resumed idempotently after a crash. A conflicting
 pending replacement may be preserved as
 `.lock_history/<claim-id>.pending-quarantine`, which is retained evidence.
+Runtime exclusive publication may also leave a complete, uniquely named
+`.<target-name>.<uuid>.tmp` in the shard root or `.lock_history/` after a
+failure or crash following temporary-file fsync but before or around
+no-overwrite hard-link publication. Such a temp is non-authoritative orphan
+evidence: the authoritative target is absent or complete, never partial. Do not
+remove it manually while any writer or takeover may be active. It is safe to
+leave because the state machines ignore it; cleanup is a deliberate
+post-liveness/operator-evidence step, not ordinary recovery.
 `.writer.lock` and the active claim are normally removed when their operation
 finishes; `.writer.guard` is a stable advisory-lock inode; history, recovery
 journals, and quarantine evidence are retained. Validation reports are written
@@ -209,8 +219,9 @@ real Slurm. Confirm this behavior on Mila before relying on automatic takeover.
 
 Takeover durably creates a unique claim and history record before replacement.
 Control files are published complete using fsynced same-directory temporary
-files and no-overwrite hard links. Pre/post-replacement crashes, partial event
-append, event-before-cleanup, and pending-replacement states are resumable.
+files and no-overwrite hard links; the authoritative target is therefore absent
+or complete, never partial. Pre/post-replacement crashes, partial event append,
+event-before-cleanup, and pending-replacement states are resumable.
 Conflicting pending bytes fail automatic recovery; a reasoned operator path
 quarantines them before continuing. The active claim is removed last.
 
