@@ -215,12 +215,14 @@ implemented, but no production instance exists.
 
 Compatibility also checks an independent fixed requested-model oracle:
 `HuggingFaceTB/SmolLM3-3B` for model and tokenizer, base seed 42,
-`part1-seed-v1`, ten requested stochastic natural runs with
-`do_sample=true`, temperature 0.6, top-p 0.95, top-k 50, and at most 8192 new
-tokens, plus the fixed greedy checkpoint settings. Effective natural and
-checkpoint settings must contain every corresponding requested key with the
-exact JSON-typed requested value. They may additionally contain canonical,
-JSON-serializable resolved fields discovered by Phase 2 preflight.
+`part1-seed-v1`, requested natural generation values of `do_sample=true`,
+temperature 0.6, top-p 0.95, top-k 50, and at most 8192 new tokens, plus the
+fixed requested greedy checkpoint settings. The separate fixed
+`study_protocol` configuration enforces `natural_runs_per_question=10` and run
+IDs 0 through 9. Effective natural and checkpoint settings must contain every
+corresponding requested key with the exact JSON-typed requested value. They may
+additionally contain canonical, JSON-serializable resolved fields discovered
+by Phase 2 preflight.
 
 ## Normalized terminal result schemas
 

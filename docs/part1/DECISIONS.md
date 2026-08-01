@@ -393,12 +393,13 @@ records `model_run_id`, study identity/hash, question-manifest hash, model
 repository and immutable revision, tokenizer immutable revision, adapter,
 prompt, parser and inducer versions, requested/effective generation settings,
 model-specific token IDs/sequences, environment versions, final production Git
-commit, and output locations.
+commit, and production/smoke provenance. Output paths/locations and mutable
+progress remain outside the immutable manifest.
 
-It is generated only in Phase 3 after final generation-path tests pass, final
-tracked production artifacts are committed, and the tracked worktree is clean
-except for intentional local exclusions. It lives under an explicitly ignored
-persistent directory such as
+The manifest file itself is generated only in Phase 3 after final
+generation-path tests pass, final tracked production artifacts are committed,
+and the tracked worktree is clean except for intentional local exclusions. It
+lives under an explicitly ignored operational result root such as
 `results/part1/<model_run_id>/model_run_manifest.json`; creating it must not
 dirty the tracked worktree.
 
