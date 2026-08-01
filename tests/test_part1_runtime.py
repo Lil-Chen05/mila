@@ -812,6 +812,100 @@ def _compatible_manifests() -> tuple[dict, dict]:
     return study, model
 
 
+def _one_failed_manifest_bound_shard(tmp_path: Path) -> tuple[dict, dict, Path, object]:
+    from part1_contract import attempt_id, natural_record_id
+    from part1_failure_policy import classify_failure
+    from part1_runtime import LockMetadata, LockedShardSession, WorkSpec
+
+    study, model = _compatible_manifests()
+    session = LockedShardSession.acquire(
+        tmp_path / "shard",
+        owner=LockMetadata.new(
+            study_id=study["study_id"],
+            model_run_id=model["model_run_id"],
+            shard_id=SHARD_ID,
+            hostname="node",
+            pid=101,
+            slurm_job_id=None,
+            slurm_array_task_id=None,
+            acquired_at="2026-08-01T00:00:00Z",
+        ),
+        model_run_manifest_hash=model["model_run_manifest_hash"],
+    )
+    record = natural_result()
+    record.update(
+        study_id=study["study_id"],
+        model_run_id=model["model_run_id"],
+        model_run_manifest_hash=model["model_run_manifest_hash"],
+        question_manifest_hash=study["question_manifest_hash"],
+    )
+    record["raw_record_id"] = natural_record_id(
+        record["study_id"], record["model_run_id"], record["question_id"], record["run_id"]
+    )
+    record["terminal_attempt_id"] = attempt_id(
+        record["study_id"],
+        record["model_run_id"],
+        record["question_id"],
+        record["run_id"],
+        1,
+    )
+    session.store.append_audit_event(attempt_event(record, "attempt_started", 0))
+    failure = attempt_event(record, "attempt_failed", 1)
+    policy = classify_failure("temporary_filesystem_failure", 1)
+    failure.update(
+        outcome_category="temporary_filesystem_failure",
+        retry_classification=policy.classification,
+        retry_decision=policy.retry_decision,
+        backoff_seconds=policy.backoff_seconds,
+    )
+    session.store.append_audit_event(failure)
+    session.close()
+    work = WorkSpec.natural(
+        record["study_id"],
+        record["model_run_id"],
+        record["model_run_manifest_hash"],
+        record["question_id"],
+        record["run_id"],
+        seed=record["generation_seed"],
+    )
+    return study, model, session.store.root, work
+
+
+def _run_retry_cli(
+    tmp_path: Path,
+    study: dict,
+    model: dict,
+    shard_root: Path,
+    request: dict,
+) -> subprocess.CompletedProcess[str]:
+    study_path = tmp_path / "retry-study.json"
+    model_path = tmp_path / "retry-model.json"
+    request_path = tmp_path / "retry-request.json"
+    study_path.write_text(json.dumps(study), encoding="utf-8")
+    model_path.write_text(json.dumps(model), encoding="utf-8")
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    return subprocess.run(
+        [
+            sys.executable,
+            "scripts/part1_dry_run.py",
+            "--persistent-root",
+            str(tmp_path / "smoke"),
+            "--study-manifest",
+            str(study_path),
+            "--model-run-manifest",
+            str(model_path),
+            "--shard-root",
+            str(shard_root),
+            "--retry-request",
+            str(request_path),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def test_manifest_compatibility_rejects_hash_schema_and_hierarchy_mismatches() -> None:
     from part1_runtime import CompatibilityError, validate_manifest_compatibility
 
@@ -2367,6 +2461,84 @@ def test_retry_requires_latest_attempt_closure_through_api_and_cli(tmp_path: Pat
             "ineligibility_reasons"
         ]
     assert terminal_code != 0
+
+
+@pytest.mark.parametrize(
+    "invalid_count",
+    [1.9, True, "1", -1, 4],
+    ids=("float", "boolean", "string", "negative", "above-maximum"),
+)
+def test_retry_attempt_count_rejects_noninteger_and_out_of_range_api_and_cli(
+    tmp_path: Path, invalid_count: object
+) -> None:
+    from part1_runtime import run_dry_run
+
+    study, model, shard_root, work = _one_failed_manifest_bound_shard(tmp_path)
+    request = {
+        "work": work.to_dict(),
+        "category": "temporary_filesystem_failure",
+        "attempts_consumed": invalid_count,
+    }
+    with pytest.raises(ValueError, match="attempts_consumed.*integer.*0 through 3"):
+        run_dry_run(
+            persistent_root=tmp_path / "smoke",
+            allow_root_override=True,
+            study_manifest=study,
+            model_run_manifest=model,
+            shard_root=shard_root,
+            retry_request=request,
+        )
+    cli = _run_retry_cli(tmp_path, study, model, shard_root, request)
+    assert cli.returncode == 2
+    payload = json.loads(cli.stdout)
+    assert payload["is_valid"] is False
+    assert payload["error_type"] == "ValueError"
+    assert "attempts_consumed" in payload["error"]
+
+
+def test_retry_attempt_count_preserves_integer_equality_and_mismatch(
+    tmp_path: Path,
+) -> None:
+    from part1_runtime import run_dry_run
+
+    study, model, shard_root, work = _one_failed_manifest_bound_shard(tmp_path)
+
+    def request(count: int) -> dict:
+        return {
+            "work": work.to_dict(),
+            "category": "temporary_filesystem_failure",
+            "attempts_consumed": count,
+        }
+
+    matching = run_dry_run(
+        persistent_root=tmp_path / "smoke",
+        allow_root_override=True,
+        study_manifest=study,
+        model_run_manifest=model,
+        shard_root=shard_root,
+        retry_request=request(1),
+    )
+    assert matching["retry_plan"]["requested_attempts_consumed"] == 1
+    assert type(matching["retry_plan"]["requested_attempts_consumed"]) is int
+    assert matching["retry_plan"]["eligible"] is True
+    matching_cli = _run_retry_cli(tmp_path, study, model, shard_root, request(1))
+    assert matching_cli.returncode == 0
+    assert json.loads(matching_cli.stdout)["retry_plan"]["eligible"] is True
+
+    mismatch = run_dry_run(
+        persistent_root=tmp_path / "smoke",
+        allow_root_override=True,
+        study_manifest=study,
+        model_run_manifest=model,
+        shard_root=shard_root,
+        retry_request=request(2),
+    )
+    assert mismatch["retry_plan"]["requested_attempts_consumed"] == 2
+    assert mismatch["retry_plan"]["eligible"] is False
+    assert "attempt_count_mismatch" in mismatch["retry_plan"]["ineligibility_reasons"]
+    mismatch_cli = _run_retry_cli(tmp_path, study, model, shard_root, request(2))
+    assert mismatch_cli.returncode == 2
+    assert json.loads(mismatch_cli.stdout)["retry_plan"]["eligible"] is False
 
 
 def test_finalized_dry_run_keeps_completed_but_rejects_missing_work(

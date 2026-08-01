@@ -1442,7 +1442,12 @@ def run_dry_run(
             or retry_work.model_run_manifest_hash
             != manifest_report["model_run_manifest_hash"]
         )
-        requested_attempts = int(retry_request["attempts_consumed"])
+        requested_attempts_value = retry_request["attempts_consumed"]
+        if type(requested_attempts_value) is not int or not (
+            0 <= requested_attempts_value <= MAX_TOTAL_ATTEMPTS
+        ):
+            raise ValueError("attempts_consumed must be an integer from 0 through 3")
+        requested_attempts = requested_attempts_value
         persisted_attempt_numbers = (
             sorted(index.attempts_consumed.get(retry_work.key, ()))
             if index is not None and retry_identity_matches
