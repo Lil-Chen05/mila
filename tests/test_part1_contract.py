@@ -14,6 +14,7 @@ from part1_contract import (
     AUDIT_EVENT_TYPES,
     CANONICAL_JSON_VERSION,
     CONFIG_NAMES,
+    FIXED_STUDY_CONTRACT,
     PYTORCH_SEED_MAX,
     SCHEMA_NAMES,
     audit_event_id,
@@ -40,6 +41,15 @@ from part1_contract import (
 HEX_64 = "a" * 64
 HEX_64_B = "b" * 64
 HEX_64_C = "c" * 64
+
+
+def test_fixed_tail_entropy_contract_encodes_exact_final_ten_percent_window() -> None:
+    assert FIXED_STUDY_CONTRACT["entropy_contract"]["tail"] == {
+        "aggregation": "arithmetic_mean",
+        "window_region": "final_recognized_reasoning_tokens",
+        "window_size_formula": "max(1,ceil(0.10*n_reasoning))",
+        "value_when_n_reasoning_is_zero": None,
+    }
 
 
 def question() -> dict:

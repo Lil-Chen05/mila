@@ -138,7 +138,12 @@ FIXED_STUDY_CONTRACT = {
         "version": "entropy-v1",
         "natural": "raw_full_vocabulary_reasoning_token_entropy_nats",
         "checkpoint": "renormalized_ad_answer_entropy_nats",
-        "tail": "last_20_percent_reasoning_tokens",
+        "tail": {
+            "aggregation": "arithmetic_mean",
+            "window_region": "final_recognized_reasoning_tokens",
+            "window_size_formula": "max(1,ceil(0.10*n_reasoning))",
+            "value_when_n_reasoning_is_zero": None,
+        },
     },
     "natural_answer_validity_rule": {
         "version": "post-close-v1",

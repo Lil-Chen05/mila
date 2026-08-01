@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import os
@@ -810,6 +811,40 @@ def _compatible_manifests() -> tuple[dict, dict]:
     model["model_run_id"] = model_run_id(model)
     model["model_run_manifest_hash"] = model_run_manifest_hash(model)
     return study, model
+
+
+@pytest.mark.parametrize("validator_name", ["fixed_contract", "compatibility"])
+def test_self_consistent_twenty_percent_study_contract_is_rejected(
+    validator_name: str,
+) -> None:
+    from part1_contract import (
+        model_run_id,
+        model_run_manifest_hash,
+        study_id,
+        study_manifest_hash,
+        validate_fixed_study_contract,
+    )
+    from part1_runtime import CompatibilityError, validate_manifest_compatibility
+
+    study, model = _compatible_manifests()
+    study = copy.deepcopy(study)
+    model = copy.deepcopy(model)
+    study["entropy_contract"]["tail"] = "last_20_percent_reasoning_tokens"
+    study["study_id"] = study_id(study)
+    study["study_manifest_hash"] = study_manifest_hash(study)
+    model.update(
+        study_id=study["study_id"],
+        study_manifest_hash=study["study_manifest_hash"],
+    )
+    model["model_run_id"] = model_run_id(model)
+    model["model_run_manifest_hash"] = model_run_manifest_hash(model)
+
+    if validator_name == "fixed_contract":
+        with pytest.raises(ValueError, match="entropy_contract"):
+            validate_fixed_study_contract(study)
+    else:
+        with pytest.raises(CompatibilityError, match="entropy_contract"):
+            validate_manifest_compatibility(study, model)
 
 
 def _one_failed_manifest_bound_shard(tmp_path: Path) -> tuple[dict, dict, Path, object]:
