@@ -1443,30 +1443,60 @@ def run_dry_run(
             != manifest_report["model_run_manifest_hash"]
         )
         requested_attempts = int(retry_request["attempts_consumed"])
-        persisted_attempts = (
-            len(index.attempts_consumed.get(retry_work.key, ()))
+        persisted_attempt_numbers = (
+            sorted(index.attempts_consumed.get(retry_work.key, ()))
             if index is not None and retry_identity_matches
-            else None
+            else []
         )
+        latest_persisted_attempt = (
+            persisted_attempt_numbers[-1] if persisted_attempt_numbers else None
+        )
+        persisted_attempts = latest_persisted_attempt or 0
         persisted_failure_category = None
+        latest_retry_closures: list[Mapping[str, Any]] = []
         if index is not None and retry_identity_matches:
-            closures = [
+            latest_retry_closures = [
                 event
                 for event in _events_for_key(index, retry_work.key)
-                if event["event_type"] in {"attempt_failed", "attempt_interrupted"}
+                if event["attempt_number"] == latest_persisted_attempt
+                and event["event_type"] in {"attempt_failed", "attempt_interrupted"}
+                and event.get("retry_classification") == "retryable"
+                and event.get("retry_decision") == "retry"
             ]
-            if closures:
-                persisted_failure_category = closures[-1].get("outcome_category")
+            if len(latest_retry_closures) == 1:
+                persisted_failure_category = latest_retry_closures[0].get(
+                    "outcome_category"
+                )
         requested_category = str(retry_request["category"])
-        policy_category = persisted_failure_category or requested_category
-        retry_policy_plan = plan_retry(
-            retry_work,
-            category=policy_category,
-            attempts_consumed=requested_attempts,
+        retry_policy_plan = (
+            plan_retry(
+                retry_work,
+                category=persisted_failure_category,
+                attempts_consumed=persisted_attempts,
+            )
+            if persisted_failure_category is not None
+            else None
         )
-        retry_plan = asdict(retry_policy_plan)
+        retry_plan = (
+            asdict(retry_policy_plan)
+            if retry_policy_plan is not None
+            else {
+                "work": retry_work.to_dict(),
+                "category": None,
+                "classification": None,
+                "decision": None,
+                "attempts_consumed": persisted_attempts,
+                "next_attempt_number": None,
+                "requires_fresh_process": False,
+                "terminate_current_process": False,
+                "backoff_seconds": None,
+            }
+        )
         retry_plan["requested_category"] = requested_category
+        retry_plan["requested_attempts_consumed"] = requested_attempts
+        retry_plan["latest_persisted_attempt"] = latest_persisted_attempt
         retry_plan["persisted_failure_category"] = persisted_failure_category
+        retry_plan["latest_retry_closure_count"] = len(latest_retry_closures)
         retry_resume = (
             plan_resume(index, [retry_work])[retry_work]
             if index is not None and retry_identity_matches
@@ -1475,16 +1505,16 @@ def run_dry_run(
         blockers: list[str] = []
         if not retry_identity_matches:
             blockers.append("manifest_or_shard_identity_mismatch")
-        if persisted_attempts is None or requested_attempts != persisted_attempts:
+        if requested_attempts != persisted_attempts:
             blockers.append("attempt_count_mismatch")
-        if persisted_attempts and persisted_failure_category is None:
+        if persisted_failure_category is None:
             blockers.append("missing_persisted_failure_category")
         if (
             persisted_failure_category is not None
             and requested_category != persisted_failure_category
         ):
             blockers.append("failure_category_mismatch")
-        if retry_policy_plan.decision != "retry":
+        if retry_policy_plan is None or retry_policy_plan.decision != "retry":
             blockers.append("retry_policy_does_not_allow_retry")
         if retry_resume is None or retry_resume.status != "retryable":
             blockers.append("persisted_state_is_not_retryable")

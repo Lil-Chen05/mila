@@ -1860,11 +1860,15 @@ def test_dry_run_cli_reports_real_resume_and_fails_on_corrupt_shard(tmp_path: Pa
         str(retry_path),
     ]
     valid = subprocess.run(command, cwd=repository, capture_output=True, text=True, check=False)
-    assert valid.returncode == 0, valid.stderr
+    assert valid.returncode != 0
     payload = json.loads(valid.stdout)
     assert payload["resume_plan"][0]["status"] == "retryable"
-    assert payload["is_valid"] is True
-    assert payload["retry_plan"]["backoff_seconds"] == 0
+    assert payload["is_valid"] is False
+    assert payload["retry_plan"]["eligible"] is False
+    assert payload["retry_plan"]["persisted_failure_category"] is None
+    assert "missing_persisted_failure_category" in payload["retry_plan"][
+        "ineligibility_reasons"
+    ]
 
     incompatible_work = WorkSpec.natural(
         "0" * 64,
@@ -2037,9 +2041,12 @@ def test_dry_run_retry_requires_retry_decision_and_exact_persisted_attempt_count
             "attempts_consumed": 0,
         },
     )
-    assert terminal["retry_plan"]["decision"] == "do_not_retry"
+    assert terminal["retry_plan"]["decision"] is None
     assert terminal["retry_plan"]["eligible"] is False
     assert terminal["is_valid"] is False
+    assert "missing_persisted_failure_category" in terminal["retry_plan"][
+        "ineligibility_reasons"
+    ]
     wrong_count = run_dry_run(
         **common,
         retry_request={
@@ -2151,6 +2158,215 @@ def test_dry_run_retry_category_must_match_latest_persisted_failure(
         assert report["retry_plan"]["requires_fresh_process"] is True
     if not expected_eligible:
         assert "failure_category_mismatch" in report["retry_plan"]["ineligibility_reasons"]
+
+
+def test_retry_requires_latest_attempt_closure_through_api_and_cli(tmp_path: Path) -> None:
+    from part1_contract import attempt_id, natural_record_id
+    from part1_failure_policy import classify_failure
+    from part1_runtime import LockMetadata, LockedShardSession, WorkSpec, run_dry_run
+
+    repository = Path(__file__).resolve().parents[1]
+    study, model = _compatible_manifests()
+
+    def owner(pid: int, acquired_at: str) -> LockMetadata:
+        return LockMetadata.new(
+            study_id=study["study_id"],
+            model_run_id=model["model_run_id"],
+            shard_id=SHARD_ID,
+            hostname="node",
+            pid=pid,
+            slurm_job_id=None,
+            slurm_array_task_id=None,
+            acquired_at=acquired_at,
+        )
+
+    session = LockedShardSession.acquire(
+        tmp_path / "shard",
+        owner=owner(101, "2026-07-31T00:00:00Z"),
+        model_run_manifest_hash=model["model_run_manifest_hash"],
+    )
+    session.close()
+
+    def record_for_attempt(attempt_number: int) -> dict:
+        record = natural_result(attempt_number=attempt_number)
+        record.update(
+            study_id=study["study_id"],
+            model_run_id=model["model_run_id"],
+            model_run_manifest_hash=model["model_run_manifest_hash"],
+            question_manifest_hash=study["question_manifest_hash"],
+        )
+        record["raw_record_id"] = natural_record_id(
+            record["study_id"],
+            record["model_run_id"],
+            record["question_id"],
+            record["run_id"],
+        )
+        record["terminal_attempt_id"] = attempt_id(
+            record["study_id"],
+            record["model_run_id"],
+            record["question_id"],
+            record["run_id"],
+            attempt_number,
+        )
+        return record
+
+    work = WorkSpec.natural(
+        study["study_id"],
+        model["model_run_id"],
+        model["model_run_manifest_hash"],
+        QUESTION_ID,
+        0,
+        seed=123,
+    )
+    study_path = tmp_path / "study.json"
+    model_path = tmp_path / "model.json"
+    retry_path = tmp_path / "retry.json"
+    study_path.write_text(json.dumps(study), encoding="utf-8")
+    model_path.write_text(json.dumps(model), encoding="utf-8")
+
+    def inspect_retry(
+        attempts_consumed: int, category: str
+    ) -> tuple[dict, dict, int]:
+        request = {
+            "work": work.to_dict(),
+            "category": category,
+            "attempts_consumed": attempts_consumed,
+        }
+        api_report = run_dry_run(
+            persistent_root=tmp_path / "smoke",
+            allow_root_override=True,
+            study_manifest=study,
+            model_run_manifest=model,
+            shard_root=session.store.root,
+            retry_request=request,
+        )
+        retry_path.write_text(json.dumps(request), encoding="utf-8")
+        cli = subprocess.run(
+            [
+                sys.executable,
+                "scripts/part1_dry_run.py",
+                "--persistent-root",
+                str(tmp_path / "smoke"),
+                "--study-manifest",
+                str(study_path),
+                "--model-run-manifest",
+                str(model_path),
+                "--shard-root",
+                str(session.store.root),
+                "--retry-request",
+                str(retry_path),
+            ],
+            cwd=repository,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return api_report, json.loads(cli.stdout), cli.returncode
+
+    for report in inspect_retry(0, "temporary_filesystem_failure")[:2]:
+        assert report["retry_plan"]["persisted_attempts_consumed"] == 0
+        assert report["retry_plan"]["latest_persisted_attempt"] is None
+        assert report["retry_plan"]["persisted_failure_category"] is None
+        assert report["retry_plan"]["eligible"] is False
+        assert report["is_valid"] is False
+        assert "missing_persisted_failure_category" in report["retry_plan"][
+            "ineligibility_reasons"
+        ]
+    assert inspect_retry(0, "temporary_filesystem_failure")[2] != 0
+
+    session = LockedShardSession.acquire(
+        session.store.root,
+        owner=owner(102, "2026-07-31T00:01:00Z"),
+        model_run_manifest_hash=model["model_run_manifest_hash"],
+    )
+    first = record_for_attempt(1)
+    session.store.append_audit_event(attempt_event(first, "attempt_started", 0))
+    first_failure = attempt_event(first, "attempt_failed", 1)
+    first_policy = classify_failure("transient_cuda_runtime_failure", 1)
+    first_failure.update(
+        outcome_category="transient_cuda_runtime_failure",
+        retry_classification=first_policy.classification,
+        retry_decision=first_policy.retry_decision,
+        backoff_seconds=first_policy.backoff_seconds,
+    )
+    session.store.append_audit_event(first_failure)
+    second = record_for_attempt(2)
+    session.store.append_audit_event(attempt_event(second, "attempt_started", 0))
+    session.close()
+
+    orphan_api, orphan_cli, orphan_code = inspect_retry(
+        2, "transient_cuda_runtime_failure"
+    )
+    for report in (orphan_api, orphan_cli):
+        assert report["retry_plan"]["latest_persisted_attempt"] == 2
+        assert report["retry_plan"]["persisted_failure_category"] is None
+        assert report["retry_plan"]["eligible"] is False
+        assert "missing_persisted_failure_category" in report["retry_plan"][
+            "ineligibility_reasons"
+        ]
+    assert orphan_code != 0
+
+    session = LockedShardSession.acquire(
+        session.store.root,
+        owner=owner(103, "2026-07-31T00:02:00Z"),
+        model_run_manifest_hash=model["model_run_manifest_hash"],
+    )
+    second_failure = attempt_event(second, "attempt_failed", 1)
+    second_policy = classify_failure("temporary_filesystem_failure", 2)
+    second_failure.update(
+        outcome_category="temporary_filesystem_failure",
+        retry_classification=second_policy.classification,
+        retry_decision=second_policy.retry_decision,
+        backoff_seconds=second_policy.backoff_seconds,
+    )
+    session.store.append_audit_event(second_failure)
+    session.close()
+
+    closed_api, closed_cli, closed_code = inspect_retry(
+        2, "temporary_filesystem_failure"
+    )
+    for report in (closed_api, closed_cli):
+        assert report["retry_plan"]["latest_persisted_attempt"] == 2
+        assert report["retry_plan"]["persisted_attempts_consumed"] == 2
+        assert report["retry_plan"]["persisted_failure_category"] == (
+            "temporary_filesystem_failure"
+        )
+        assert report["retry_plan"]["attempts_consumed"] == 2
+        assert report["retry_plan"]["eligible"] is True
+        assert report["is_valid"] is True
+    assert closed_code == 0
+    count_mismatch, _, _ = inspect_retry(1, "temporary_filesystem_failure")
+    assert count_mismatch["retry_plan"]["attempts_consumed"] == 2
+    assert count_mismatch["retry_plan"]["eligible"] is False
+    assert "attempt_count_mismatch" in count_mismatch["retry_plan"][
+        "ineligibility_reasons"
+    ]
+
+    session = LockedShardSession.acquire(
+        session.store.root,
+        owner=owner(104, "2026-07-31T00:03:00Z"),
+        model_run_manifest_hash=model["model_run_manifest_hash"],
+    )
+    third = record_for_attempt(3)
+    session.store.append_audit_event(attempt_event(third, "attempt_started", 0))
+    session.store.commit_terminal_result(
+        third, attempt_event(third, "attempt_completed", 1)
+    )
+    session.close()
+    terminal_api, terminal_cli, terminal_code = inspect_retry(
+        3, "temporary_filesystem_failure"
+    )
+    for report in (terminal_api, terminal_cli):
+        assert report["retry_plan"]["latest_persisted_attempt"] == 3
+        assert report["retry_plan"]["persisted_failure_category"] is None
+        assert report["retry_plan"]["eligible"] is False
+        assert "missing_persisted_failure_category" in report["retry_plan"][
+            "ineligibility_reasons"
+        ]
+        assert "persisted_state_is_not_retryable" in report["retry_plan"][
+            "ineligibility_reasons"
+        ]
+    assert terminal_code != 0
 
 
 def test_finalized_dry_run_keeps_completed_but_rejects_missing_work(
