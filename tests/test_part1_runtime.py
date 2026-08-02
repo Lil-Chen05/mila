@@ -767,7 +767,9 @@ def _compatible_manifests() -> tuple[dict, dict]:
     ]
     study = {
         "schema_name": "part1_study_manifest",
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
+        "question_source_repository": "cais/mmlu",
+        "question_source_revision": "a" * 40,
         "question_manifest_hash": "e" * 64,
         **FIXED_STUDY_CONTRACT,
     }
@@ -776,6 +778,7 @@ def _compatible_manifests() -> tuple[dict, dict]:
     model = {
         "schema_name": "part1_model_run_manifest",
         "schema_version": "1.0.0",
+        "execution_scope": "smoke_a",
         "study_id": study["study_id"],
         "study_manifest_hash": study["study_manifest_hash"],
         "question_manifest_hash": study["question_manifest_hash"],

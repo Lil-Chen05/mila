@@ -55,10 +55,20 @@ question manifest and sidecar are tracked outside ignored `data/`, at the
 planned locations `manifests/part1/questions.jsonl` and
 `manifests/part1/questions.manifest.json`.
 
-The immutable MMLU dataset revision is a repository-specific decision deferred
-to Phase 2. Acceptance requires a resolved immutable revision, recorded source
-configuration and split, exact quota/order checks, and reproducible manifest
-hashes.
+MMLU is accessed with the explicit per-subject configuration strategy. The
+former `source_config: "all"` draft is invalid for this study and has been
+retired. Each listed subject is loaded as its own Hugging Face config at one
+shared resolved immutable commit, with test-split source row identity recorded
+as `(config, split, row_index)`. The immutable commit value itself remains
+unresolved until the Mila CPU job runs and is recorded in every question plus
+the question and study manifests.
+
+The saved dataset under `data/part1/mmlu-<question_manifest_hash>/` is an
+ignored reproducible cache. The three tracked files under `manifests/part1/`
+are authoritative and publish as one validated directory bundle. The job must
+not replace a partial or different existing bundle; a byte-identical complete
+rerun leaves the existing files untouched. It never stages or commits Git
+changes.
 
 ## Natural generation
 
@@ -87,6 +97,14 @@ Both requested settings and effective settings after resolving the pinned
 model's `GenerationConfig` are persisted in the model-run manifest. The exact
 model and tokenizer revisions are resolved during Phase 2 preflight and must be
 immutable before any production model-run identity is constructed.
+
+The local SmolLM3 adapter assumes the documented `<think>` and `</think>` text
+and `</think>\nAnswer:` forced-close inducer only as candidates to test. GPU
+preflight must confirm their exact token sequences, the prompt-ending opening
+tag, A–D single-token behavior at the exact inducer boundary, BOS/EOS/PAD
+values, and both context budgets. PAD is recorded as found and is never
+silently reassigned to EOS. Until that preflight passes these are implementation
+assumptions, not observations about the real model/tokenizer.
 
 ### Per-run seed
 

@@ -1,0 +1,108 @@
+{
+  "catalog_version": "part1-synthetic-evidence-v1",
+  "real_model_evidence": false,
+  "scenarios": [
+    {
+      "id": "capped_output",
+      "status": "implemented",
+      "evidence": "tests/test_part1_generation.py::test_abnormal_but_executed_outputs_remain_checkpoint_eligible",
+      "claim": "max-token termination is retained as schema-valid model output"
+    },
+    {
+      "id": "missing_close_output",
+      "status": "implemented",
+      "evidence": "tests/test_part1_generation.py::test_abnormal_but_executed_outputs_remain_checkpoint_eligible",
+      "claim": "missing-close parsing and null terminal values follow the schema"
+    },
+    {
+      "id": "no_reasoning_output",
+      "status": "implemented",
+      "evidence": "tests/test_part1_generation.py::test_abnormal_but_executed_outputs_remain_checkpoint_eligible",
+      "claim": "zero-reasoning summaries follow the schema"
+    },
+    {
+      "id": "short_reasoning_aliases",
+      "status": "implemented",
+      "evidence": "tests/test_part1_checkpoints.py::test_checkpoint_placement_uses_python_ties_even_and_preserves_aliases",
+      "claim": "ties-to-even placement and alias membership are deterministic"
+    },
+    {
+      "id": "malformed_answer",
+      "status": "implemented",
+      "evidence": "tests/test_part1_smollm3_adapter.py::test_malformed_answer_and_confidence_are_preserved_without_coercion",
+      "claim": "malformed terminal text is classified without coercion"
+    },
+    {
+      "id": "out_of_range_confidence",
+      "status": "implemented",
+      "evidence": "tests/test_part1_smollm3_adapter.py::test_confidence_out_of_range_and_forced_suffix_pairing_are_preserved",
+      "claim": "out-of-range confidence remains raw model output"
+    },
+    {
+      "id": "missing_answer_token",
+      "status": "implemented",
+      "evidence": "tests/test_part1_checkpoints.py::test_missing_choice_token_is_preserved_as_invalid_model_output_not_retry",
+      "claim": "missing A-D answer tokens do not become infrastructure retries"
+    },
+    {
+      "id": "retry_exhaustion",
+      "status": "implemented",
+      "evidence": "tests/test_part1_store.py::test_retryable_terminal_failure_requires_real_sequential_exhaustion",
+      "claim": "three-attempt exhaustion requires durable sequential evidence"
+    },
+    {
+      "id": "crash_boundaries",
+      "status": "implemented",
+      "evidence": "tests/test_part1_store.py::test_controlled_crashes_cover_all_durable_append_boundaries",
+      "claim": "result/event publication resumes from every injected append boundary"
+    },
+    {
+      "id": "stale_locks",
+      "status": "implemented",
+      "evidence": "tests/test_part1_runtime.py::test_stale_recovery_refuses_live_or_uncertain_liveness_and_never_uses_age",
+      "claim": "synthetic liveness decisions fail closed"
+    },
+    {
+      "id": "duplicate_records",
+      "status": "implemented",
+      "evidence": "tests/test_part1_store.py::test_duplicate_conflict_and_premature_terminal_failure_are_rejected",
+      "claim": "duplicate/conflicting terminal records are rejected"
+    },
+    {
+      "id": "auroc_class_balance",
+      "status": "implemented",
+      "evidence": "tests/test_part1_synthetic_fixture_catalog.py::test_auroc_class_balance_fixture_has_schema_valid_both_and_one_class_inputs",
+      "claim": "schema-valid synthetic raw inputs distinguish both-class and one-class conditions"
+    },
+    {
+      "id": "invalid_bootstrap_replicates",
+      "status": "implemented",
+      "evidence": "tests/test_part1_synthetic_fixture_catalog.py::test_invalid_bootstrap_replicate_fixture_is_schema_valid_and_one_class",
+      "claim": "a schema-valid synthetic source can produce a one-class bootstrap draw"
+    },
+    {
+      "id": "bootstrap_draw_multiplicity",
+      "status": "implemented",
+      "evidence": "tests/test_part1_synthetic_fixture_catalog.py::test_bootstrap_draw_multiplicity_fixture_preserves_repeated_question_ids",
+      "claim": "synthetic sampled question IDs retain explicit draw multiplicity"
+    },
+    {
+      "id": "macro_replicate_invalidity",
+      "status": "implemented",
+      "evidence": "tests/test_part1_synthetic_fixture_catalog.py::test_macro_replicate_fixture_has_one_invalid_subject_among_valid_subjects",
+      "claim": "schema-valid synthetic subject groups include one one-class subject among both-class subjects"
+    },
+    {
+      "id": "within_question_mixed_correctness",
+      "status": "implemented",
+      "evidence": "tests/test_part1_synthetic_fixture_catalog.py::test_within_question_fixture_has_mixed_correctness_across_schema_valid_runs",
+      "claim": "schema-valid synthetic runs for one question contain mixed correctness"
+    },
+    {
+      "id": "switching_across_missing_checkpoints",
+      "status": "implemented",
+      "evidence": "tests/test_part1_synthetic_fixture_catalog.py::test_switching_fixture_has_answer_changes_across_missing_schema_valid_checkpoints",
+      "claim": "schema-valid synthetic checkpoint records show answer changes with required checkpoints missing"
+    }
+  ]
+}

@@ -23,3 +23,6 @@ results/*/*.shard*.jsonl
 # Historical results/20q and results/200q remain tracked and unaffected.
 results/part1-smoke/
 results/part1/
+
+# Interrupted CPU materialization staging; finalized manifests remain tracked.
+manifests/.part1.materialize-*/

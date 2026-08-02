@@ -5,12 +5,13 @@
   "description": "Schema only. Phase 1 must not create an operational production instance.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_name", "schema_version", "model_run_id", "model_run_manifest_hash", "study_id", "study_manifest_hash", "question_manifest_hash", "model_repository", "model_revision", "tokenizer_repository", "tokenizer_revision", "canonical_model_identity", "adapter_version", "prompt_version", "prompt_hash", "parser_version", "inducer_version", "inducer_text", "inducer_token_ids", "reasoning_open_tag", "reasoning_open_token_ids", "reasoning_close_tag", "reasoning_close_token_ids", "requested_natural_generation", "effective_natural_generation", "requested_checkpoint_generation", "effective_checkpoint_generation", "ad_token_convention", "ad_raw_token_sequences", "ad_token_ids", "seed_algorithm_version", "base_generation_seed", "environment_versions", "final_production_git_commit", "production", "smoke_git_provenance"],
+  "required": ["schema_name", "schema_version", "model_run_id", "model_run_manifest_hash", "execution_scope", "study_id", "study_manifest_hash", "question_manifest_hash", "model_repository", "model_revision", "tokenizer_repository", "tokenizer_revision", "canonical_model_identity", "adapter_version", "prompt_version", "prompt_hash", "parser_version", "inducer_version", "inducer_text", "inducer_token_ids", "reasoning_open_tag", "reasoning_open_token_ids", "reasoning_close_tag", "reasoning_close_token_ids", "requested_natural_generation", "effective_natural_generation", "requested_checkpoint_generation", "effective_checkpoint_generation", "ad_token_convention", "ad_raw_token_sequences", "ad_token_ids", "seed_algorithm_version", "base_generation_seed", "environment_versions", "final_production_git_commit", "production", "smoke_git_provenance"],
   "properties": {
     "schema_name": {"const": "part1_model_run_manifest"},
     "schema_version": {"const": "1.0.0"},
     "model_run_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "model_run_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "execution_scope": {"enum": ["smoke_a", "smoke_b", "reproducibility", "production"]},
     "study_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "study_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "question_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -45,7 +46,7 @@
     "smoke_git_provenance": {"type": ["object", "null"]}
   },
   "allOf": [
-    {"if": {"properties": {"production": {"const": true}}}, "then": {"properties": {"final_production_git_commit": {"type": "string"}, "smoke_git_provenance": {"type": "null"}}}},
-    {"if": {"properties": {"production": {"const": false}}}, "then": {"properties": {"final_production_git_commit": {"type": "null"}, "smoke_git_provenance": {"type": "object"}}}}
+    {"if": {"properties": {"production": {"const": true}}}, "then": {"properties": {"execution_scope": {"const": "production"}, "final_production_git_commit": {"type": "string"}, "smoke_git_provenance": {"type": "null"}}}},
+    {"if": {"properties": {"production": {"const": false}}}, "then": {"properties": {"execution_scope": {"enum": ["smoke_a", "smoke_b", "reproducibility"]}, "final_production_git_commit": {"type": "null"}, "smoke_git_provenance": {"type": "object"}}}}
   ]
 }

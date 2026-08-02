@@ -666,10 +666,29 @@ class Part1ShardStore:
             }
         ]
         if terminal_lifecycle_events:
+            terminal_lifecycle_types = [
+                event["event_type"] for event in terminal_lifecycle_events
+            ]
+            exhausted_interruption = (
+                terminal_lifecycle_events[-1]["event_type"] == "attempt_interrupted"
+                and terminal_lifecycle_events[-1].get("retry_decision") == "exhausted"
+            )
+            completion_before_interruption = (
+                terminal_lifecycle_types == [
+                    "attempt_completed",
+                    "attempt_interrupted",
+                ]
+                and terminal_lifecycle_events[0].get("terminal_record_id")
+                == record_id_value
+            )
             controlled_terminalization = (
-                len(terminal_lifecycle_events) == 1
-                and terminal_lifecycle_events[0]["event_type"] == "attempt_interrupted"
-                and terminal_lifecycle_events[0].get("retry_decision") == "exhausted"
+                terminal_lifecycle_types
+                in (["attempt_interrupted"], ["attempt_completed", "attempt_interrupted"])
+                and exhausted_interruption
+                and (
+                    terminal_lifecycle_types == ["attempt_interrupted"]
+                    or completion_before_interruption
+                )
                 and outcome == "terminal_infrastructure_failure"
                 and isinstance(record.get("terminal_error_details"), Mapping)
                 and record["terminal_error_details"].get("category")
@@ -968,9 +987,19 @@ class Part1ShardStore:
                         and matching_record is not None
                     )
                     exhausted_interruption_completion = (
-                        len(prior_terminal) == 1
-                        and prior_terminal[0]["event_type"] == "attempt_interrupted"
-                        and prior_terminal[0].get("retry_decision") == "exhausted"
+                        [item["event_type"] for item in prior_terminal]
+                        in (
+                            ["attempt_interrupted"],
+                            ["attempt_completed", "attempt_interrupted"],
+                        )
+                        and prior_terminal[-1].get("retry_decision") == "exhausted"
+                        and (
+                            len(prior_terminal) == 1
+                            or self._matching_terminal_record(
+                                prior_terminal[0], candidate_records
+                            )
+                            is not None
+                        )
                         and matching_record is not None
                         and matching_record.get(
                             "natural_execution_outcome",
@@ -1061,6 +1090,16 @@ class Part1ShardStore:
             raise ValueError("commit requires a durable matching attempt_started event")
         self._preflight_terminal_result(record)
         self._preflight_audit_event(completion_event, prospective_terminal=record)
+
+    @_serialized_mutation
+    def preflight_terminal_commit(
+        self, record: Mapping[str, Any], completion_event: Mapping[str, Any]
+    ) -> None:
+        """Validate a commit pair without appending any durable bytes."""
+
+        self._assert_mutation_authorized()
+        self._assert_active()
+        self._validate_commit_pair(record, completion_event)
 
     @_serialized_mutation
     def commit_terminal_result(
@@ -1279,12 +1318,19 @@ class Part1ShardStore:
                     and attempt_record is not None
                     and event_matches_terminal(event)
                 ):
-                    try:
-                        self._validate_completion_event_policy(event, attempt_record)
-                    except ValueError as exc:
-                        lifecycle_errors.append(
-                            f"attempt {attempt_id_value} completion failure policy is inconsistent: {exc}"
-                        )
+                    completion_precedes_exhausted_interruption = any(
+                        later["event_sequence"] > event["event_sequence"]
+                        and later["event_type"] == "attempt_interrupted"
+                        and later.get("retry_decision") == "exhausted"
+                        for later in terminals
+                    )
+                    if not completion_precedes_exhausted_interruption:
+                        try:
+                            self._validate_completion_event_policy(event, attempt_record)
+                        except ValueError as exc:
+                            lifecycle_errors.append(
+                                f"attempt {attempt_id_value} completion failure policy is inconsistent: {exc}"
+                            )
             terminal_types_in_order = [event["event_type"] for event in terminals]
             matching_terminals = [event_matches_terminal(event) for event in terminals]
             coherent = False
@@ -1319,6 +1365,24 @@ class Part1ShardStore:
                     and terminals[0].get("retry_decision") == "exhausted"
                 )
                 coherent = controlled and matching_terminals == [False, True]
+            elif terminal_types_in_order == [
+                "attempt_completed",
+                "attempt_interrupted",
+                "attempt_completed",
+            ]:
+                controlled = (
+                    attempt_record is not None
+                    and attempt_record.get(
+                        "natural_execution_outcome",
+                        attempt_record.get("checkpoint_execution_outcome"),
+                    )
+                    == "terminal_infrastructure_failure"
+                    and isinstance(attempt_record.get("terminal_error_details"), Mapping)
+                    and attempt_record["terminal_error_details"].get("category")
+                    == "interrupted_process"
+                    and terminals[1].get("retry_decision") == "exhausted"
+                )
+                coherent = controlled and matching_terminals == [True, False, True]
             if not coherent:
                 lifecycle_errors.append(
                     f"attempt {attempt_id_value} has contradictory terminal lifecycle: "

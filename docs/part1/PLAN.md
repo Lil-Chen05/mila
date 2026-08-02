@@ -8,12 +8,11 @@ procedures are in [RUNBOOK.md](RUNBOOK.md), and acceptance evidence is in
 [VALIDATION.md](VALIDATION.md). Scientific changes require explicit approval and
 a versioned manifest change.
 
-**Current phase: Phase 1 is implemented and independently verified. Stop before
-Phase 2.** Phase 1 added login-safe schemas, configuration templates, canonical
-identities and seeds, normalized append-only storage, recovery, exclusive
-locking, retry policy, and resumability. It did not materialize a dataset, load
-a model or tokenizer, create a production model-run manifest, generate output,
-or launch an experiment.
+**Current phase: Phase 2 local preparation is implemented but incomplete and
+paused before the CPU Mila job.** Phase 1 remains independently verified. No
+dataset, model, tokenizer, CUDA runtime, Mila host, or real SLURM job was used.
+The next gate is `sbatch jobs/materialize_part1_mmlu.sh`; generated manifests
+must be returned, validated, reviewed, and committed before GPU preflight.
 
 Historical root documentation, old 20q/200q code, results, and analyses remain
 pilot artifacts. They are not instructions or evidence for Part 1.
@@ -135,30 +134,61 @@ The repository-level implementation gate is satisfied, subject to the
 operational Phase 2 checks below. Phase 1 does not claim Mila filesystem or
 cluster validation and is not production-execution authorization.
 
-## Phase 2 — generation (next prompt only)
+## Phase 2 — fixed data and generation (partially prepared)
 
-### Authorized scope when Prompt 3 arrives
+### Locally implemented preparation
 
-Phase 2 must:
+The scoped preparation commit provides:
 
-1. resolve the immutable MMLU revision and materialize the fixed sample in a
-   CPU SLURM job using streaming plus bounded selection;
-2. create, inspect, and commit the tracked question JSONL/sidecar and
-   model-independent study manifest;
-3. resolve immutable SmolLM3 model/tokenizer revisions and adapter conventions
-   in compute-node preflight;
-4. implement token-boundary parsing, stochastic natural generation, raw
-   pre-warper entropy, and greedy checkpoint probes;
-5. use `LockedShardSession`, policy-complete events, complete manifest hashes,
-   canonical seeds, same-seed retries, and a fresh process after transient CUDA
-   failure; and
-6. run only the Prompt-3-authorized bounded smoke under the separate ignored
-   smoke root.
+1. an explicit per-subject `cais/mmlu` strategy replacing the invalid
+   `source_config: "all"` assumption;
+2. a CPU job that resolves a 40-character commit SHA, verifies each complete
+   test-split count, streams/shuffles with seed 42 and a full-split buffer,
+   takes 100 per subject, stages the saved dataset plus all three manifests,
+   reloads and validates all content, and publishes the manifest directory in
+   one atomic rename;
+3. strict identical-only rerun behavior for existing finalized manifests and a
+   separate login-safe validator for returned outputs;
+4. pure SmolLM3 prompt/tag/token-boundary, terminal parsing, natural entropy,
+   checkpoint placement/metrics/alias, seed, schema, smoke-selection, and
+   storage-estimation logic;
+5. prepared GPU-only model preflight, isolated reproducibility, Smoke A, and
+   Smoke B scripts using separate non-production model-run identities; and
+6. a synthetic evidence catalog with schema-valid raw-input families that
+   explicitly denies real-model and Phase 3 analysis-implementation evidence.
+
+### Immediate CPU gate
+
+Run only on Mila:
+
+```bash
+sbatch jobs/materialize_part1_mmlu.sh
+```
+
+Return the three files under `manifests/part1/` and the job log. Independent
+validation must recompute every record identity, question-manifest hash, study
+identity/hash, subject count/order, and resolved revision. The ignored cache
+under `data/part1/` is reproducible convenience data, not scientific authority.
+
+### Deferred GPU gates
+
+After the CPU outputs pass review, the first GPU command is:
+
+```bash
+sbatch jobs/part1_smollm3_preflight.sh
+```
+
+It is prepared but not run. It must resolve model/tokenizer commits and record
+software, CUDA/GPU, lockfile, model config, tokenizer file hashes, context
+limits, exact A–D boundary tokens, special tokens, effective settings, and a
+real forward check. Only then may the isolated reproducibility job and bounded
+Smoke A/B jobs run. The complete 500-question experiment remains forbidden.
 
 ### Phase 2 dependencies and operational checks
 
 - The dataset, model, and tokenizer immutable revisions remain unresolved.
-- The fixed question and study manifests do not yet exist.
+- The fixed question and study manifests do not yet exist; their hashes and IDs
+  must not be guessed or filled from synthetic data.
 - SmolLM3 thinking tags, prompt rendering, forced-close token IDs, A–D token
   convention, and effective generation settings require compute-node preflight.
 - The stable guard passed a local two-process test, but POSIX `flock` behavior
@@ -184,6 +214,10 @@ Phase 2 must:
   the retry policy.
 - Login-safe tests and the authorized bounded compute smoke pass without
   creating production artifacts.
+
+None of the dataset/model/smoke criteria is currently marked passed. Synthetic
+fixtures establish only control flow, parsing, schema, persistence, and recovery
+behavior; they do not establish real SmolLM3 or Mila behavior.
 
 ## Phase 3 — completion
 

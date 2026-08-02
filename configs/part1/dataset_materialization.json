@@ -1,9 +1,16 @@
 {
   "schema_name": "part1_dataset_materialization_config",
-  "config_version": "1.0.0",
+  "config_version": "1.1.0",
   "source_repository": "cais/mmlu",
-  "source_revision": null,
-  "source_config": "all",
+  "source_revision": "main",
+  "source_config_strategy": "per_subject",
+  "source_configs": [
+    "high_school_mathematics",
+    "high_school_physics",
+    "high_school_chemistry",
+    "high_school_biology",
+    "high_school_psychology"
+  ],
   "source_split": "test",
   "streaming": true,
   "bounded_take_required": true,

@@ -2,40 +2,44 @@
 
 ## Status and authority
 
-Phase 1 implements this contract in `scripts/part1_contract.py`,
+Phase 1 implements the base contract in `scripts/part1_contract.py`,
 `scripts/part1_store.py`, `scripts/part1_failure_policy.py`, and
-`scripts/part1_runtime.py`. Six versioned templates live under
-`configs/part1/`; eight JSON Schema Draft 2020-12 files live under
+`scripts/part1_runtime.py`. Phase 2 local preparation adds question/study
+construction and validation, a SmolLM3-local adapter, natural/checkpoint result
+builders, and prepared non-production runners. Six versioned templates live
+under `configs/part1/`; eight JSON Schema Draft 2020-12 files live under
 `schemas/part1/`. Scientific meaning remains fixed by
 [DECISIONS.md](DECISIONS.md), operations by [RUNBOOK.md](RUNBOOK.md), and
 evidence by [VALIDATION.md](VALIDATION.md).
 
-Schema and template availability is not concrete manifest availability. Phase 2
-still creates the tracked question and study manifests and resolves immutable
-dataset/model/tokenizer revisions. The production model-run-manifest schema
-exists, but no production instance exists; Phase 3 owns its post-commit
-lifecycle.
+Schema and code availability is not concrete manifest availability. The Mila
+CPU job must still create the tracked question and study manifests and resolve
+the immutable dataset revision; GPU preflight must resolve real model/tokenizer
+provenance. No production model-run instance exists; Phase 3 owns its
+post-commit lifecycle.
 
 Historical 20q/200q JSON is legacy and incompatible. It must not be upgraded by
 silently filling missing provenance.
 
 ## Executable contract inventory
 
-All schema instances use `schema_version = "1.0.0"`.
+Most schema instances use `schema_version = "1.0.0"`. The question-manifest
+and study-manifest schemas are `1.1.0` because the approved per-subject source
+strategy and immutable question-source provenance changed their hashed fields.
 
 | Schema | Discriminator |
 |---|---|
 | `question_record.schema.json` | `part1_question_record` |
-| `question_manifest.schema.json` | `part1_question_manifest` |
-| `study_manifest.schema.json` | `part1_study_manifest` |
+| `question_manifest.schema.json` (`1.1.0`) | `part1_question_manifest` |
+| `study_manifest.schema.json` (`1.1.0`) | `part1_study_manifest` |
 | `model_run_manifest.schema.json` | `part1_model_run_manifest` |
 | `natural_terminal_result.schema.json` | `part1_natural_terminal_result` |
 | `checkpoint_terminal_result.schema.json` | `part1_checkpoint_terminal_result` |
 | `audit_event.schema.json` | `part1_audit_event` |
 | `validation_report.schema.json` | `part1_validation_report` |
 
-The six `1.0.0` templates are `study_protocol.json`,
-`model_run_execution.json`, `dataset_materialization.json`, `storage.json`,
+The dataset-materialization template is `1.1.0`; the other five templates
+remain `1.0.0`: `study_protocol.json`, `model_run_execution.json`, `storage.json`,
 `retries.json`, and `analysis.json`. Validators reject drift from fixed science,
 retry policy, production prohibition, root separation, and persistent-root
 safety. Every tracked field in all six templates is compared with an
@@ -55,6 +59,47 @@ Common rules:
 - One shard contains one study ID, model-run ID, complete
   model-run-manifest hash, and shard ID, fixed by `.shard-provenance.json`.
 - Full-vocabulary logits and selected-token log probabilities are never stored.
+
+## Phase 2 question and study bundle
+
+The authoritative bundle has exactly three files with deterministic UTF-8
+bytes: `questions.jsonl`, `questions.manifest.json`, and
+`study_manifest.json`. A first publication is a single same-filesystem rename
+of their fully validated staged directory. A finalized directory must contain
+all three; partial, symlinked, non-regular, or differing content is an
+incompatibility. An identical complete bundle is retained without inode
+replacement.
+
+Question-manifest `1.1.0` adds these hashed source fields:
+
+```json
+{
+  "source_repository": "cais/mmlu",
+  "source_revision": "<40 lowercase hex commit>",
+  "source_config_strategy": "per_subject",
+  "source_configs": [
+    "high_school_mathematics",
+    "high_school_physics",
+    "high_school_chemistry",
+    "high_school_biology",
+    "high_school_psychology"
+  ],
+  "source_split": "test"
+}
+```
+
+Every question record carries that same revision, its subject as
+`source_config`, and exact `(config, split, row_index)` source identity. Study
+manifest `1.1.0` carries `question_source_repository` and
+`question_source_revision` plus the hash recomputed from the final validated
+500-record question bundle. These fields participate in the complete study
+hash; model/tokenizer/environment fields do not.
+
+Every model-run manifest carries `execution_scope`. Non-production manifests
+use one of `smoke_a`, `smoke_b`, or `reproducibility`; a production manifest
+must use `production`. The field participates in the complete model-run hash
+and separates their identities. Synthetic fixtures do not populate real
+revision/token/environment observations.
 
 ## Canonical serialization
 
@@ -178,16 +223,17 @@ order. Each record requires:
 `source_revision`, `source_config`, `source_split`, `source_row_identity`,
 `question`, exactly four ordered `choices`, `gold_index`, and `gold_letter`.
 
-The sidecar requires its complete hash, format/source/revision/config/split,
-five subjects in fixed order, quota 100, count 500, seed 42, selection and
+The `1.1.0` sidecar requires its complete hash, format/source/revision,
+`source_config_strategy = "per_subject"`, the five explicit source configs and
+test split, five subjects in fixed order, quota 100, count 500, seed 42, selection and
 canonicalization versions, ordered-record aggregation rule, and logical
 filename. Phase 2 resolves source-row identity and the immutable source
 revision.
 
 ### Study manifest
 
-The model-independent tracked study manifest requires its ID/hash,
-question-manifest hash, fixed subjects/quotas/seed, protocol/checkpoint/entropy/
+The model-independent tracked `1.1.0` study manifest requires its ID/hash,
+question-source repository/revision, question-manifest hash, fixed subjects/quotas/seed, protocol/checkpoint/entropy/
 answer-validity/status/calibration/bootstrap contracts, exact primary registry,
 within-question and switching/stabilization contracts, repetition policy,
 compatible raw schema versions, and analysis-contract version.

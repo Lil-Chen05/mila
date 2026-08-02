@@ -2,10 +2,10 @@
 
 ## Status and safety boundary
 
-Phase 1's login-safe contract, storage, lock, retry, resume, dry-run, and
-operator tools are implemented. Phase 2/3 model, dataset, generation,
-validation/merge, analysis, and SLURM entry points remain deferred unless
-explicitly marked otherwise below.
+Phase 1's login-safe infrastructure remains implemented. Phase 2 local code and
+SLURM entry points are prepared, but execution is paused before the CPU Mila
+job. No command in this document is evidence that a job has run unless its
+returned artifact and log have been inspected.
 
 Never load a model, tokenizer, or Hugging Face dataset on a login node. Dataset
 materialization runs in a CPU SLURM job. Model/tokenizer preflight and generation
@@ -28,7 +28,8 @@ in [SCHEMA.md](SCHEMA.md), phase gates in [PLAN.md](PLAN.md), current state in
   roots. Phase 1 allows only smoke-mode configuration validation and performs no
   generation.
 - Tracked question JSONL/sidecar and study manifest will live under
-  `manifests/part1/` after Phase 2. They are not ignored and do not yet exist.
+  `manifests/part1/`. They are authoritative, are not ignored, and do not yet
+  exist. The saved dataset under `data/part1/` is an ignored reproducible cache.
 - Operational model-run manifests and raw shards are generated and ignored.
   No production model-run manifest exists; its Phase 3 creation follows the
   final production commit and clean-worktree gate.
@@ -36,6 +37,90 @@ in [SCHEMA.md](SCHEMA.md), phase gates in [PLAN.md](PLAN.md), current state in
 Configuration validation refuses an omitted/mismatched root, smoke/production
 aliasing, `/tmp`, `/private/tmp`, literal `$SLURM_TMPDIR`, and paths under its
 expanded value.
+
+## CPU dataset bootstrap — next required Mila action
+
+From the repository root on Mila, submit exactly:
+
+```bash
+sbatch jobs/materialize_part1_mmlu.sh
+```
+
+Do not run the Python entry point on a login node. The CPU job exports
+`HF_HOME=$SCRATCH/hf_cache`, resolves `cais/mmlu@main` to an immutable
+40-character commit SHA, and loads the test split separately for these exact
+configs and order:
+
+1. `high_school_mathematics`
+2. `high_school_physics`
+3. `high_school_chemistry`
+4. `high_school_biology`
+5. `high_school_psychology`
+
+For each config it verifies the complete test-split size, uses streaming,
+attaches the source row index before shuffling, shuffles with seed 42 and a
+buffer equal to that verified split size, and takes exactly 100. It stages and
+reloads the 500-record cache and all manifests before touching final paths.
+Subject, revision, count, schema, identity, or hash failure publishes no final
+manifest file. A successful first publication renames the complete staged
+`part1` manifest directory once on the same filesystem. An existing complete
+identical bundle is retained byte-for-byte; a partial or differing bundle is a
+hard incompatibility. The job never invokes Git.
+
+Expected successful artifacts:
+
+```text
+logs/materialize-part1-mmlu-<job-id>.out
+manifests/part1/questions.jsonl
+manifests/part1/questions.manifest.json
+manifests/part1/study_manifest.json
+data/part1/mmlu-<question_manifest_hash>/
+```
+
+The final log line is a compact JSON report containing the resolved revision,
+verified source split counts, total count, three identities/hashes, publication
+states, manifest paths, and cache path. A failure writes a compact JSON error
+and exits 2.
+
+After the job completes, return the three tracked manifests and the log. Run
+the login-safe independent validation from a checkout containing those files:
+
+```bash
+uv run python scripts/validate_part1_manifests.py
+wc -l manifests/part1/questions.jsonl
+git diff -- manifests/part1
+git status --short
+```
+
+On Mila, additionally compare the ignored cache with the authoritative records
+using the hash printed by the first command:
+
+```bash
+uv run python scripts/validate_part1_manifests.py \
+  --dataset-cache data/part1/mmlu-<question_manifest_hash>
+```
+
+Only after this validation and human review should the three generated
+manifest files be committed in a separate scoped commit.
+
+## Prepared GPU sequence — not yet run
+
+The first eventual GPU command is:
+
+```bash
+sbatch jobs/part1_smollm3_preflight.sh
+```
+
+It is **not eligible yet** and has not been run. It requires the validated CPU
+manifests. If it passes, the later prepared commands are:
+
+```bash
+sbatch jobs/part1_reproducibility.sh
+sbatch jobs/part1_smoke_a.sh
+sbatch jobs/part1_smoke_b.sh
+```
+
+Each is GPU-dependent and unverified. Do not submit the full 500-question run.
 
 ## Implemented shard layout
 
@@ -227,8 +312,8 @@ quarantines them before continuing. The active claim is removed last.
 
 First creation of a stream/control/report/finalization file fsyncs both the
 file and its containing directory. Creating a missing shard-root or history
-directory component also fsyncs the parent directory entry. Before Phase 2
-relies on this protocol, exercise directory `fsync`, no-overwrite hard-link
+directory component also fsyncs the parent directory entry. Before a Mila GPU
+smoke relies on this protocol, exercise directory `fsync`, no-overwrite hard-link
 publication, atomic replacement, and two-process POSIX `flock` on the selected
 Mila persistent filesystem.
 
@@ -299,12 +384,12 @@ effective generation settings, confidence boundary/null matrices, and the
 structured final-10%-of-reasoning tail-entropy rule. Recomputing IDs and hashes
 does not make drifted science compatible.
 
-## Phase 2/3 lifecycle, still deferred
+## Remaining Phase 2/3 lifecycle
 
-1. Phase 2 CPU job resolves/materializes the fixed MMLU sample using streaming
-   plus bounded selection, then the tracked question/study manifests are
-   inspected and committed.
-2. Phase 2 GPU compute preflight resolves immutable SmolLM3/tokenizer revisions,
+1. The prepared Phase 2 CPU job resolves/materializes the fixed MMLU sample
+   using explicit per-subject streaming plus bounded selection; its returned
+   tracked question/study manifests are independently inspected and committed.
+2. The prepared Phase 2 GPU compute preflight resolves immutable SmolLM3/tokenizer revisions,
    tags, prompt, inducer, A–D convention, environment, and effective settings.
 3. Only an explicitly authorized bounded smoke runs under
    `results/part1-smoke/`, using Phase 1 locks/events/storage/resume.

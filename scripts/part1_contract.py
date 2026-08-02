@@ -65,6 +65,10 @@ CONFIG_NAMES = {
     "retries",
     "analysis",
 }
+CONFIG_VERSIONS = {
+    name: ("1.1.0" if name == "dataset_materialization" else "1.0.0")
+    for name in CONFIG_NAMES
+}
 AUDIT_EVENT_TYPES = {
     "attempt_started",
     "attempt_failed",
@@ -222,10 +226,11 @@ _FIXED_PHASE1_CONFIGS = {
     },
     "dataset_materialization": {
         "schema_name": "part1_dataset_materialization_config",
-        "config_version": "1.0.0",
+        "config_version": "1.1.0",
         "source_repository": "cais/mmlu",
-        "source_revision": None,
-        "source_config": "all",
+        "source_revision": "main",
+        "source_config_strategy": "per_subject",
+        "source_configs": FIXED_SUBJECTS,
         "source_split": "test",
         "streaming": True,
         "bounded_take_required": True,
@@ -324,7 +329,8 @@ QUESTION_MANIFEST_FIELDS = (
     "manifest_format_version",
     "source_repository",
     "source_revision",
-    "source_config",
+    "source_config_strategy",
+    "source_configs",
     "source_split",
     "subjects",
     "quota_per_subject",
@@ -338,6 +344,8 @@ QUESTION_MANIFEST_FIELDS = (
 STUDY_FIELDS = (
     "schema_name",
     "schema_version",
+    "question_source_repository",
+    "question_source_revision",
     "question_manifest_hash",
     "subjects",
     "subject_quotas",
@@ -358,6 +366,8 @@ STUDY_FIELDS = (
     "analysis_contract_version",
 )
 STUDY_ID_FIELDS = (
+    "question_source_repository",
+    "question_source_revision",
     "question_manifest_hash",
     "subjects",
     "subject_quotas",
@@ -532,11 +542,17 @@ def study_manifest_hash(manifest: Mapping[str, Any]) -> str:
 
 
 def model_run_id(manifest: Mapping[str, Any]) -> str:
-    return _identity_hash("model_run_id", _select(manifest, MODEL_RUN_ID_FIELDS))
+    payload = _select(manifest, MODEL_RUN_ID_FIELDS)
+    if "execution_scope" in manifest:
+        payload["execution_scope"] = manifest["execution_scope"]
+    return _identity_hash("model_run_id", payload)
 
 
 def model_run_manifest_hash(manifest: Mapping[str, Any]) -> str:
-    return _identity_hash("model_run_manifest_hash", _select(manifest, MODEL_RUN_FIELDS))
+    payload = _select(manifest, MODEL_RUN_FIELDS)
+    if "execution_scope" in manifest:
+        payload["execution_scope"] = manifest["execution_scope"]
+    return _identity_hash("model_run_manifest_hash", payload)
 
 
 def natural_record_id(study_id_value: str, model_run_id_value: str, question_id_value: str, run_id: int) -> str:
@@ -858,7 +874,10 @@ def validate_phase1_config(
         raise ValueError(f"missing configuration templates: {', '.join(sorted(missing))}")
     for name in CONFIG_NAMES:
         config = configs[name]
-        if config.get("schema_name") != f"part1_{name}_config" or config.get("config_version") != "1.0.0":
+        if (
+            config.get("schema_name") != f"part1_{name}_config"
+            or config.get("config_version") != CONFIG_VERSIONS[name]
+        ):
             raise ValueError(f"invalid schema_name/config_version for {name}")
         expected_config = _FIXED_PHASE1_CONFIGS[name]
         ignored_fields = {"smoke_root", "production_root"} if name == "storage" else set()

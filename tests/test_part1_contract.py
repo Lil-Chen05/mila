@@ -52,6 +52,106 @@ def test_fixed_tail_entropy_contract_encodes_exact_final_ten_percent_window() ->
     }
 
 
+def test_dataset_materialization_config_uses_explicit_per_subject_strategy() -> None:
+    config = load_config("dataset_materialization")
+
+    assert "source_config" not in config
+    assert config["source_config_strategy"] == "per_subject"
+    assert config["source_configs"] == [
+        "high_school_mathematics",
+        "high_school_physics",
+        "high_school_chemistry",
+        "high_school_biology",
+        "high_school_psychology",
+    ]
+    assert config["source_revision"] == "main"
+
+
+def test_dataset_revision_is_part_of_study_identity_and_complete_hash() -> None:
+    study = {
+        "schema_name": "part1_study_manifest",
+        "schema_version": "1.1.0",
+        "question_source_repository": "cais/mmlu",
+        "question_source_revision": "a" * 40,
+        "question_manifest_hash": "b" * 64,
+        "subjects": ["high_school_mathematics"],
+        "subject_quotas": {"high_school_mathematics": 1},
+        "question_sampling_seed": 42,
+        "scientific_protocol_version": "part1-science-v1",
+        "checkpoint_fractions": [0.0, 0.5, 1.0],
+        "checkpoint_placement_contract": {"version": "ties-even-v1"},
+        "entropy_contract": {"version": "entropy-v1"},
+        "natural_answer_validity_rule": {"version": "post-close-v1"},
+        "status_contract_version": "part1-status-v1",
+        "calibration_contract": {"version": "calibration-v1"},
+        "bootstrap_contract": {"version": "bootstrap-v1"},
+        "primary_auroc_feature_registry": ["negative_mean_reasoning_entropy"],
+        "within_question_analysis": {"version": "paired-v1"},
+        "switching_stabilization_contract": {"version": "trajectory-v1"},
+        "repetition_policy": "preserve-successful-output",
+        "compatible_raw_record_schema_versions": ["1.0.0"],
+        "analysis_contract_version": "part1-analysis-v1",
+    }
+
+    changed = {**study, "question_source_revision": "c" * 40}
+    assert study_id(study) != study_id(changed)
+    assert study_manifest_hash(study) != study_manifest_hash(changed)
+
+
+def test_manifest_schemas_require_resolved_revision_and_per_subject_strategy() -> None:
+    subjects = [
+        "high_school_mathematics",
+        "high_school_physics",
+        "high_school_chemistry",
+        "high_school_biology",
+        "high_school_psychology",
+    ]
+    question_manifest = {
+        "schema_name": "part1_question_manifest",
+        "schema_version": "1.1.0",
+        "question_manifest_hash": "a" * 64,
+        "manifest_format_version": "jsonl-v1",
+        "source_repository": "cais/mmlu",
+        "source_revision": "b" * 40,
+        "source_config_strategy": "per_subject",
+        "source_configs": subjects,
+        "source_split": "test",
+        "subjects": subjects,
+        "quota_per_subject": 100,
+        "total_count": 500,
+        "question_sampling_seed": 42,
+        "selection_algorithm_version": "part1-subject-stream-shuffle-v1",
+        "canonicalization_version": CANONICAL_JSON_VERSION,
+        "ordered_record_aggregation": "canonical-record-bytes-in-manifest-order-v1",
+        "logical_filename": "questions.jsonl",
+    }
+    validate_instance("question_manifest", question_manifest)
+    with pytest.raises(ValueError, match="source_config"):
+        validate_instance(
+            "question_manifest",
+            {**question_manifest, "source_config": "all"},
+        )
+    with pytest.raises(ValueError, match="source_revision"):
+        validate_instance(
+            "question_manifest",
+            {**question_manifest, "source_revision": "main"},
+        )
+
+    study = {
+        "schema_name": "part1_study_manifest",
+        "schema_version": "1.1.0",
+        "study_id": "c" * 64,
+        "study_manifest_hash": "d" * 64,
+        "question_source_repository": "cais/mmlu",
+        "question_source_revision": "b" * 40,
+        "question_manifest_hash": "a" * 64,
+        **FIXED_STUDY_CONTRACT,
+    }
+    validate_instance("study_manifest", study)
+    with pytest.raises(ValueError, match="question_source_revision"):
+        validate_instance("study_manifest", {**study, "question_source_revision": "main"})
+
+
 def question() -> dict:
     return {
         "schema_name": "part1_question_record",
@@ -292,11 +392,12 @@ def test_manifest_and_study_identity_hashes_use_explicit_immutable_fields() -> N
     q = question()
     sidecar = {
         "schema_name": "part1_question_manifest",
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
         "manifest_format_version": "jsonl-v1",
         "source_repository": "cais/mmlu",
         "source_revision": "immutable-revision",
-        "source_config": "all",
+        "source_config_strategy": "per_subject",
+        "source_configs": ["high_school_mathematics"],
         "source_split": "test",
         "subjects": ["high_school_mathematics"],
         "quota_per_subject": 1,
@@ -316,7 +417,9 @@ def test_manifest_and_study_identity_hashes_use_explicit_immutable_fields() -> N
 
     study = {
         "schema_name": "part1_study_manifest",
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
+        "question_source_repository": "cais/mmlu",
+        "question_source_revision": "a" * 40,
         "question_manifest_hash": mh,
         "subjects": ["high_school_mathematics"],
         "subject_quotas": {"high_school_mathematics": 1},
@@ -355,6 +458,7 @@ def test_model_run_and_record_identity_key_boundaries() -> None:
     manifest = {
         "schema_name": "part1_model_run_manifest",
         "schema_version": "1.0.0",
+        "execution_scope": "smoke_a",
         "study_id": HEX_64,
         "study_manifest_hash": HEX_64_B,
         "question_manifest_hash": HEX_64_C,
@@ -394,6 +498,19 @@ def test_model_run_and_record_identity_key_boundaries() -> None:
         "model_run_manifest",
         {**manifest, "model_run_id": rid, "model_run_manifest_hash": rhash},
     )
+    with pytest.raises(ValueError, match="execution_scope"):
+        validate_instance(
+            "model_run_manifest",
+            {
+                key: value
+                for key, value in {
+                    **manifest,
+                    "model_run_id": rid,
+                    "model_run_manifest_hash": rhash,
+                }.items()
+                if key != "execution_scope"
+            },
+        )
     with pytest.raises(ValueError, match="final_production_git_commit"):
         validate_instance(
             "model_run_manifest",
@@ -408,11 +525,27 @@ def test_model_run_and_record_identity_key_boundaries() -> None:
         **manifest,
         "model_run_id": rid,
         "model_run_manifest_hash": rhash,
+        "execution_scope": "production",
         "production": True,
         "final_production_git_commit": "f" * 40,
         "smoke_git_provenance": None,
     }
     validate_instance("model_run_manifest", production_manifest)
+    with pytest.raises(ValueError, match="execution_scope"):
+        validate_instance(
+            "model_run_manifest",
+            {**production_manifest, "execution_scope": "smoke_a"},
+        )
+    with pytest.raises(ValueError, match="execution_scope"):
+        validate_instance(
+            "model_run_manifest",
+            {
+                **manifest,
+                "model_run_id": rid,
+                "model_run_manifest_hash": rhash,
+                "execution_scope": "production",
+            },
+        )
     with pytest.raises(ValueError, match="smoke_git_provenance"):
         validate_instance(
             "model_run_manifest",
@@ -499,11 +632,12 @@ def test_all_public_identity_functions_have_fixed_golden_vectors() -> None:
     q = question()
     sidecar = {
         "schema_name": "part1_question_manifest",
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
         "manifest_format_version": "jsonl-v1",
         "source_repository": "cais/mmlu",
         "source_revision": "immutable-revision",
-        "source_config": "all",
+        "source_config_strategy": "per_subject",
+        "source_configs": ["high_school_mathematics"],
         "source_split": "test",
         "subjects": ["high_school_mathematics"],
         "quota_per_subject": 1,
@@ -517,7 +651,9 @@ def test_all_public_identity_functions_have_fixed_golden_vectors() -> None:
     qmh = question_manifest_hash(sidecar, [q])
     study = {
         "schema_name": "part1_study_manifest",
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
+        "question_source_repository": "cais/mmlu",
+        "question_source_revision": "a" * 40,
         "question_manifest_hash": qmh,
         "subjects": ["high_school_mathematics"],
         "subject_quotas": {"high_school_mathematics": 1},
@@ -541,6 +677,7 @@ def test_all_public_identity_functions_have_fixed_golden_vectors() -> None:
     model = {
         "schema_name": "part1_model_run_manifest",
         "schema_version": "1.0.0",
+        "execution_scope": "smoke_a",
         "study_id": sid,
         "study_manifest_hash": study_manifest_hash(study),
         "question_manifest_hash": qmh,
@@ -603,16 +740,16 @@ def test_all_public_identity_functions_have_fixed_golden_vectors() -> None:
     assert actual == {
         "question_content_hash": "c57e912ef72fee82c4920d43a9b284a5e79657f10ef6b72f136a2318824c8f30",
         "question_id": "71a3c45f7d81db3c6acd133e67e277b08f7b492ba1db8fb3ae3531123520548b",
-        "question_manifest_hash": "c81a3382357488a06aa6ddaea3a999779f3dada7787dc42c27d8142914d57133",
-        "study_id": "a6b8a3b2d52bbc692dc65704ddddfd843f09c823e8ff6f8007469fee1cac011e",
-        "study_manifest_hash": "0b559ef0867d875da4c7bdba30f44ba72bf034284cf67f0a8fea3c2020155bdd",
-        "model_run_id": "c5805e34bfd4f3661e9ad8289d8cc54785dc530731e5cb701b64e16df9e18246",
-        "model_run_manifest_hash": "4502d6cefb35b3c819ea59c2bdf50874ea6cf274d831df73642de7ee7a81863b",
-        "natural_record_id": "1e251f76fb293bae1b6228bcfc14c50c49bbd9f8971857fb99cc1d564eea879b",
-        "checkpoint_record_id": "ba39257c156e76b1d0100107af50d6987b73f327e7e16eccebef7ea753357dd2",
-        "shared_probe_id": "13582938eb479996fb846ca6f940c918f841ab22c6465865b36a8dcfe03599d1",
-        "attempt_id": "05c4cdf98323649b43357c2e3446bb55ada994405ee4f76bf3d80dd0623b2ef3",
-        "audit_event_id": "6460e30564fc371f5b83c4e4695a8fab8c3b980b710f24e7e7c57060fe1f2165",
+        "question_manifest_hash": "847e137af6cf54f2229e8d3a1c77f3946e033767bae4c98202d78a21481d9f9c",
+        "study_id": "f6dcd60f6f3ff4df1491ffbc432d9517502da66f54040da7a457d0e80d9646cd",
+        "study_manifest_hash": "69fa5f497ccbe6583a244498a29f2fdc3a5b39a2f4e899369da69a48d7be8334",
+        "model_run_id": "5a3c4de869e931b2b5e5aab8de37256f518dbdd12dd5043c6ecb595aa18c9b9c",
+        "model_run_manifest_hash": "2c615ff2726f39218ee8e0b37d36b62d51d5474abb79966c5162ab5163a6a51a",
+        "natural_record_id": "46af082626ae9b026443d85d699fcd20683d32a8785a156971d889861f460db6",
+        "checkpoint_record_id": "f68bf754bb545a9c4f41543737a11479e4d618654c082f77cbf8f35f04de298d",
+        "shared_probe_id": "579e78992c7e1c844dbcf50b986c94b26ffcffbeb4b79d969d073d6ccb3aa5ef",
+        "attempt_id": "5a5c243cbb26c251ab7ab0caad9dd3c8be04c6db8048c233e97e7cd4b5c49e94",
+        "audit_event_id": "2f35041e07aa7c6c94024193e0c334d636ee89efb5d73892ce5cb6030b81ae57",
     }
 
 
@@ -641,7 +778,8 @@ def test_all_machine_readable_schemas_and_configs_are_present() -> None:
         assert schema["$id"].endswith(f"/{name}.schema.json")
     for name in CONFIG_NAMES:
         config = load_config(name)
-        assert config["config_version"] == "1.0.0"
+        expected_version = "1.1.0" if name == "dataset_materialization" else "1.0.0"
+        assert config["config_version"] == expected_version
 
 
 def test_question_and_manifest_schemas_validate_and_reject_extra_fields() -> None:
@@ -855,12 +993,13 @@ def test_manifest_and_validation_report_schemas_accept_complete_examples() -> No
     ]
     qmanifest = {
         "schema_name": "part1_question_manifest",
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
         "question_manifest_hash": qmh,
         "manifest_format_version": "jsonl-v1",
         "source_repository": "cais/mmlu",
-        "source_revision": "immutable",
-        "source_config": "all",
+        "source_revision": "a" * 40,
+        "source_config_strategy": "per_subject",
+        "source_configs": fixed_subjects,
         "source_split": "test",
         "subjects": fixed_subjects,
         "quota_per_subject": 100,
@@ -877,9 +1016,11 @@ def test_manifest_and_validation_report_schemas_accept_complete_examples() -> No
 
     study = {
         "schema_name": "part1_study_manifest",
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
         "study_id": HEX_64_B,
         "study_manifest_hash": HEX_64_C,
+        "question_source_repository": "cais/mmlu",
+        "question_source_revision": "a" * 40,
         "question_manifest_hash": qmh,
         "subjects": fixed_subjects,
         "subject_quotas": {subject: 100 for subject in fixed_subjects},

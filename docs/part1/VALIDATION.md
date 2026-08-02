@@ -8,10 +8,61 @@ probes, retry planning, and resume logic. It must not load a model, tokenizer,
 dataset, torch weights, or CUDA, invoke real Slurm, create an operational
 production manifest, or generate experiment output.
 
-Passing Phase 1 tests establishes the repository contract. It does not establish
+Passing local tests establishes the repository contract. It does not establish
 SmolLM3 behavior, MMLU provenance, Mila filesystem locking, real scheduler
 semantics, compute-node execution, or production readiness. Those remain
 resource-appropriate Phase 2/3 gates.
+
+## Phase 2 local-preparation evidence and exclusions
+
+The current preparation is CPU/login-safe code evidence only. It covers:
+
+- migration to explicit per-subject MMLU configs and 40-character resolved
+  commit enforcement;
+- deterministic five-block/seeded-order normalization, 500-record schema and
+  identity/hash construction, staged reload, single-directory atomic
+  publication, identical-only reruns, and independent returned-file validation;
+- pure SmolLM3 prompt rendering, tag/token-boundary contracts, answer/confidence
+  parsing, context arithmetic, natural entropy summaries, ten deterministic
+  seeds, ties-to-even checkpoints, alias recovery, A–D metrics, smoke budgets,
+  model-run identity separation, reproducibility comparison, and storage
+  estimates; and
+- Phase 1 append ordering, terminal-result authority, crash recovery, exclusive
+  locking, retry counting, checkpoint-only resume, and stale-lock handling.
+
+The fake dataset backend never imports or loads `cais/mmlu`. Fake tokenizer,
+synthetic logits, and constructed records prove only control flow, schema,
+parsing, and persistence. They are explicitly not evidence for real SmolLM3
+tokens, tags, logits, entropy, generation, CUDA, reproducibility, or scientific
+results. The catalog at `tests/fixtures/part1_synthetic/catalog.json` marks the
+analysis-specific AUROC/bootstrap/macro/within-question/switching cases as
+implemented synthetic raw-input families. Their tests establish only schema
+validity and the named input conditions; Phase 3 AUROC, bootstrap, macro
+aggregation, within-question, switching, and stabilization logic remains
+unimplemented and unverified.
+
+| Gate | Current evidence |
+|---|---|
+| Local pure/unit/integration suite | `361 passed in 137.08s` with `UV_CACHE_DIR=/private/tmp/comp400-uv-cache uv run --no-sync python -m pytest -q --tb=short` |
+| Real MMLU revision, rows, counts, hashes, cache | **NOT RUN — Mila CPU job required** |
+| Returned manifest independent validation | **BLOCKED — outputs do not exist** |
+| Real SmolLM3/tokenizer preflight and forward | **NOT RUN — GPU required** |
+| Same-environment reproducibility | **NOT RUN — GPU required** |
+| Smoke A / Smoke B | **NOT RUN — GPU required** |
+| Mila filesystem and scheduler behavior | **NOT RUN** |
+
+The next evidence-producing command is
+`sbatch jobs/materialize_part1_mmlu.sh`. After returned outputs are present,
+validate them with:
+
+```bash
+uv run python scripts/validate_part1_manifests.py
+uv run python scripts/validate_part1_manifests.py \
+  --dataset-cache data/part1/mmlu-<question_manifest_hash>
+```
+
+The second form loads only the already saved compute-node cache and must also
+report `dataset_cache: "matches_authoritative_manifest"`.
 
 ## Prompt 1 and Phase 1 ledger
 

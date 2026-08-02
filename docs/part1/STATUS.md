@@ -2,16 +2,21 @@
 
 ## Executive status
 
-**Prompt 2 / Phase 1 is implemented and independently verified on branch
-`codex/phase1-infrastructure`. Stop before Phase 2.** The repository now has
-executable schemas, canonical identities and seeds, crash-consistent normalized
-storage, exclusive shard ownership, failure policy, retry planning,
-resumability, validation reports, and login-safe operator tools.
+**Phase 2 is partially implemented and paused at the Mila execution boundary on
+branch `codex/phase1-infrastructure`.** Phase 1 remains complete. The local
+preparation now includes the CPU-only atomic MMLU bootstrap, independent
+returned-manifest validator, SmolLM3 adapter and generation/checkpoint logic,
+non-production preflight/smoke/reproducibility entry points, storage estimates,
+and synthetic control-flow tests.
 
-Phase 1 did not load a model, tokenizer, dataset, CUDA runtime, or invoke real
-SLURM. It did not materialize MMLU, create the fixed question/study manifests,
-create a production model-run manifest, generate a smoke or production output,
-or launch the experiment. The full 500-question run remains unauthorized.
+No Mila/SSH access, dataset/model/tokenizer loading, CUDA execution, or SLURM
+submission occurred during this preparation. Therefore the fixed question and
+study manifests do not yet exist, their hashes are unresolved, the immutable
+MMLU/model/tokenizer revisions are unresolved, and every real SmolLM3/GPU claim
+remains explicitly unverified. Phase 2 is not complete. The next required step
+is exactly `sbatch jobs/materialize_part1_mmlu.sh` from the Mila repository
+checkout; do not start GPU preflight before its outputs have been returned and
+validated.
 
 Read this with [PLAN.md](PLAN.md), [DECISIONS.md](DECISIONS.md),
 [SCHEMA.md](SCHEMA.md), [RUNBOOK.md](RUNBOOK.md), and
@@ -126,8 +131,10 @@ zero reasoning tokens; even a self-consistent rehashed 20% manifest is rejected.
 The two-level provenance design is implemented as schema/validation support,
 not as concrete Phase 2/3 artifacts:
 
-1. The tracked question manifest and tracked model-independent study manifest
-   remain Phase 2 outputs under `manifests/part1/`; neither exists yet.
+1. The tracked question JSONL, question sidecar, and model-independent study
+   manifest remain Mila-generated Phase 2 outputs under `manifests/part1/`;
+   none exists yet. The local job publishes all three together with one
+   same-filesystem directory rename only after full validation.
 2. The operational model-run-manifest schema exists. No production instance
    exists. Phase 3 may create one only after the final production commit and a
    clean tracked-worktree gate, under the ignored persistent production root.
@@ -217,13 +224,26 @@ post-liveness/operator-evidence step, not ordinary recovery.
 Validation reports are written externally at an explicitly supplied path; the
 configured directory name is `validation_reports`.
 
-## Phase 2 blockers and risks
+## Phase 2 pause boundary, blockers, and risks
 
-There is no remaining repository-code blocker within Phase 1. The next phase is
-gated on:
+The local preparation is gated first on CPU compute-node materialization:
 
-1. resolving immutable MMLU dataset revision/source-row identity and creating
-   the tracked fixed question/study manifests on a compute node where required;
+```bash
+sbatch jobs/materialize_part1_mmlu.sh
+```
+
+Expected tracked outputs are `manifests/part1/questions.jsonl`,
+`manifests/part1/questions.manifest.json`, and
+`manifests/part1/study_manifest.json`. The ignored reproducible cache is
+`data/part1/mmlu-<question_manifest_hash>/`; the job log is
+`logs/materialize-part1-mmlu-<job-id>.out`. The manifests, not the cache, are
+authoritative.
+
+Remaining gates are:
+
+1. resolving the immutable MMLU commit, streaming each explicit subject config,
+   and creating/returning the tracked fixed question/study manifests in the CPU
+   job;
 2. resolving immutable model/tokenizer revisions, prompt/tag/token conventions,
    and effective generation settings through SmolLM3 compute-node preflight;
 3. confirming directory `fsync`, no-overwrite hard-link publication, atomic
@@ -238,4 +258,6 @@ gated on:
    remain separate from production.
 
 No production model-run manifest or production generation is permitted at this
-boundary.
+boundary. The prepared next GPU command, which has **not** been run, is
+`sbatch jobs/part1_smollm3_preflight.sh`; it becomes eligible only after the
+CPU outputs pass independent review.
