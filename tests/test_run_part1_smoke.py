@@ -58,6 +58,94 @@ def test_smoke_selection_fails_if_manifest_order_or_count_is_wrong() -> None:
         select_smoke_work(bad, execution_scope="smoke_b")
 
 
+def test_execute_natural_scopes_global_rng_without_passing_generator() -> None:
+    import torch
+
+    import run_part1_smoke
+    from part1_generation import NATURAL_GENERATION_SETTINGS
+
+    class FakeTokenizer:
+        eos_token_id = 2
+
+        def apply_chat_template(self, _messages, **_kwargs):
+            return "rendered prompt"
+
+        def __call__(self, _prompt, **_kwargs):
+            input_ids = torch.tensor([[1, 2]], dtype=torch.long)
+            return {"input_ids": input_ids, "attention_mask": torch.ones_like(input_ids)}
+
+        def decode(self, token_ids, **_kwargs):
+            values = list(token_ids)
+            if values in ([100], [101]):
+                return "sampled reasoning"
+            return "<think>sampled reasoning</think>\nAnswer: C\nConfidence: 80"
+
+    class FakeModel:
+        device = torch.device("cpu")
+
+        def __init__(self) -> None:
+            self.generation_kwargs = []
+
+        def generate(self, *, input_ids, attention_mask, **kwargs):
+            if "generator" in kwargs:
+                raise TypeError("generator must not be passed to generate")
+            self.generation_kwargs.append(kwargs)
+            sampled = int(torch.multinomial(torch.tensor([0.5, 0.5]), 1).item())
+            generated = torch.tensor(
+                [[10, 100 + sampled, 11, 20, 21, 2]], dtype=torch.long
+            )
+            sequences = torch.cat((input_ids, generated), dim=1)
+            logits = tuple(torch.tensor([[0.0, 0.0]]) for _ in generated[0])
+            return SimpleNamespace(sequences=sequences, logits=logits)
+
+    question = {
+        "question": "What is 2 + 2?",
+        "choices": ["1", "2", "4", "5"],
+        "question_id": "e" * 64,
+        "sample_index": 0,
+        "subject": "high_school_mathematics",
+        "gold_letter": "C",
+    }
+    model_manifest = {
+        "study_id": "a" * 64,
+        "model_run_id": "b" * 64,
+        "model_run_manifest_hash": "c" * 64,
+        "question_manifest_hash": "d" * 64,
+        "effective_natural_generation": NATURAL_GENERATION_SETTINGS,
+    }
+    token_contract = {
+        "reasoning_open_token_ids": [10],
+        "reasoning_close_token_ids": [11],
+    }
+    model = FakeModel()
+    tokenizer = FakeTokenizer()
+
+    def execute():
+        return run_part1_smoke._execute_natural(
+            model=model,
+            tokenizer=tokenizer,
+            question=question,
+            run_id=0,
+            seed=123,
+            attempt_number=1,
+            model_manifest=model_manifest,
+            token_contract=token_contract,
+        )
+
+    torch.manual_seed(987)
+    state_before_first = torch.random.get_rng_state().clone()
+    first = execute()
+    assert torch.equal(torch.random.get_rng_state(), state_before_first)
+
+    torch.rand(3)
+    state_before_second = torch.random.get_rng_state().clone()
+    second = execute()
+    assert torch.equal(torch.random.get_rng_state(), state_before_second)
+
+    assert first["generated_token_ids"] == second["generated_token_ids"]
+    assert model.generation_kwargs == [NATURAL_GENERATION_SETTINGS] * 2
+
+
 def session(tmp_path):
     store = Part1ShardStore(
         tmp_path / "shard",

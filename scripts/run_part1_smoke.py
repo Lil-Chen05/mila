@@ -203,13 +203,15 @@ def _execute_natural(
     encoded = tokenizer(prompt, add_special_tokens=False, return_tensors="pt")
     encoded = {key: value.to(model.device) for key, value in encoded.items()}
     prompt_ids = encoded["input_ids"][0].tolist()
-    generator = torch.Generator(device=model.device).manual_seed(seed)
-    with torch.inference_mode():
-        output = model.generate(
-            **encoded,
-            generator=generator,
-            **_generation_kwargs(model_manifest["effective_natural_generation"]),
-        )
+    generation_device = torch.device(model.device)
+    rng_devices = [generation_device] if generation_device.type == "cuda" else []
+    with torch.random.fork_rng(devices=rng_devices):
+        torch.manual_seed(seed)
+        with torch.inference_mode():
+            output = model.generate(
+                **encoded,
+                **_generation_kwargs(model_manifest["effective_natural_generation"]),
+            )
     if not hasattr(output, "logits") or output.logits is None:
         raise ValueError("generate output did not expose raw pre-warper logits")
     generated = output.sequences[0, len(prompt_ids) :].tolist()
