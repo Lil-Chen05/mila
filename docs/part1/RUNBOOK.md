@@ -2,10 +2,12 @@
 
 ## Status and safety boundary
 
-Phase 1's login-safe infrastructure remains implemented. Phase 2 local code and
-SLURM entry points are prepared, but execution is paused before the CPU Mila
-job. No command in this document is evidence that a job has run unless its
-returned artifact and log have been inspected.
+Phase 1's login-safe infrastructure remains implemented. Phase 2 is paused
+during bounded Smoke A. At snapshot `2026-08-04T18:52:39-04:00`, SLURM job
+`10284742` was `RUNNING` for `33:14` on `cn-l018`; the shard contained 7 natural
+results, 66 checkpoint results, and 146 audit events. Monitoring stopped then,
+without cancelling the job. Smoke A is still running or awaiting post-job
+validation; it is not passed. Smoke B has not been submitted.
 
 Never load a model, tokenizer, or Hugging Face dataset on a login node. Dataset
 materialization runs in a CPU SLURM job. Model/tokenizer preflight and generation
@@ -27,9 +29,10 @@ in [SCHEMA.md](SCHEMA.md), phase gates in [PLAN.md](PLAN.md), current state in
 - `results/part1-smoke/` and `results/part1/` are separate, narrow ignored
   roots. Phase 1 allows only smoke-mode configuration validation and performs no
   generation.
-- Tracked question JSONL/sidecar and study manifest will live under
-  `manifests/part1/`. They are authoritative, are not ignored, and do not yet
-  exist. The saved dataset under `data/part1/` is an ignored reproducible cache.
+- Tracked question JSONL/sidecar and study manifest live under
+  `manifests/part1/`. They are authoritative, are not ignored, and were
+  validated and committed in `2e0bcae`. The saved dataset under `data/part1/`
+  is an ignored reproducible cache.
 - Operational model-run manifests and raw shards are generated and ignored.
   No production model-run manifest exists; its Phase 3 creation follows the
   final production commit and clean-worktree gate.
@@ -38,9 +41,10 @@ Configuration validation refuses an omitted/mismatched root, smoke/production
 aliasing, `/tmp`, `/private/tmp`, literal `$SLURM_TMPDIR`, and paths under its
 expanded value.
 
-## CPU dataset bootstrap — next required Mila action
+## CPU dataset bootstrap — completed evidence
 
-From the repository root on Mila, submit exactly:
+CPU materialization job `10284018` already completed and produced the exact
+validated 500-question manifest bundle. Its submission command was:
 
 ```bash
 sbatch jobs/materialize_part1_mmlu.sh
@@ -82,8 +86,9 @@ verified source split counts, total count, three identities/hashes, publication
 states, manifest paths, and cache path. A failure writes a compact JSON error
 and exits 2.
 
-After the job completes, return the three tracked manifests and the log. Run
-the login-safe independent validation from a checkout containing those files:
+The returned bundle was independently validated and committed in `2e0bcae`.
+For later integrity checking, run the login-safe validator from the repository
+root:
 
 ```bash
 uv run python scripts/validate_part1_manifests.py
@@ -100,27 +105,131 @@ uv run python scripts/validate_part1_manifests.py \
   --dataset-cache data/part1/mmlu-<question_manifest_hash>
 ```
 
-Only after this validation and human review should the three generated
-manifest files be committed in a separate scoped commit.
+The materialization job must not be resubmitted as part of Smoke A monitoring.
 
-## Prepared GPU sequence — not yet run
+## GPU sequence — current pause
 
-The first eventual GPU command is:
+GPU preflight, including provenance refresh job `10284702`, passed on one L40S
+at Git commit `e19edf22c8a3f7462ab66d5cae11b38247df5ed9`. It records immutable
+model/tokenizer revision `a07cc9a04f16550a088caea529712d1d335b0ac1` at:
 
-```bash
-sbatch jobs/part1_smollm3_preflight.sh
+```text
+results/part1-smoke/preflight/preflight.json
 ```
 
-It is **not eligible yet** and has not been run. It requires the validated CPU
-manifests. If it passes, the later prepared commands are:
+Corrected reproducibility job `10284721` completed `0:0` and passed exact token,
+parse, and entropy-array equality at tolerance 0.0 for seed
+`2552280803631819986`. Its report is
+`results/part1-smoke/reproducibility/14c49484a4eebdb79372cb14b3e0076812e983d688c49aa7e3c2280bb44be7c0/reproducibility_report.json`.
+The Mila filesystem gate passed all four focused tests at
+`results/part1-smoke/mila-filesystem-gate.EUEXDB`, and the real scheduler
+liveness gate is approved with its documented fail-closed purged-job nuance.
+
+Smoke A job `10284742` was already submitted. Do not cancel it, resubmit it, or
+submit Smoke B or any other job while monitoring is paused. Do not submit the
+full 500-question run.
+
+## Resume Smoke A monitoring and validation
+
+Reconnect and inspect the exact existing job from the Mila repository root:
 
 ```bash
-sbatch jobs/part1_reproducibility.sh
-sbatch jobs/part1_smoke_a.sh
-sbatch jobs/part1_smoke_b.sh
+ssh mila
+cd /home/mila/c/chenje/my-project
+squeue --jobs=10284742 --noheader --format=%i,%T,%M,%R
 ```
 
-Each is GPU-dependent and unverified. Do not submit the full 500-question run.
+If the row is still present, record its current state and allow the existing job
+to continue. If the row is absent, query accounting:
+
+```bash
+sacct -j 10284742 \
+  --format=JobIDRaw,State,ExitCode,Elapsed,NodeList \
+  --noheader --parsable2
+```
+
+Do not treat an `squeue` error for a purged job as `DEAD`. The validated Mila
+semantics are: live exact output is `LIVE`; an immediately completed query with
+empty output and return code 0 is `DEAD`; a later purged query returning code 1
+is `UNKNOWN` and fails closed. Use `sacct`, the retained log, and process/lock
+evidence as appropriate.
+
+The frozen snapshot paths are:
+
+```text
+log:            logs/part1-smoke-a-10284742.out
+model manifest: results/part1-smoke/model-runs/smoke_a/model_run_manifest.json
+preflight:      results/part1-smoke/preflight/preflight.json
+shard:          results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000
+Git commit:     e19edf22c8a3f7462ab66d5cae11b38247df5ed9
+```
+
+Inspect the retained terminal output and stable line counts:
+
+```bash
+tail -n 80 logs/part1-smoke-a-10284742.out
+wc -l \
+  results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000/natural_results.jsonl \
+  results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000/checkpoint_results.jsonl \
+  results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000/audit_events.jsonl
+```
+
+When the job is terminal, first rerun the tracked-manifest validator, then use
+the existing read-only shard/lifecycle inspection. Neither command loads a
+dataset, tokenizer, or model:
+
+```bash
+uv run python scripts/validate_part1_manifests.py
+uv run python scripts/part1_dry_run.py \
+  --mode smoke \
+  --persistent-root results/part1-smoke \
+  --study-manifest manifests/part1/study_manifest.json \
+  --model-run-manifest results/part1-smoke/model-runs/smoke_a/model_run_manifest.json \
+  --shard-root results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000
+uv run python -c '
+import collections, json
+from pathlib import Path
+root = Path("results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000")
+load = lambda name: [json.loads(line) for line in (root / name).read_text().splitlines()]
+naturals = load("natural_results.jsonl")
+checkpoints = load("checkpoint_results.jsonl")
+expected_runs = set(range(10))
+expected_checkpoints = set(range(11))
+question_ids = {row["question_id"] for row in naturals}
+by_run = collections.defaultdict(set)
+for row in checkpoints:
+    assert row["question_id"] in question_ids
+    by_run[row["run_id"]].add(row["requested_checkpoint_index"])
+assert len(naturals) == 10 and len(checkpoints) == 110
+assert {row["run_id"] for row in naturals} == expected_runs and len(question_ids) == 1
+assert all(row["natural_execution_outcome"] == "complete" for row in naturals)
+assert set(by_run) == expected_runs and all(value == expected_checkpoints for value in by_run.values())
+assert all(row["checkpoint_execution_outcome"] == "complete" for row in checkpoints)
+print({"natural_results": 10, "checkpoint_results": 110, "shape": "passed"})
+'
+```
+
+Smoke A passes only if all of the following hold:
+
+1. SLURM accounting says `COMPLETED` with exit `0:0`, and the log contains the
+   runner's terminal JSON summary rather than only partial progress.
+2. Stable files contain exactly 10 natural terminal results and 110 checkpoint
+   terminal results. All ten run IDs belong to the same fixed question; each
+   successful natural has all eleven requested checkpoint identities, including
+   aliases.
+3. Manifest IDs/hashes and shard provenance match. All records pass schema,
+   array-alignment, hierarchy, duplicate/conflict, and lifecycle checks.
+4. There is no invalid or unterminated tail, pending recovery, missing terminal
+   closure, terminalization requirement, active writer lock, or pending
+   takeover. Audit evidence is policy-complete; its line count alone is not an
+   acceptance test.
+5. The dry-run report returns `is_valid=true`; the shape check confirms that
+   every natural and checkpoint execution completed without infrastructure
+   terminalization.
+
+Only after independent review of all five checks may Smoke A be marked passed.
+Smoke B then becomes eligible, but must not be submitted until the user resumes
+this work explicitly.
 
 ## Implemented shard layout
 
@@ -386,15 +495,16 @@ does not make drifted science compatible.
 
 ## Remaining Phase 2/3 lifecycle
 
-1. The prepared Phase 2 CPU job resolves/materializes the fixed MMLU sample
-   using explicit per-subject streaming plus bounded selection; its returned
-   tracked question/study manifests are independently inspected and committed.
-2. The prepared Phase 2 GPU compute preflight resolves immutable SmolLM3/tokenizer revisions,
-   tags, prompt, inducer, A–D convention, environment, and effective settings.
-3. Only an explicitly authorized bounded smoke runs under
-   `results/part1-smoke/`, using Phase 1 locks/events/storage/resume.
-4. Phase 3 adds full raw validation, validate-before-publish merge, analysis,
-   and SLURM launchers, followed by its bounded smoke.
+1. CPU materialization, tracked-manifest validation/commit, GPU preflight,
+   filesystem/scheduler checks, and corrected reproducibility are complete.
+2. Resume observation of existing Smoke A job `10284742`; do not resubmit it.
+   Validate its terminal accounting, log, counts, provenance, schemas,
+   lifecycle, hierarchy, tails, recovery, and lock state before marking it
+   passed.
+3. After explicit continuation and only if Smoke A passes, run the bounded
+   Smoke B job under `results/part1-smoke/` and validate it independently.
+4. Phase 3 adds analysis, complete raw validation, validate-before-publish
+   merge, SLURM readiness, and its final bounded smoke.
 5. Final tracked production artifacts are committed; the tracked worktree must
    be clean.
 6. Only then is the operational production model-run manifest generated under

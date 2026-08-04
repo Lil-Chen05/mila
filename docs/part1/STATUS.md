@@ -2,21 +2,20 @@
 
 ## Executive status
 
-**Phase 2 is partially implemented and paused at the Mila execution boundary on
-branch `codex/phase1-infrastructure`.** Phase 1 remains complete. The local
-preparation now includes the CPU-only atomic MMLU bootstrap, independent
-returned-manifest validator, SmolLM3 adapter and generation/checkpoint logic,
-non-production preflight/smoke/reproducibility entry points, storage estimates,
-and synthetic control-flow tests.
+**Phase 2 is paused during bounded Smoke A on branch
+`codex/phase1-infrastructure`.** CPU materialization and manifest validation,
+single-L40S SmolLM3 preflight, the Mila persistent-filesystem and scheduler
+liveness gates, and same-environment GPU reproducibility have passed. Phase 2
+is not complete.
 
-No Mila/SSH access, dataset/model/tokenizer loading, CUDA execution, or SLURM
-submission occurred during this preparation. Therefore the fixed question and
-study manifests do not yet exist, their hashes are unresolved, the immutable
-MMLU/model/tokenizer revisions are unresolved, and every real SmolLM3/GPU claim
-remains explicitly unverified. Phase 2 is not complete. The next required step
-is exactly `sbatch jobs/materialize_part1_mmlu.sh` from the Mila repository
-checkout; do not start GPU preflight before its outputs have been returned and
-validated.
+At the explicit pause snapshot `2026-08-04T18:52:39-04:00`, Smoke A SLURM job
+`10284742` was `RUNNING` for `33:14` on `cn-l018`. Durable files contained 7
+natural results, 66 checkpoint results, and 146 audit events. Monitoring stopped
+at that snapshot; the job was not cancelled. Its later state is deliberately
+unknown here. Smoke A remains **running or awaiting post-job validation** and
+must not be marked passed until its terminal SLURM state, runner report, and
+completed artifacts are independently validated. Smoke B has not been
+submitted, and no other job should be submitted while this pause is in effect.
 
 Read this with [PLAN.md](PLAN.md), [DECISIONS.md](DECISIONS.md),
 [SCHEMA.md](SCHEMA.md), [RUNBOOK.md](RUNBOOK.md), and
@@ -35,6 +34,37 @@ remain historical.
   passed.
 - `.superpowers/`, historical outputs, and unrelated user state were not
   modified.
+- The execution snapshot is based on Git commit
+  `e19edf22c8a3f7462ab66d5cae11b38247df5ed9` (`e19edf2`), which contains the
+  scoped RNG correction used by the passing reproducibility job. The fresh
+  local suite at this commit was **367 passed**.
+
+## Phase 2 operational ledger
+
+- CPU materialization job `10284018` produced and validated the exact tracked
+  500-question bundle: five ordered 100-question subject blocks, without
+  replacement, using question-sampling seed 42. The tracked manifest commit is
+  `2e0bcae`.
+- The current preflight/provenance artifacts were refreshed by job `10284702`,
+  which completed `0:0` on one L40S at the current commit. They bind both model
+  and tokenizer to immutable revision
+  `a07cc9a04f16550a088caea529712d1d335b0ac1`.
+- Corrected reproducibility job `10284721` completed `0:0` with status
+  `passed`: exact generated-token equality, exact parser equality, and exact
+  entropy-array equality at tolerance `0.0`, using canonical seed
+  `2552280803631819986`. Its report is
+  `results/part1-smoke/reproducibility/14c49484a4eebdb79372cb14b3e0076812e983d688c49aa7e3c2280bb44be7c0/reproducibility_report.json`.
+  Earlier job `10284623` was a diagnostic failed attempt before the RNG
+  correction and is not the current result.
+- The Mila persistent-filesystem gate passed all four focused tests at
+  `results/part1-smoke/mila-filesystem-gate.EUEXDB`, including directory
+  `fsync`, no-overwrite hard-link publication, atomic replacement, and
+  two-process POSIX `flock` behavior.
+- The scheduler liveness gate passed for live exact output. An immediately
+  completed job produced empty output with return code 0 and was classified
+  `DEAD`; a later purged job produced return code 1 and remains `UNKNOWN` under
+  the fail-closed policy. A purged `squeue` error must never be treated as
+  evidence that an owner is dead.
 
 ## Phase 1 implementation ledger
 
@@ -128,16 +158,17 @@ zero reasoning tokens; even a self-consistent rehashed 20% manifest is rejected.
 
 ## Manifest hierarchy status
 
-The two-level provenance design is implemented as schema/validation support,
-not as concrete Phase 2/3 artifacts:
+The two-level provenance design now has concrete non-production Phase 2
+artifacts while retaining the production gate:
 
 1. The tracked question JSONL, question sidecar, and model-independent study
-   manifest remain Mila-generated Phase 2 outputs under `manifests/part1/`;
-   none exists yet. The local job publishes all three together with one
-   same-filesystem directory rename only after full validation.
-2. The operational model-run-manifest schema exists. No production instance
-   exists. Phase 3 may create one only after the final production commit and a
-   clean tracked-worktree gate, under the ignored persistent production root.
+   manifest exist under `manifests/part1/`, were produced by job `10284018`,
+   independently validated, and were committed in `2e0bcae`.
+2. Non-production model-run manifests exist under
+   `results/part1-smoke/model-runs/` for preflight/reproducibility/smoke use.
+   No production instance exists. Phase 3 may create one only after the final
+   production commit and a clean tracked-worktree gate, under the ignored
+   persistent production root.
 
 Smoke and production roots are distinct and ignored. Phase 1 configuration
 rejects production mode, ambiguous roots, explicit/expanded ephemeral roots,
@@ -181,8 +212,9 @@ Coverage includes:
 - manifest compatibility, resume, idempotent rerun, and smoke/production path
   separation.
 
-All evidence was synthetic and login-safe. It is not model, dataset, GPU,
-filesystem-on-Mila, or real-scheduler validation.
+The evidence listed in this subsection is the historical Phase 1 synthetic
+evidence. The separate Phase 2 operational ledger above records the completed
+Mila dataset, GPU, filesystem, scheduler, and reproducibility gates.
 
 ## Current output contract
 
@@ -226,38 +258,59 @@ configured directory name is `validation_reports`.
 
 ## Phase 2 pause boundary, blockers, and risks
 
-The local preparation is gated first on CPU compute-node materialization:
+The paused Smoke A artifacts are:
 
-```bash
-sbatch jobs/materialize_part1_mmlu.sh
+```text
+job:            10284742
+Git commit:     e19edf22c8a3f7462ab66d5cae11b38247df5ed9
+shard:          results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000
+log:            logs/part1-smoke-a-10284742.out
+model manifest: results/part1-smoke/model-runs/smoke_a/model_run_manifest.json
+preflight:      results/part1-smoke/preflight/preflight.json
 ```
 
-Expected tracked outputs are `manifests/part1/questions.jsonl`,
-`manifests/part1/questions.manifest.json`, and
-`manifests/part1/study_manifest.json`. The ignored reproducible cache is
-`data/part1/mmlu-<question_manifest_hash>/`; the job log is
-`logs/materialize-part1-mmlu-<job-id>.out`. The manifests, not the cache, are
-authoritative.
+Resume from the Mila repository root without submitting anything:
 
-Remaining gates are:
+```bash
+ssh mila
+cd /home/mila/c/chenje/my-project
+squeue --jobs=10284742 --noheader --format=%i,%T,%M,%R
+```
 
-1. resolving the immutable MMLU commit, streaming each explicit subject config,
-   and creating/returning the tracked fixed question/study manifests in the CPU
-   job;
-2. resolving immutable model/tokenizer revisions, prompt/tag/token conventions,
-   and effective generation settings through SmolLM3 compute-node preflight;
-3. confirming directory `fsync`, no-overwrite hard-link publication, atomic
-   replacement, and stable POSIX `flock` behavior on the selected Mila
-   persistent filesystem;
-4. confirming the actual Mila `squeue` array selector/output and completed-job
-   absence semantics used by the fail-closed liveness probe;
-5. integrating generation only through `LockedShardSession`, complete compatible
-   manifests, policy-complete events/results, canonical seeds, and same-seed
-   retry; and
-6. ensuring transient CUDA retry exits to a fresh process and smoke artifacts
-   remain separate from production.
+If `squeue` has no live row, obtain accounting evidence instead; do not infer
+`DEAD` from a purged/error response:
 
-No production model-run manifest or production generation is permitted at this
-boundary. The prepared next GPU command, which has **not** been run, is
-`sbatch jobs/part1_smollm3_preflight.sh`; it becomes eligible only after the
-CPU outputs pass independent review.
+```bash
+sacct -j 10284742 \
+  --format=JobIDRaw,State,ExitCode,Elapsed,NodeList \
+  --noheader --parsable2
+tail -n 80 logs/part1-smoke-a-10284742.out
+wc -l \
+  results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000/natural_results.jsonl \
+  results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000/checkpoint_results.jsonl \
+  results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000/audit_events.jsonl
+uv run python scripts/validate_part1_manifests.py
+uv run python scripts/part1_dry_run.py \
+  --mode smoke \
+  --persistent-root results/part1-smoke \
+  --study-manifest manifests/part1/study_manifest.json \
+  --model-run-manifest results/part1-smoke/model-runs/smoke_a/model_run_manifest.json \
+  --shard-root results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000
+```
+
+For a successful Smoke A, require `COMPLETED` with exit `0:0`, the runner's
+terminal JSON summary in the log, 10 natural terminal records and 110 checkpoint
+terminal records, all ten run IDs for the same fixed question, and all eleven
+requested checkpoint identities for every successful natural run (including
+physical aliases). The dry run must confirm compatible manifests and hashes,
+valid schemas/hierarchy/lifecycle, no invalid tail or pending recovery, no
+terminalization requirement, no unresolved writer/takeover lock, and no
+retry-required work. Counts must be stable after the job is terminal. Audit
+events must be policy-complete; a line count alone is not sufficient.
+
+Only after that independent post-job validation may Smoke A be marked passed
+and Smoke B become eligible. Smoke B has not been submitted and must not be
+submitted during this pause. Remaining Mila/GPU work is Smoke A terminal
+validation followed, after explicit continuation, by bounded Smoke B and its
+validation. Phase 3 remains deferred. The full 500-question experiment is
+forbidden, and no production model-run manifest may be created.

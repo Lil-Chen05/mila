@@ -13,9 +13,9 @@ SmolLM3 behavior, MMLU provenance, Mila filesystem locking, real scheduler
 semantics, compute-node execution, or production readiness. Those remain
 resource-appropriate Phase 2/3 gates.
 
-## Phase 2 local-preparation evidence and exclusions
+## Phase 2 evidence and current Smoke A boundary
 
-The current preparation is CPU/login-safe code evidence only. It covers:
+The login-safe preparation evidence covers:
 
 - migration to explicit per-subject MMLU configs and 40-character resolved
   commit enforcement;
@@ -30,39 +30,69 @@ The current preparation is CPU/login-safe code evidence only. It covers:
 - Phase 1 append ordering, terminal-result authority, crash recovery, exclusive
   locking, retry counting, checkpoint-only resume, and stale-lock handling.
 
-The fake dataset backend never imports or loads `cais/mmlu`. Fake tokenizer,
-synthetic logits, and constructed records prove only control flow, schema,
-parsing, and persistence. They are explicitly not evidence for real SmolLM3
-tokens, tags, logits, entropy, generation, CUDA, reproducibility, or scientific
-results. The catalog at `tests/fixtures/part1_synthetic/catalog.json` marks the
-analysis-specific AUROC/bootstrap/macro/within-question/switching cases as
-implemented synthetic raw-input families. Their tests establish only schema
-validity and the named input conditions; Phase 3 AUROC, bootstrap, macro
-aggregation, within-question, switching, and stabilization logic remains
+The fake dataset/tokenizer/logit tests remain control-flow evidence only. They
+are now supplemented, but not replaced, by the bounded Mila evidence below.
+The catalog at `tests/fixtures/part1_synthetic/catalog.json` still establishes
+only schema validity and named raw-input conditions; Phase 3 AUROC, bootstrap,
+macro aggregation, within-question, switching, and stabilization logic remains
 unimplemented and unverified.
 
 | Gate | Current evidence |
 |---|---|
-| Local pure/unit/integration suite | `361 passed in 137.08s` with `UV_CACHE_DIR=/private/tmp/comp400-uv-cache uv run --no-sync python -m pytest -q --tb=short` |
-| Real MMLU revision, rows, counts, hashes, cache | **NOT RUN — Mila CPU job required** |
-| Returned manifest independent validation | **BLOCKED — outputs do not exist** |
-| Real SmolLM3/tokenizer preflight and forward | **NOT RUN — GPU required** |
-| Same-environment reproducibility | **NOT RUN — GPU required** |
-| Smoke A / Smoke B | **NOT RUN — GPU required** |
-| Mila filesystem and scheduler behavior | **NOT RUN** |
+| Local pure/unit/integration suite | **PASSED — 367 tests** at `e19edf22c8a3f7462ab66d5cae11b38247df5ed9` |
+| Real MMLU revision, rows, counts, hashes, cache | **PASSED — CPU job `10284018`; exact 500-question bundle** |
+| Returned manifest independent validation | **PASSED — tracked manifest commit `2e0bcae`** |
+| Real SmolLM3/tokenizer preflight and forward | **PASSED — provenance refresh `10284702`, `0:0`, one L40S; immutable revision `a07cc9a04f16550a088caea529712d1d335b0ac1`** |
+| Same-environment reproducibility | **PASSED — job `10284721`, `0:0`; exact tokens, parse, and entropy arrays at tolerance 0.0; seed `2552280803631819986`; report under model run `14c49484a4eebdb79372cb14b3e0076812e983d688c49aa7e3c2280bb44be7c0`** |
+| Mila persistent filesystem | **PASSED — four focused tests at `results/part1-smoke/mila-filesystem-gate.EUEXDB`** |
+| Mila scheduler liveness | **PASSED with fail-closed nuance — live exact output; immediate completed empty/rc0 is `DEAD`; later purged/rc1 is `UNKNOWN`** |
+| Smoke A | **RUNNING OR AWAITING VALIDATION — job `10284742`; not passed** |
+| Smoke B | **NOT SUBMITTED** |
 
-The next evidence-producing command is
-`sbatch jobs/materialize_part1_mmlu.sh`. After returned outputs are present,
-validate them with:
+At pause snapshot `2026-08-04T18:52:39-04:00`, Smoke A job `10284742` was
+`RUNNING` for `33:14` on `cn-l018`, with 7 natural results, 66 checkpoint
+results, and 146 audit events. Monitoring stopped then and the job was not
+cancelled. The shard, log, model-run manifest, and preflight are respectively:
 
-```bash
-uv run python scripts/validate_part1_manifests.py
-uv run python scripts/validate_part1_manifests.py \
-  --dataset-cache data/part1/mmlu-<question_manifest_hash>
+```text
+results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000
+logs/part1-smoke-a-10284742.out
+results/part1-smoke/model-runs/smoke_a/model_run_manifest.json
+results/part1-smoke/preflight/preflight.json
 ```
 
-The second form loads only the already saved compute-node cache and must also
-report `dataset_cache: "matches_authoritative_manifest"`.
+Do not infer success from partial counts. On resume, establish terminal state
+with `squeue`/`sacct`, inspect the terminal log, rerun both read-only validators,
+and inspect stable stream counts:
+
+```bash
+ssh mila
+cd /home/mila/c/chenje/my-project
+squeue --jobs=10284742 --noheader --format=%i,%T,%M,%R
+sacct -j 10284742 \
+  --format=JobIDRaw,State,ExitCode,Elapsed,NodeList \
+  --noheader --parsable2
+tail -n 80 logs/part1-smoke-a-10284742.out
+wc -l \
+  results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000/natural_results.jsonl \
+  results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000/checkpoint_results.jsonl \
+  results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000/audit_events.jsonl
+uv run python scripts/validate_part1_manifests.py
+uv run python scripts/part1_dry_run.py \
+  --mode smoke \
+  --persistent-root results/part1-smoke \
+  --study-manifest manifests/part1/study_manifest.json \
+  --model-run-manifest results/part1-smoke/model-runs/smoke_a/model_run_manifest.json \
+  --shard-root results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000
+```
+
+Smoke A can pass only with `COMPLETED`/`0:0`, the runner terminal JSON, exactly
+10 natural and 110 checkpoint terminal records, all ten run IDs for the same
+fixed question, all eleven checkpoint identities per successful natural
+(including aliases), compatible manifests/hashes/provenance, valid schemas and
+hierarchy, policy-complete lifecycle/audit evidence, and no invalid tail,
+pending recovery, terminalization, retry requirement, active writer lock, or
+pending takeover. A purged/error `squeue` query is `UNKNOWN`, not `DEAD`.
 
 ## Prompt 1 and Phase 1 ledger
 
@@ -241,22 +271,24 @@ metadata drift, parent/provenance inconsistency, duplicate results, or pending
 terminalization. The single authoritative-result/missing-completion case is a
 warning until reconciliation; it never authorizes retry.
 
-## Remaining Phase 2 acceptance matrix
+## Phase 2 acceptance matrix
 
-| Area | Environment | Required evidence |
+| Area | State | Evidence or remaining requirement |
 |---|---|---|
-| MMLU revision/selection | CPU compute job | Immutable revision, streaming + bounded take, exactly five ordered 100-question blocks, no replacement, indices 0–499, seed 42, stable source-row identities and hashes. |
-| Question/study manifests | Compute output + login-safe validator | Tracked outside ignored data, exact science, recomputed IDs/hashes, and no mutable/unresolved source facts. |
-| SmolLM3 preflight | Single-GPU compute job | Immutable model/tokenizer revisions, bf16/eval/batch-one, tags/tokens, prompt, inducer, A–D convention, answer-step location, environment, and requested/effective settings. |
-| Mila filesystem operation | Selected persistent filesystem | Confirm directory `fsync`, no-overwrite hard-link publication, atomic replacement, and two-process POSIX `flock` exclusion on the actual target filesystem. |
-| Mila scheduler liveness | Mila shell/compute context | Confirm `squeue --jobs=<job>[_<array>] --noheader --format=%i`, exact live output, completed/absent output, permissions, return codes, and timeout behavior before automatic takeover. |
-| Runtime integration | Pure mocks + bounded smoke | All writes through `LockedShardSession`; complete manifests/WorkSpec hashes; policy-complete start/failure/result/completion events; same-seed retry; fresh process after transient CUDA. |
-| Natural generation | Authorized bounded GPU smoke | Ten configured stochastic run identities when the smoke scope calls for them, no extra greedy run, fixed settings, raw pre-warper float32 entropy, exact token alignment, abnormal-output retention. |
-| Checkpoints | Authorized bounded GPU smoke | Greedy probes, all eleven requested identities, alias sharing, forced outputs, A–D/full-vocabulary metrics and orthogonal statuses. |
-| Smoke separation | Pure validation | Non-production manifest/output under ignored smoke root; optional dirty-code base commit/diff hash; no production manifest/output. |
+| MMLU revision/selection | **Passed** | Job `10284018`; immutable revision, bounded selection, five ordered 100-question blocks, seed 42, stable identities/hashes. |
+| Question/study manifests | **Passed** | Independent validator; tracked commit `2e0bcae`. |
+| SmolLM3 preflight | **Passed** | Refresh job `10284702`, one L40S, `0:0`; immutable model/tokenizer revision and full prompt/token/environment checks. |
+| Mila filesystem operation | **Passed** | Gate 4 under `results/part1-smoke/mila-filesystem-gate.EUEXDB`. |
+| Mila scheduler liveness | **Passed with nuance** | Exact live output and immediate completed/absent semantics approved; purged rc1 remains `UNKNOWN` and fails closed. |
+| Reproducibility | **Passed** | Job `10284721`, `0:0`; exact tokens, parse, and entropy arrays at tolerance 0.0. |
+| Smoke A runtime integration | **Awaiting validation** | Existing job `10284742`; require policy-complete writes, terminal runner JSON, valid read-only dry run, and exact completed counts. |
+| Natural generation | **Awaiting Smoke A validation** | Require 10 stochastic run identities, no extra greedy run, fixed settings, raw pre-warper float32 entropy, exact alignment, and abnormal-output retention. |
+| Checkpoints | **Awaiting Smoke A validation** | Require 110 checkpoint records: all eleven requested identities per successful natural, with valid aliases and metrics/statuses. |
+| Smoke separation | **Awaiting final check** | Confirm non-production manifest/output under ignored smoke root and absence of production artifacts. |
+| Smoke B | **Not submitted** | Eligible only after Smoke A passes independent validation and work explicitly resumes. |
 
-Phase 2 cannot pass on mocked tests alone. It requires only the explicitly
-authorized bounded compute preflight/smoke, never the full experiment.
+Phase 2 cannot pass until Smoke A and then bounded Smoke B are independently
+validated. The full experiment remains forbidden.
 
 ## Phase 3 and production-manifest gate
 
