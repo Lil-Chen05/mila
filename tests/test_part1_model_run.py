@@ -86,7 +86,7 @@ def preflight() -> dict:
             "model_context_window": 65536,
         },
         "component_versions": {
-            "adapter": "part1-smollm3-adapter-v1",
+            "adapter": "part1-smollm3-adapter-v2",
             "prompt": "part1-smollm3-mcq-v1",
             "parser": "part1-terminal-block-v1",
             "inducer": "part1-smollm3-forced-close-v1",

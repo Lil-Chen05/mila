@@ -13,7 +13,7 @@ from typing import Any, Mapping, Sequence
 
 MODEL_REPOSITORY = "HuggingFaceTB/SmolLM3-3B"
 TOKENIZER_REPOSITORY = MODEL_REPOSITORY
-ADAPTER_VERSION = "part1-smollm3-adapter-v1"
+ADAPTER_VERSION = "part1-smollm3-adapter-v2"
 PROMPT_VERSION = "part1-smollm3-mcq-v1"
 PARSER_VERSION = "part1-terminal-block-v1"
 INDUCER_VERSION = "part1-smollm3-forced-close-v1"
@@ -166,6 +166,34 @@ def _encode_without_special_tokens(tokenizer: Any, text: str) -> list[int]:
 def preflight_tokenizer_contract(tokenizer: Any) -> dict[str, Any]:
     """Resolve exact token conventions without mutating tokenizer specials."""
 
+    suffix_probe = [{"role": "user", "content": "SmolLM3 tokenizer preflight"}]
+    prompt_without_generation = tokenizer.apply_chat_template(
+        suffix_probe,
+        tokenize=False,
+        add_generation_prompt=False,
+        enable_thinking=True,
+    )
+    prompt_with_generation = tokenizer.apply_chat_template(
+        suffix_probe,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=True,
+    )
+    if (
+        not isinstance(prompt_without_generation, str)
+        or not isinstance(prompt_with_generation, str)
+        or not prompt_with_generation.startswith(prompt_without_generation)
+    ):
+        raise SmolLM3AdapterError(
+            "thinking chat template has no exact assistant-generation suffix"
+        )
+    assistant_suffix = prompt_with_generation[len(prompt_without_generation) :]
+    assistant_suffix_ids = _encode_without_special_tokens(tokenizer, assistant_suffix)
+    if not assistant_suffix or not assistant_suffix_ids:
+        raise SmolLM3AdapterError(
+            "thinking chat template assistant-generation suffix must not be empty"
+        )
+
     open_ids = _encode_without_special_tokens(tokenizer, REASONING_OPEN_TAG)
     close_ids = _encode_without_special_tokens(tokenizer, REASONING_CLOSE_TAG)
     inducer_ids = _encode_without_special_tokens(tokenizer, FORCED_CLOSE_INDUCER)
@@ -197,6 +225,9 @@ def preflight_tokenizer_contract(tokenizer: Any) -> dict[str, Any]:
         "pad_token_id": getattr(tokenizer, "pad_token_id", None),
         "reasoning_open_tag": REASONING_OPEN_TAG,
         "reasoning_open_token_ids": open_ids,
+        "reasoning_open_tag_origin": "generated_output",
+        "assistant_generation_suffix_text": assistant_suffix,
+        "assistant_generation_suffix_token_ids": assistant_suffix_ids,
         "reasoning_close_tag": REASONING_CLOSE_TAG,
         "reasoning_close_token_ids": close_ids,
         "inducer_text": FORCED_CLOSE_INDUCER,

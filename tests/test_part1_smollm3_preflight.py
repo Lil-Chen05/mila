@@ -63,20 +63,35 @@ def questions() -> list[dict]:
 
 
 class PopulationTokenizer:
+    assistant_suffix = "<|assistant|>\n"
+
     def __init__(self, *, bad_suffix_index: int | None = None):
         self.calls = 0
+        self.render_calls = 0
         self.bad_suffix_index = bad_suffix_index
 
     def apply_chat_template(self, messages, **_kwargs):
-        return messages[0]["content"]
+        index = self.render_calls
+        self.render_calls += 1
+        suffix = "<|wrong|>\n" if index == self.bad_suffix_index else self.assistant_suffix
+        return messages[0]["content"] + suffix
 
     def __call__(self, prompt, *, add_special_tokens):
         assert add_special_tokens is False
-        index = self.calls
         self.calls += 1
         length = 200 if "LATER_LONGEST" in prompt else 10
-        suffix = 98 if index == self.bad_suffix_index else 99
-        return {"input_ids": [[*range(length - 1), suffix]]}
+        suffix = [90, 91] if prompt.endswith(self.assistant_suffix) else [90, 92]
+        return {"input_ids": [[*range(length - len(suffix)), *suffix]]}
+
+
+def token_contract() -> dict:
+    return {
+        "reasoning_open_token_ids": [99],
+        "reasoning_open_tag_origin": "generated_output",
+        "assistant_generation_suffix_text": PopulationTokenizer.assistant_suffix,
+        "assistant_generation_suffix_token_ids": [90, 91],
+        "inducer_token_ids": [7, 8],
+    }
 
 
 def test_all_500_prompts_are_validated_and_later_longest_controls_context() -> None:
@@ -86,7 +101,7 @@ def test_all_500_prompts_are_validated_and_later_longest_controls_context() -> N
     report = validate_all_question_prompts(
         questions(),
         tokenizer=tokenizer,
-        token_contract={"reasoning_open_token_ids": [99], "inducer_token_ids": [7, 8]},
+        token_contract=token_contract(),
         model_context_window=9000,
     )
 
@@ -102,18 +117,65 @@ def test_all_500_prompts_are_validated_and_later_longest_controls_context() -> N
     assert report["checkpoint_required_tokens"] == 200 + 8192 + 2 + 32
 
 
+def test_generated_reasoning_open_is_not_required_in_prompt_suffix() -> None:
+    from part1_smollm3_preflight import validate_all_question_prompts
+
+    class GeneratedOpenTokenizer:
+        def apply_chat_template(self, messages, **_kwargs):
+            return messages[0]["content"] + "<|assistant|>\n"
+
+        def __call__(self, prompt, *, add_special_tokens):
+            assert add_special_tokens is False
+            assert prompt.endswith("<|assistant|>\n")
+            return {"input_ids": [[1, 2, 90, 91]]}
+
+    report = validate_all_question_prompts(
+        questions(),
+        tokenizer=GeneratedOpenTokenizer(),
+        token_contract={
+            "reasoning_open_token_ids": [99],
+            "assistant_generation_suffix_text": "<|assistant|>\n",
+            "assistant_generation_suffix_token_ids": [90, 91],
+            "inducer_token_ids": [7, 8],
+        },
+        model_context_window=9000,
+    )
+
+    assert report["validated_prompt_count"] == 500
+
+
 def test_later_prompt_with_wrong_reasoning_open_suffix_fails_preflight() -> None:
     from part1_smollm3_preflight import validate_all_question_prompts
 
-    with pytest.raises(ValueError, match="sample_index 499.*reasoning open tag"):
+    with pytest.raises(ValueError, match="sample_index 499.*assistant-generation suffix"):
         validate_all_question_prompts(
             questions(),
             tokenizer=PopulationTokenizer(bad_suffix_index=499),
-            token_contract={
-                "reasoning_open_token_ids": [99],
-                "inducer_token_ids": [7, 8],
-            },
+            token_contract=token_contract(),
             model_context_window=9000,
+        )
+
+
+def test_greedy_open_validation_persists_evidence_and_fails_closed() -> None:
+    from part1_smollm3_preflight import validate_greedy_reasoning_open
+
+    assert validate_greedy_reasoning_open(
+        expected_open_token_ids=[99], observed_token_id=99
+    ) == {
+        "reasoning_open_tag_origin": "generated_output",
+        "expected_reasoning_open_token_ids": [99],
+        "observed_greedy_next_token_id": 99,
+        "matches_expected": True,
+    }
+
+    with pytest.raises(ValueError, match="greedy next token.*98.*expected.*99"):
+        validate_greedy_reasoning_open(
+            expected_open_token_ids=[99], observed_token_id=98
+        )
+
+    with pytest.raises(ValueError, match="exactly one token"):
+        validate_greedy_reasoning_open(
+            expected_open_token_ids=[99, 100], observed_token_id=99
         )
 
 

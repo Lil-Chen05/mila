@@ -99,6 +99,67 @@ def _single_prompt_token_ids(encoded: Mapping[str, Any]) -> list[int]:
     return token_ids
 
 
+def _validate_assistant_generation_suffix(
+    *,
+    prompt: str,
+    prompt_token_ids: Sequence[int],
+    token_contract: Mapping[str, Any],
+    sample_index: Any,
+) -> None:
+    suffix_text = token_contract.get("assistant_generation_suffix_text")
+    suffix_ids = token_contract.get("assistant_generation_suffix_token_ids")
+    if not isinstance(suffix_text, str) or not suffix_text:
+        raise ValueError("assistant-generation suffix text must be nonempty")
+    if (
+        not isinstance(suffix_ids, (list, tuple))
+        or not suffix_ids
+        or any(
+            isinstance(token_id, bool)
+            or not isinstance(token_id, int)
+            or token_id < 0
+            for token_id in suffix_ids
+        )
+    ):
+        raise ValueError("assistant-generation suffix token IDs must be nonempty integers")
+    if not prompt.endswith(suffix_text) or list(prompt_token_ids[-len(suffix_ids) :]) != list(
+        suffix_ids
+    ):
+        raise ValueError(
+            f"prompt at sample_index {sample_index} does not end at the exact "
+            "thinking-mode assistant-generation suffix"
+        )
+
+
+def validate_greedy_reasoning_open(
+    *, expected_open_token_ids: Sequence[int], observed_token_id: int
+) -> dict[str, Any]:
+    expected = list(expected_open_token_ids)
+    if (
+        len(expected) != 1
+        or isinstance(expected[0], bool)
+        or not isinstance(expected[0], int)
+        or expected[0] < 0
+    ):
+        raise ValueError("reasoning opening tag must resolve to exactly one token")
+    if (
+        isinstance(observed_token_id, bool)
+        or not isinstance(observed_token_id, int)
+        or observed_token_id < 0
+    ):
+        raise ValueError("observed greedy next token ID must be a nonnegative integer")
+    if observed_token_id != expected[0]:
+        raise ValueError(
+            f"greedy next token at the prompt boundary was {observed_token_id}; "
+            f"expected reasoning opening token {expected[0]}"
+        )
+    return {
+        "reasoning_open_tag_origin": "generated_output",
+        "expected_reasoning_open_token_ids": expected,
+        "observed_greedy_next_token_id": observed_token_id,
+        "matches_expected": True,
+    }
+
+
 def validate_all_question_prompts(
     records: Sequence[Mapping[str, Any]],
     *,
@@ -110,9 +171,6 @@ def validate_all_question_prompts(
 
     if len(records) != 500:
         raise ValueError("SmolLM3 prompt preflight requires exactly 500 questions")
-    open_ids = list(token_contract["reasoning_open_token_ids"])
-    if not open_ids:
-        raise ValueError("reasoning open token IDs must be nonempty")
     maximum_prompt_tokens = -1
     worst_record: Mapping[str, Any] | None = None
     for record in records:
@@ -120,11 +178,12 @@ def validate_all_question_prompts(
         token_ids = _single_prompt_token_ids(
             tokenizer(prompt, add_special_tokens=False)
         )
-        if token_ids[-len(open_ids) :] != open_ids:
-            raise ValueError(
-                "prompt at sample_index "
-                f"{record.get('sample_index')} does not end at the expected reasoning open tag"
-            )
+        _validate_assistant_generation_suffix(
+            prompt=prompt,
+            prompt_token_ids=token_ids,
+            token_contract=token_contract,
+            sample_index=record.get("sample_index"),
+        )
         if len(token_ids) > maximum_prompt_tokens:
             maximum_prompt_tokens = len(token_ids)
             worst_record = record
@@ -316,9 +375,12 @@ def run_preflight(
     if input_ids.ndim != 2 or input_ids.shape[0] != 1:
         raise ValueError("preflight prompt must tokenize to batch size one")
     prompt_token_ids = input_ids[0].tolist()
-    open_ids = token_contract["reasoning_open_token_ids"]
-    if prompt_token_ids[-len(open_ids) :] != open_ids:
-        raise ValueError("thinking chat template does not end at the expected reasoning open tag")
+    _validate_assistant_generation_suffix(
+        prompt=prompt,
+        prompt_token_ids=prompt_token_ids,
+        token_contract=token_contract,
+        sample_index=first_question.get("sample_index"),
+    )
     device_inputs = {key: value.to(model.device) for key, value in encoded.items()}
     with torch.inference_mode():
         forward = model(**device_inputs)
@@ -326,6 +388,10 @@ def run_preflight(
         raise ValueError("one-model GPU forward preflight returned an invalid logits shape")
     if not bool(torch.isfinite(forward.logits[:, -1, :].float()).all().item()):
         raise ValueError("GPU forward preflight produced non-finite answer-step logits")
+    greedy_open_evidence = validate_greedy_reasoning_open(
+        expected_open_token_ids=token_contract["reasoning_open_token_ids"],
+        observed_token_id=int(torch.argmax(forward.logits[0, -1, :]).item()),
+    )
 
     effective_natural, effective_checkpoint = build_effective_generation_settings(
         token_contract
@@ -371,6 +437,7 @@ def run_preflight(
             "vocabulary_size": int(forward.logits.shape[2]),
             "finite_last_step_logits": True,
             "model_training": bool(model.training),
+            **greedy_open_evidence,
         },
         "environment_versions": environment,
         "component_versions": {

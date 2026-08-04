@@ -30,6 +30,7 @@ class FakeTokenizer:
         self.encodings = {
             REASONING_OPEN_TAG: [10],
             REASONING_CLOSE_TAG: [11],
+            "<|assistant|>\n": [30, 31],
             FORCED_CLOSE_INDUCER: [11, 12],
             f"{FORCED_CLOSE_INDUCER} A": [11, 12, 20],
             f"{FORCED_CLOSE_INDUCER} B": [11, 12, 21],
@@ -43,7 +44,8 @@ class FakeTokenizer:
 
     def apply_chat_template(self, messages, **kwargs):
         self.calls.append(("chat", copy.deepcopy(messages), kwargs))
-        return "rendered-chat-with-<think>"
+        suffix = "<|assistant|>\n" if kwargs["add_generation_prompt"] else ""
+        return "rendered-chat" + suffix
 
 
 def question() -> dict:
@@ -57,7 +59,7 @@ def test_render_question_prompt_uses_thinking_chat_template_and_fixed_answer_con
     tokenizer = FakeTokenizer()
     prompt = render_question_prompt(tokenizer, question())
 
-    assert prompt == "rendered-chat-with-<think>"
+    assert prompt == "rendered-chat<|assistant|>\n"
     chat_call = next(call for call in tokenizer.calls if call[0] == "chat")
     messages = chat_call[1]
     assert chat_call[2] == {
@@ -81,6 +83,9 @@ def test_tokenizer_preflight_persists_exact_boundary_tokens_without_mutating_pad
         "pad_token_id": None,
         "reasoning_open_tag": REASONING_OPEN_TAG,
         "reasoning_open_token_ids": [10],
+        "reasoning_open_tag_origin": "generated_output",
+        "assistant_generation_suffix_text": "<|assistant|>\n",
+        "assistant_generation_suffix_token_ids": [30, 31],
         "reasoning_close_tag": REASONING_CLOSE_TAG,
         "reasoning_close_token_ids": [11],
         "inducer_text": FORCED_CLOSE_INDUCER,
