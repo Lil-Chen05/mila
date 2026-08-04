@@ -218,6 +218,19 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def model_config_sha256(model_config: Any) -> str:
+    serialized = model_config.to_json_string(use_diff=False)
+    if not isinstance(serialized, str):
+        raise ValueError("model config JSON serializer must return a string")
+    try:
+        config = json.loads(serialized)
+    except json.JSONDecodeError as exc:
+        raise ValueError("model config serializer did not return valid JSON") from exc
+    if not isinstance(config, dict):
+        raise ValueError("model config serializer must return a JSON object")
+    return hashlib.sha256(canonical_json_bytes(config)).hexdigest()
+
+
 def _resolve_revision(repository: str, requested_revision: str) -> str:
     from huggingface_hub import HfApi
 
@@ -411,9 +424,7 @@ def run_preflight(
         "dtype": "bfloat16",
         "batch_size": 1,
         "uv_lock_sha256": lock_hash,
-        "model_config_sha256": hashlib.sha256(
-            canonical_json_bytes(model.config.to_dict())
-        ).hexdigest(),
+        "model_config_sha256": model_config_sha256(model.config),
         "tokenizer_files_sha256": tokenizer_hashes,
         "model_context_window": context_window,
     }

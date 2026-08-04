@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import subprocess
 
 import pytest
 
+import part1_smollm3_preflight as preflight
 from part1_smollm3_preflight import (
     build_effective_generation_settings,
     resolve_context_window,
 )
+from part1_contract import canonical_json_bytes
 
 
 class Config:
@@ -19,6 +22,47 @@ class Config:
 
 class Tokenizer:
     model_max_length = 32768
+
+
+class JsonConfig:
+    def __init__(self, in_memory: dict, serialized: str):
+        self.in_memory = in_memory
+        self.serialized = serialized
+
+    def to_dict(self) -> dict:
+        return self.in_memory
+
+    def to_json_string(self, *, use_diff: bool) -> str:
+        assert use_diff is False
+        return self.serialized
+
+
+def test_model_config_hash_uses_json_serialization_to_canonicalize_integer_keys() -> None:
+    config = JsonConfig(
+        {"id2label": {0: "LABEL_0", 1: "LABEL_1"}},
+        '{"id2label":{"0":"LABEL_0","1":"LABEL_1"}}',
+    )
+
+    with pytest.raises(TypeError, match="keys must be strings"):
+        canonical_json_bytes(config.to_dict())
+
+    assert preflight.model_config_sha256(config) == hashlib.sha256(
+        canonical_json_bytes({"id2label": {"0": "LABEL_0", "1": "LABEL_1"}})
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("serialized", "message"),
+    [
+        ("not JSON", "valid JSON"),
+        ("[]", "JSON object"),
+    ],
+)
+def test_model_config_hash_rejects_invalid_or_non_object_json(
+    serialized: str, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        preflight.model_config_sha256(JsonConfig({}, serialized))
 
 
 def test_context_window_uses_smallest_finite_model_and_tokenizer_limit() -> None:
