@@ -293,3 +293,52 @@ def test_publisher_rechecks_git_immediately_before_publication(
     )
     assert calls == 4
     assert published == run_root / "model_run_manifest.json"
+
+
+def test_publisher_recovers_when_staging_file_creation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import create_part1_model_run_manifest as module
+
+    repository, head, report = initialized_repository(tmp_path)
+    expected_manifest = module.build_production_model_run_manifest(
+        study_manifest=study(),
+        preflight_report=report,
+        final_git_commit=head,
+        output_root=Path("results/part1"),
+    )
+    run_root = (
+        repository / "results" / "part1" / expected_manifest["model_run_id"]
+    )
+    real_mkstemp = module.tempfile.mkstemp
+    real_fsync_directory = module._fsync_directory
+    synced_directories: list[Path] = []
+
+    def fail_mkstemp(*args, **kwargs):
+        raise OSError("synthetic staging failure")
+
+    def record_fsync(path: Path) -> None:
+        synced_directories.append(Path(path))
+        real_fsync_directory(path)
+
+    monkeypatch.setattr(module.tempfile, "mkstemp", fail_mkstemp)
+    monkeypatch.setattr(module, "_fsync_directory", record_fsync)
+    with pytest.raises(OSError, match="synthetic staging failure"):
+        module.publish_production_model_run_manifest(
+            study_manifest=study(),
+            preflight_report=report,
+            final_git_commit=head,
+            repository_root=repository,
+        )
+
+    assert not run_root.exists()
+    assert synced_directories.count(run_root.parent) == 2
+
+    monkeypatch.setattr(module.tempfile, "mkstemp", real_mkstemp)
+    published = module.publish_production_model_run_manifest(
+        study_manifest=study(),
+        preflight_report=report,
+        final_git_commit=head,
+        repository_root=repository,
+    )
+    assert published == run_root / "model_run_manifest.json"

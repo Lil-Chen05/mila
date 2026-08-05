@@ -173,11 +173,12 @@ def publish_production_model_run_manifest(
         _require_clean_git_state(repository_root, final_git_commit)
         return target
 
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
-    )
-    temporary = Path(temporary_name)
+    temporary: Path | None = None
     try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+        )
+        temporary = Path(temporary_name)
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(content)
             handle.flush()
@@ -193,7 +194,7 @@ def publish_production_model_run_manifest(
         temporary.unlink()
         _fsync_directory(target.parent)
     finally:
-        if temporary.exists():
+        if temporary is not None and temporary.exists():
             temporary.unlink()
         if not run_root_existed and not os.path.lexists(target):
             _remove_new_empty_run_directory(target_parent)
