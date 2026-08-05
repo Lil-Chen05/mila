@@ -95,3 +95,76 @@ def test_phase3_smoke_manifest_refuses_incompatible_preflight_without_partial_ou
     assert not target.exists()
     if target.parent.exists():
         assert list(target.parent.glob("*.tmp")) == []
+
+
+@pytest.mark.parametrize("case", ["default", "relocated", "explicit"])
+def test_cli_repository_root_relocates_only_unspecified_input_defaults(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    case: str,
+) -> None:
+    import create_part1_phase3_smoke_manifest as creator
+
+    fixture = production_fixture(tmp_path)
+    selected_repository = (
+        creator.REPOSITORY_ROOT if case == "default" else fixture["repository"]
+    )
+    expected_manifest_root = (
+        tmp_path / "explicit-manifests"
+        if case == "explicit"
+        else selected_repository / "manifests/part1"
+    )
+    expected_preflight = (
+        tmp_path / "explicit-preflight.json"
+        if case == "explicit"
+        else selected_repository / "results/part1-smoke/preflight/preflight.json"
+    )
+    output = fixture["repository"] / "synthetic-model-run-manifest.json"
+    output.write_text('{"model_run_id":"synthetic"}\n', encoding="utf-8")
+    seen: dict[str, Path] = {}
+    original_load_json = creator._load_json
+
+    def capture_bundle(*, questions_path, question_manifest_path, study_manifest_path):
+        seen["questions"] = questions_path
+        seen["question_manifest"] = question_manifest_path
+        seen["study_manifest"] = study_manifest_path
+        return fixture["bundle"]
+
+    def capture_json(path):
+        if "preflight" not in seen:
+            seen["preflight"] = Path(path)
+            return fixture["preflight"]
+        return original_load_json(path)
+
+    monkeypatch.setattr(creator, "load_manifest_bundle", capture_bundle)
+    monkeypatch.setattr(creator, "_load_json", capture_json)
+    monkeypatch.setattr(
+        creator, "publish_phase3_smoke_manifest", lambda **_kwargs: output
+    )
+
+    arguments = (
+        []
+        if case == "default"
+        else ["--repository-root", str(fixture["repository"])]
+    )
+    if case == "explicit":
+        arguments.extend(
+            [
+                "--manifest-root",
+                str(expected_manifest_root),
+                "--preflight",
+                str(expected_preflight),
+            ]
+        )
+    result = creator.main(arguments)
+
+    assert result == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["is_valid"] is True
+    assert seen == {
+        "questions": expected_manifest_root / "questions.jsonl",
+        "question_manifest": expected_manifest_root / "questions.manifest.json",
+        "study_manifest": expected_manifest_root / "study_manifest.json",
+        "preflight": expected_preflight,
+    }

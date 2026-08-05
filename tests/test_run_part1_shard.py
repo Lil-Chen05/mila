@@ -535,6 +535,64 @@ def test_terminal_natural_failures_are_final_and_checkpoint_ineligible(
     assert not (store.root / ".writer.lock").exists()
 
 
+def test_finalization_race_revalidates_marker_and_coverage_without_lock_or_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import run_part1_shard as shard_runner
+
+    fixture = production_fixture(tmp_path)
+    initial_args = _runner_arguments(fixture)
+    initial_args["execute_natural"] = _terminal_failure_execution
+    initial_args["execute_checkpoint"] = lambda **_kwargs: pytest.fail(
+        "checkpoint executed for failed natural"
+    )
+    shard_runner.run_part1_shard(**initial_args)
+
+    store = _store(fixture)
+    marker_bytes = store.finalization_path.read_bytes()
+    store.finalization_path.unlink()
+    durable_before = _stream_bytes(store.root)
+    original_acquire = shard_runner._acquire_or_recover
+    original_validate = shard_runner._validate_finalization_marker
+    original_coverage = shard_runner._require_complete_shard_coverage
+    calls = {"validate": 0, "coverage": 0}
+
+    def finalize_between_check_and_acquire(*args, **kwargs):
+        store.finalization_path.write_bytes(marker_bytes)
+        return original_acquire(*args, **kwargs)
+
+    def count_validate(candidate):
+        calls["validate"] += 1
+        return original_validate(candidate)
+
+    def count_coverage(candidate, *, model_manifest, selected):
+        calls["coverage"] += 1
+        return original_coverage(
+            candidate, model_manifest=model_manifest, selected=selected
+        )
+
+    monkeypatch.setattr(
+        shard_runner, "_acquire_or_recover", finalize_between_check_and_acquire
+    )
+    monkeypatch.setattr(shard_runner, "_validate_finalization_marker", count_validate)
+    monkeypatch.setattr(
+        shard_runner, "_require_complete_shard_coverage", count_coverage
+    )
+    race_args = _runner_arguments(fixture)
+    race_args["load_runtime"] = lambda **_kwargs: pytest.fail(
+        "finalization race loaded model"
+    )
+
+    report = shard_runner.run_part1_shard(**race_args)
+
+    assert report["status"] == "already_finalized"
+    assert calls == {"validate": 1, "coverage": 1}
+    assert not (store.root / ".writer.lock").exists()
+    durable_after = _stream_bytes(store.root)
+    durable_after.pop(".finalized")
+    assert durable_after == durable_before
+
+
 def test_live_lock_refuses_automatic_recovery_before_model_load(tmp_path: Path) -> None:
     from run_part1_shard import run_part1_shard
     from part1_runtime import LockMetadata, LockedShardSession, StaleRecoveryRefused

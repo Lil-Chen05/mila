@@ -107,25 +107,29 @@ def _load_json(path: Path) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository-root", type=Path, default=REPOSITORY_ROOT)
-    parser.add_argument(
-        "--manifest-root", type=Path, default=REPOSITORY_ROOT / "manifests/part1"
-    )
-    parser.add_argument(
-        "--preflight",
-        type=Path,
-        default=REPOSITORY_ROOT / "results/part1-smoke/preflight/preflight.json",
-    )
+    parser.add_argument("--manifest-root", type=Path)
+    parser.add_argument("--preflight", type=Path)
     args = parser.parse_args(argv)
+    manifest_root = (
+        args.manifest_root
+        if args.manifest_root is not None
+        else args.repository_root / "manifests/part1"
+    )
+    preflight_path = (
+        args.preflight
+        if args.preflight is not None
+        else args.repository_root / "results/part1-smoke/preflight/preflight.json"
+    )
     try:
         bundle = load_manifest_bundle(
-            questions_path=args.manifest_root / "questions.jsonl",
-            question_manifest_path=args.manifest_root / "questions.manifest.json",
-            study_manifest_path=args.manifest_root / "study_manifest.json",
+            questions_path=manifest_root / "questions.jsonl",
+            question_manifest_path=manifest_root / "questions.manifest.json",
+            study_manifest_path=manifest_root / "study_manifest.json",
         )
         path = publish_phase3_smoke_manifest(
             study_manifest=bundle.study_manifest,
             question_manifest=bundle.question_manifest,
-            preflight_report=_load_json(args.preflight),
+            preflight_report=_load_json(preflight_path),
             repository_root=args.repository_root,
         )
         manifest = _load_json(path)
