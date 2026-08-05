@@ -521,15 +521,68 @@ def test_model_run_and_record_identity_key_boundaries() -> None:
                 "final_production_git_commit": "f" * 40,
             },
         )
-    production_manifest = {
+    legacy_production_manifest = {
         **manifest,
-        "model_run_id": rid,
-        "model_run_manifest_hash": rhash,
         "execution_scope": "production",
         "production": True,
         "final_production_git_commit": "f" * 40,
         "smoke_git_provenance": None,
     }
+    with pytest.raises(ValueError, match="schema_version|production|bos_token_id"):
+        validate_instance(
+            "model_run_manifest",
+            {
+                **legacy_production_manifest,
+                "model_run_id": rid,
+                "model_run_manifest_hash": rhash,
+            },
+        )
+    production_manifest = {
+        **legacy_production_manifest,
+        "schema_version": "1.1.0",
+        "effective_natural_generation": {
+            "do_sample": True,
+            "bos_token_id": None,
+            "eos_token_id": 2,
+            "pad_token_id": None,
+        },
+        "effective_checkpoint_generation": {
+            "do_sample": False,
+            "bos_token_id": None,
+            "eos_token_id": 2,
+            "pad_token_id": None,
+        },
+        "environment_versions": {
+            "python": "3.12",
+            "uv_lock_sha256": "2" * 64,
+            "model_context_window": 65536,
+        },
+        "bos_token_id": None,
+        "eos_token_id": 2,
+        "pad_token_id": None,
+        "model_context_window": 65536,
+        "dependency_lock_sha256": "2" * 64,
+        "clean_tracked_worktree": True,
+        "output_paths": {
+            "raw_shards": f"results/part1/{'0' * 64}/raw_shards",
+            "validation": f"results/part1/{'0' * 64}/validation",
+            "merged": f"results/part1/{'0' * 64}/merged",
+            "analysis": f"results/part1/{'0' * 64}/analysis",
+        },
+    }
+    production_manifest["model_run_id"] = model_run_id(production_manifest)
+    production_manifest["output_paths"] = {
+        key: f"results/part1/{production_manifest['model_run_id']}/{suffix}"
+        for key, suffix in (
+            ("raw_shards", "raw_shards"),
+            ("validation", "validation"),
+            ("merged", "merged"),
+            ("analysis", "analysis"),
+        )
+    }
+    production_manifest["model_run_manifest_hash"] = model_run_manifest_hash(
+        production_manifest
+    )
     validate_instance("model_run_manifest", production_manifest)
     with pytest.raises(ValueError, match="execution_scope"):
         validate_instance(
@@ -556,6 +609,43 @@ def test_model_run_and_record_identity_key_boundaries() -> None:
         {**manifest, "model_run_manifest_hash": "0" * 64, "runtime_status": "complete"}
     ) == rhash
     assert rid != rhash
+
+    production_identity = {
+        **manifest,
+        "schema_version": "1.1.0",
+        "execution_scope": "production",
+        "final_production_git_commit": "f" * 40,
+        "production": True,
+        "smoke_git_provenance": None,
+        "bos_token_id": None,
+        "eos_token_id": 2,
+        "pad_token_id": None,
+        "model_context_window": 65536,
+        "dependency_lock_sha256": "2" * 64,
+        "clean_tracked_worktree": True,
+        "output_paths": {
+            "raw_shards": "results/part1/run/raw_shards",
+            "validation": "results/part1/run/validation",
+            "merged": "results/part1/run/merged",
+            "analysis": "results/part1/run/analysis",
+        },
+    }
+    production_id = model_run_id(production_identity)
+    production_hash = model_run_manifest_hash(production_identity)
+    assert model_run_id({**production_identity, "eos_token_id": 3}) != production_id
+    assert model_run_id({**production_identity, "dependency_lock_sha256": "3" * 64}) == production_id
+    assert model_run_manifest_hash(
+        {**production_identity, "dependency_lock_sha256": "3" * 64}
+    ) != production_hash
+    assert model_run_manifest_hash(
+        {
+            **production_identity,
+            "output_paths": {
+                **production_identity["output_paths"],
+                "analysis": "results/part1/run/other-analysis",
+            },
+        }
+    ) == production_hash
 
     natural_id = natural_record_id(HEX_64, rid, HEX_64_B, 0)
     assert natural_id == natural_record_id(HEX_64, rid, HEX_64_B, 0)

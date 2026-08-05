@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import pytest
 
@@ -42,7 +43,7 @@ def preflight() -> dict:
         "tokenizer_repository": "HuggingFaceTB/SmolLM3-3B",
         "tokenizer_revision": "d" * 40,
         "token_contract": {
-            "bos_token_id": 1,
+            "bos_token_id": None,
             "eos_token_id": 2,
             "pad_token_id": None,
             "reasoning_open_tag": "<think>",
@@ -63,14 +64,14 @@ def preflight() -> dict:
             "max_new_tokens": 8192,
             "return_dict_in_generate": True,
             "output_logits": True,
-            "bos_token_id": 1,
+            "bos_token_id": None,
             "eos_token_id": 2,
             "pad_token_id": None,
         },
         "effective_checkpoint_generation": {
             "do_sample": False,
             "max_new_tokens": 32,
-            "bos_token_id": 1,
+            "bos_token_id": None,
             "eos_token_id": 2,
             "pad_token_id": None,
         },
@@ -141,6 +142,144 @@ def test_smoke_a_and_b_manifests_are_valid_nonproduction_and_have_distinct_ids()
     assert smoke_a["model_run_id"] != smoke_b["model_run_id"]
     assert smoke_a["model_run_manifest_hash"] != smoke_b["model_run_manifest_hash"]
     assert smoke_a["environment_versions"] == preflight()["environment_versions"]
+    assert (smoke_a["model_run_id"], smoke_a["model_run_manifest_hash"]) == (
+        "2bb6d6c8d3dbe2800baf1b5ad8a24a047d825919f24f525f89206f445e6e7363",
+        "867b45e96447bdce5f80303d71ad1bb9619f2abc3d5b2271fb1757703e72774c",
+    )
+    assert (smoke_b["model_run_id"], smoke_b["model_run_manifest_hash"]) == (
+        "1a11c9055343318778f17284d3bf4039773f802dd7d565d5ef441a18c4ef86de",
+        "993e84ad70d3ba315a4361d6f4bc532bef2696f02603eecf7eef125d1b723893",
+    )
+
+
+def test_phase3_smoke_is_a_valid_nonproduction_scope() -> None:
+    manifest = build_smoke_model_run_manifest(
+        study_manifest=study(),
+        preflight_report=preflight(),
+        execution_scope="phase3_smoke",
+        base_git_commit="1" * 40,
+        diff_hash="2" * 64,
+    )
+
+    validate_instance("model_run_manifest", manifest)
+    assert manifest["production"] is False
+    assert manifest["execution_scope"] == "phase3_smoke"
+
+
+def test_build_production_manifest_copies_explicit_preflight_provenance() -> None:
+    from part1_model_run import build_production_model_run_manifest
+
+    manifest = build_production_model_run_manifest(
+        study_manifest=study(),
+        preflight_report=preflight(),
+        final_git_commit="1" * 40,
+        output_root=Path("results/part1"),
+    )
+
+    assert manifest["schema_version"] == "1.1.0"
+    assert manifest["production"] is True
+    assert manifest["execution_scope"] == "production"
+    assert manifest["bos_token_id"] is None
+    assert manifest["eos_token_id"] == 2
+    assert manifest["pad_token_id"] is None
+    assert manifest["model_context_window"] == 65536
+    assert manifest["dependency_lock_sha256"] == "e" * 64
+    assert manifest["clean_tracked_worktree"] is True
+    assert manifest["output_paths"]["raw_shards"].startswith(
+        f"results/part1/{manifest['model_run_id']}/"
+    )
+    assert manifest["output_paths"] == {
+        key: f"results/part1/{manifest['model_run_id']}/{suffix}"
+        for key, suffix in {
+            "raw_shards": "raw_shards",
+            "validation": "validation",
+            "merged": "merged",
+            "analysis": "analysis",
+        }.items()
+    }
+    validate_instance("model_run_manifest", manifest)
+
+
+def test_build_production_manifest_rejects_preflight_study_mismatch() -> None:
+    from part1_model_run import build_production_model_run_manifest
+
+    mismatched_preflight = preflight()
+    mismatched_preflight["study_manifest_hash"] = "9" * 64
+
+    with pytest.raises(ValueError, match="study_manifest_hash"):
+        build_production_model_run_manifest(
+            study_manifest=study(),
+            preflight_report=mismatched_preflight,
+            final_git_commit="1" * 40,
+            output_root=Path("results/part1"),
+        )
+
+
+def test_production_schema_rejects_missing_and_invalid_explicit_fields() -> None:
+    from part1_model_run import build_production_model_run_manifest
+
+    manifest = build_production_model_run_manifest(
+        study_manifest=study(),
+        preflight_report=preflight(),
+        final_git_commit="1" * 40,
+        output_root=Path("results/part1"),
+    )
+    for field in (
+        "bos_token_id",
+        "eos_token_id",
+        "pad_token_id",
+        "model_context_window",
+        "dependency_lock_sha256",
+        "clean_tracked_worktree",
+        "output_paths",
+    ):
+        changed = {key: value for key, value in manifest.items() if key != field}
+        with pytest.raises(ValueError, match=field):
+            validate_instance("model_run_manifest", changed)
+
+    for field, invalid in (
+        ("eos_token_id", -1),
+        ("model_context_window", 0),
+        ("dependency_lock_sha256", "not-a-hash"),
+        ("clean_tracked_worktree", False),
+    ):
+        with pytest.raises(ValueError, match=field):
+            validate_instance("model_run_manifest", {**manifest, field: invalid})
+
+    invalid_paths = copy.deepcopy(manifest)
+    invalid_paths["output_paths"]["analysis"] = "/absolute/analysis"
+    with pytest.raises(ValueError, match="output_paths.analysis"):
+        validate_instance("model_run_manifest", invalid_paths)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda value: value.update(dependency_lock_sha256="9" * 64), "dependency"),
+        (lambda value: value.update(model_context_window=32768), "context"),
+        (lambda value: value.update(eos_token_id=3), "eos_token_id"),
+        (
+            lambda value: value["output_paths"].update(
+                analysis=f"results/part1/{'9' * 64}/analysis"
+            ),
+            "output_paths.analysis",
+        ),
+    ],
+)
+def test_production_schema_rejects_cross_field_provenance_mismatch(
+    mutation, message: str
+) -> None:
+    from part1_model_run import build_production_model_run_manifest
+
+    manifest = build_production_model_run_manifest(
+        study_manifest=study(),
+        preflight_report=preflight(),
+        final_git_commit="1" * 40,
+        output_root=Path("results/part1"),
+    )
+    mutation(manifest)
+    with pytest.raises(ValueError, match=message):
+        validate_instance("model_run_manifest", manifest)
 
 
 def test_cross_artifact_validator_accepts_exact_preflight_model_study_question_bundle() -> None:

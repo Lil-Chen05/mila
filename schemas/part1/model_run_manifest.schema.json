@@ -8,10 +8,10 @@
   "required": ["schema_name", "schema_version", "model_run_id", "model_run_manifest_hash", "execution_scope", "study_id", "study_manifest_hash", "question_manifest_hash", "model_repository", "model_revision", "tokenizer_repository", "tokenizer_revision", "canonical_model_identity", "adapter_version", "prompt_version", "prompt_hash", "parser_version", "inducer_version", "inducer_text", "inducer_token_ids", "reasoning_open_tag", "reasoning_open_token_ids", "reasoning_close_tag", "reasoning_close_token_ids", "requested_natural_generation", "effective_natural_generation", "requested_checkpoint_generation", "effective_checkpoint_generation", "ad_token_convention", "ad_raw_token_sequences", "ad_token_ids", "seed_algorithm_version", "base_generation_seed", "environment_versions", "final_production_git_commit", "production", "smoke_git_provenance"],
   "properties": {
     "schema_name": {"const": "part1_model_run_manifest"},
-    "schema_version": {"const": "1.0.0"},
+    "schema_version": {"enum": ["1.0.0", "1.1.0"]},
     "model_run_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "model_run_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "execution_scope": {"enum": ["smoke_a", "smoke_b", "reproducibility", "production"]},
+    "execution_scope": {"enum": ["smoke_a", "smoke_b", "reproducibility", "phase3_smoke", "production"]},
     "study_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "study_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "question_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -43,10 +43,59 @@
     "environment_versions": {"type": "object", "minProperties": 1},
     "final_production_git_commit": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
     "production": {"type": "boolean"},
-    "smoke_git_provenance": {"type": ["object", "null"]}
+    "smoke_git_provenance": {"type": ["object", "null"]},
+    "bos_token_id": {"type": ["integer", "null"], "minimum": 0},
+    "eos_token_id": {"type": ["integer", "null"], "minimum": 0},
+    "pad_token_id": {"type": ["integer", "null"], "minimum": 0},
+    "model_context_window": {"type": "integer", "minimum": 1},
+    "dependency_lock_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "clean_tracked_worktree": {"const": true},
+    "output_paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw_shards", "validation", "merged", "analysis"],
+      "properties": {
+        "raw_shards": {"type": "string", "pattern": "^results/part1/[0-9a-f]{64}/raw_shards$"},
+        "validation": {"type": "string", "pattern": "^results/part1/[0-9a-f]{64}/validation$"},
+        "merged": {"type": "string", "pattern": "^results/part1/[0-9a-f]{64}/merged$"},
+        "analysis": {"type": "string", "pattern": "^results/part1/[0-9a-f]{64}/analysis$"}
+      }
+    }
   },
   "allOf": [
-    {"if": {"properties": {"production": {"const": true}}}, "then": {"properties": {"execution_scope": {"const": "production"}, "final_production_git_commit": {"type": "string"}, "smoke_git_provenance": {"type": "null"}}}},
-    {"if": {"properties": {"production": {"const": false}}}, "then": {"properties": {"execution_scope": {"enum": ["smoke_a", "smoke_b", "reproducibility"]}, "final_production_git_commit": {"type": "null"}, "smoke_git_provenance": {"type": "object"}}}}
+    {
+      "if": {"properties": {"production": {"const": true}}},
+      "then": {
+        "required": ["bos_token_id", "eos_token_id", "pad_token_id", "model_context_window", "dependency_lock_sha256", "clean_tracked_worktree", "output_paths"],
+        "properties": {
+          "schema_version": {"const": "1.1.0"},
+          "execution_scope": {"const": "production"},
+          "final_production_git_commit": {"type": "string"},
+          "smoke_git_provenance": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"production": {"const": false}}},
+      "then": {
+        "properties": {
+          "schema_version": {"const": "1.0.0"},
+          "execution_scope": {"enum": ["smoke_a", "smoke_b", "reproducibility", "phase3_smoke"]},
+          "final_production_git_commit": {"type": "null"},
+          "smoke_git_provenance": {"type": "object"}
+        },
+        "not": {
+          "anyOf": [
+            {"required": ["bos_token_id"]},
+            {"required": ["eos_token_id"]},
+            {"required": ["pad_token_id"]},
+            {"required": ["model_context_window"]},
+            {"required": ["dependency_lock_sha256"]},
+            {"required": ["clean_tracked_worktree"]},
+            {"required": ["output_paths"]}
+          ]
+        }
+      }
+    }
   ]
 }

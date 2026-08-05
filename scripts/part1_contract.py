@@ -452,6 +452,17 @@ MODEL_RUN_ID_FIELDS = (
     "seed_algorithm_version",
     "base_generation_seed",
 )
+PRODUCTION_MODEL_RUN_ID_FIELDS = (
+    "bos_token_id",
+    "eos_token_id",
+    "pad_token_id",
+    "model_context_window",
+)
+PRODUCTION_MODEL_RUN_FIELDS = (
+    *PRODUCTION_MODEL_RUN_ID_FIELDS,
+    "dependency_lock_sha256",
+    "clean_tracked_worktree",
+)
 
 
 def _normalize(value: Any) -> Any:
@@ -543,6 +554,8 @@ def study_manifest_hash(manifest: Mapping[str, Any]) -> str:
 
 def model_run_id(manifest: Mapping[str, Any]) -> str:
     payload = _select(manifest, MODEL_RUN_ID_FIELDS)
+    if manifest.get("production") is True:
+        payload.update(_select(manifest, PRODUCTION_MODEL_RUN_ID_FIELDS))
     if "execution_scope" in manifest:
         payload["execution_scope"] = manifest["execution_scope"]
     return _identity_hash("model_run_id", payload)
@@ -550,6 +563,8 @@ def model_run_id(manifest: Mapping[str, Any]) -> str:
 
 def model_run_manifest_hash(manifest: Mapping[str, Any]) -> str:
     payload = _select(manifest, MODEL_RUN_FIELDS)
+    if manifest.get("production") is True:
+        payload.update(_select(manifest, PRODUCTION_MODEL_RUN_FIELDS))
     if "execution_scope" in manifest:
         payload["execution_scope"] = manifest["execution_scope"]
     return _identity_hash("model_run_manifest_hash", payload)
@@ -758,7 +773,39 @@ def validate_instance(schema_name: str, instance: Mapping[str, Any]) -> None:
         ):
             raise ValueError("malformed confidence cannot retain a parsed integer")
 
-    if schema_name == "question_record":
+    if schema_name == "model_run_manifest" and instance["production"]:
+        environment = instance["environment_versions"]
+        for explicit_field, environment_field in (
+            ("dependency_lock_sha256", "uv_lock_sha256"),
+            ("model_context_window", "model_context_window"),
+        ):
+            if not _fixed_value_matches(
+                instance[explicit_field], environment.get(environment_field)
+            ):
+                raise ValueError(
+                    f"{explicit_field} must equal environment_versions.{environment_field}"
+                )
+        for field in ("bos_token_id", "eos_token_id", "pad_token_id"):
+            for settings_field in (
+                "effective_natural_generation",
+                "effective_checkpoint_generation",
+            ):
+                if not _fixed_value_matches(
+                    instance[field], instance[settings_field].get(field)
+                ):
+                    raise ValueError(f"{field} must equal {settings_field}.{field}")
+        expected_root = f"results/part1/{instance['model_run_id']}"
+        for field, suffix in (
+            ("raw_shards", "raw_shards"),
+            ("validation", "validation"),
+            ("merged", "merged"),
+            ("analysis", "analysis"),
+        ):
+            if instance["output_paths"][field] != f"{expected_root}/{suffix}":
+                raise ValueError(
+                    f"output_paths.{field} must use the manifest model_run_id"
+                )
+    elif schema_name == "question_record":
         expected_letter = "ABCD"[instance["gold_index"]]
         if instance["gold_letter"] != expected_letter:
             raise ValueError("gold_letter must agree with gold_index")
