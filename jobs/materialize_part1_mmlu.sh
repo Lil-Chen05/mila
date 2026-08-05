@@ -11,4 +11,13 @@ set -euo pipefail
 : "${SCRATCH:?SCRATCH must be set by the Mila job environment}"
 export HF_HOME="$SCRATCH/hf_cache"
 
-srun uv run python scripts/materialize_part1_mmlu.py
+UV_BIN="$(command -v uv || true)"
+if [[ -z "$UV_BIN" ]]; then
+  UV_BIN="$HOME/.local/bin/uv"
+fi
+if [[ ! -x "$UV_BIN" ]]; then
+  echo "uv executable not found in PATH or at $HOME/.local/bin/uv" >&2
+  exit 127
+fi
+
+srun "$UV_BIN" run python scripts/materialize_part1_mmlu.py
