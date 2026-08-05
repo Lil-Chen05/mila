@@ -120,6 +120,16 @@ def _ensure_regular_directory_chain(root: Path, relative: Path) -> Path:
     return current
 
 
+def _remove_new_empty_run_directory(path: Path) -> None:
+    """Remove only an empty run directory created by the current attempt."""
+
+    try:
+        path.rmdir()
+    except OSError:
+        return
+    _fsync_directory(path.parent)
+
+
 def publish_production_model_run_manifest(
     *,
     study_manifest: Mapping[str, Any],
@@ -185,6 +195,8 @@ def publish_production_model_run_manifest(
     finally:
         if temporary.exists():
             temporary.unlink()
+        if not run_root_existed and not os.path.lexists(target):
+            _remove_new_empty_run_directory(target_parent)
     return target
 
 

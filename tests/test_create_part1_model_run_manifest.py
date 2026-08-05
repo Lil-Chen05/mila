@@ -242,7 +242,9 @@ def test_publisher_rechecks_git_immediately_before_publication(
 
     repository, head, report = initialized_repository(tmp_path)
     real_check = module._require_clean_git_state
+    real_fsync_directory = module._fsync_directory
     calls = 0
+    synced_directories: list[Path] = []
 
     def dirty_after_first_check(root: Path, expected_head: str) -> tuple[str, ...]:
         nonlocal calls
@@ -254,7 +256,21 @@ def test_publisher_rechecks_git_immediately_before_publication(
             )
         return result
 
+    def record_fsync(path: Path) -> None:
+        synced_directories.append(Path(path))
+        real_fsync_directory(path)
+
     monkeypatch.setattr(module, "_require_clean_git_state", dirty_after_first_check)
+    monkeypatch.setattr(module, "_fsync_directory", record_fsync)
+    expected_manifest = module.build_production_model_run_manifest(
+        study_manifest=study(),
+        preflight_report=report,
+        final_git_commit=head,
+        output_root=Path("results/part1"),
+    )
+    run_root = (
+        repository / "results" / "part1" / expected_manifest["model_run_id"]
+    )
     with pytest.raises(RuntimeError, match="clean tracked worktree"):
         module.publish_production_model_run_manifest(
             study_manifest=study(),
@@ -265,3 +281,15 @@ def test_publisher_rechecks_git_immediately_before_publication(
     assert calls == 2
     assert list((repository / "results" / "part1").rglob("*.tmp")) == []
     assert list((repository / "results" / "part1").rglob("model_run_manifest.json")) == []
+    assert not run_root.exists()
+    assert synced_directories.count(run_root.parent) == 2
+
+    (repository / "scripts" / "tracked.py").write_text("VALUE = 1\n", encoding="utf-8")
+    published = module.publish_production_model_run_manifest(
+        study_manifest=study(),
+        preflight_report=report,
+        final_git_commit=head,
+        repository_root=repository,
+    )
+    assert calls == 4
+    assert published == run_root / "model_run_manifest.json"

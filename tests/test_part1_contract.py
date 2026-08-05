@@ -637,15 +637,15 @@ def test_model_run_and_record_identity_key_boundaries() -> None:
     assert model_run_manifest_hash(
         {**production_identity, "dependency_lock_sha256": "3" * 64}
     ) != production_hash
-    assert model_run_manifest_hash(
-        {
-            **production_identity,
-            "output_paths": {
-                **production_identity["output_paths"],
-                "analysis": "results/part1/run/other-analysis",
-            },
-        }
-    ) == production_hash
+    changed_output_paths = {
+        **production_identity,
+        "output_paths": {
+            **production_identity["output_paths"],
+            "analysis": "results/part1/run/other-analysis",
+        },
+    }
+    assert model_run_id(changed_output_paths) == production_id
+    assert model_run_manifest_hash(changed_output_paths) == production_hash
 
     natural_id = natural_record_id(HEX_64, rid, HEX_64_B, 0)
     assert natural_id == natural_record_id(HEX_64, rid, HEX_64_B, 0)
