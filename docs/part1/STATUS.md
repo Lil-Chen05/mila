@@ -2,20 +2,19 @@
 
 ## Executive status
 
-**Phase 2 is paused during bounded Smoke A on branch
-`codex/phase1-infrastructure`.** CPU materialization and manifest validation,
-single-L40S SmolLM3 preflight, the Mila persistent-filesystem and scheduler
-liveness gates, and same-environment GPU reproducibility have passed. Phase 2
-is not complete.
+**Phase 2 is complete on branch `codex/phase1-infrastructure`.** CPU
+materialization and manifest validation, single-L40S SmolLM3 preflight, the
+Mila persistent-filesystem and scheduler-liveness gates, same-environment GPU
+reproducibility, and both authorized bounded smokes have passed. Phase 3
+remains unauthorized and deferred until Prompt 4. No production model-run
+manifest or production root exists, and the full 500-question run remains
+forbidden.
 
-At the explicit pause snapshot `2026-08-04T18:52:39-04:00`, Smoke A SLURM job
-`10284742` was `RUNNING` for `33:14` on `cn-l018`. Durable files contained 7
-natural results, 66 checkpoint results, and 146 audit events. Monitoring stopped
-at that snapshot; the job was not cancelled. Its later state is deliberately
-unknown here. Smoke A remains **running or awaiting post-job validation** and
-must not be marked passed until its terminal SLURM state, runner report, and
-completed artifacts are independently validated. Smoke B has not been
-submitted, and no other job should be submitted while this pause is in effect.
+Smoke A authoritative job `10284742` completed `0:0` in `01:26:28` on
+`cn-l018`; its terminal runner state was `complete`. Smoke B authoritative job
+`10292530` completed `0:0` in `00:25:14` on `cn-l072`; its terminal runner
+state was `complete`. Both are non-production and independently passed
+manifest, dry-run, and lifecycle validation with 0 errors and 0 warnings.
 
 Read this with [PLAN.md](PLAN.md), [DECISIONS.md](DECISIONS.md),
 [SCHEMA.md](SCHEMA.md), [RUNBOOK.md](RUNBOOK.md), and
@@ -65,6 +64,40 @@ remain historical.
   `DEAD`; a later purged job produced return code 1 and remains `UNKNOWN` under
   the fail-closed policy. A purged `squeue` error must never be treated as
   evidence that an owner is dead.
+- Smoke A authoritative job `10284742` completed `0:0` in `01:26:28` on
+  `cn-l018`, with terminal runner state `complete`, exactly one fixed question,
+  natural run IDs `0`–`9`, requested checkpoint indices `0`–`10`, 10 natural
+  results, 110 checkpoint results, and 240 audit events. Its manifest, dry run,
+  and lifecycle validation passed with 0 errors and 0 warnings. No production
+  root was created. All 10 natural records have
+  `natural_execution_outcome=complete`, `reasoning_status=closed`,
+  `answer_parse_status=parsed`, and `confidence_parse_status=malformed`. All
+  110 checkpoint records have `checkpoint_execution_outcome=complete`;
+  `checkpoint_model_output_status` is valid/invalid `93/17`,
+  `answer_token_status` is located/missing `109/1`, and `entropy_status` is
+  computed/unavailable `109/1`. This successful abnormal output was retained
+  as data.
+- Smoke B initial submission `10292499` failed in one second before Python,
+  model, dataset, or artifact creation because a non-interactive SSH `PATH`
+  omitted `~/.local/bin` and `srun` could not execute `uv`. It created no Smoke
+  B root. This is diagnostic-only SLURM-readiness evidence, not a model,
+  reproducibility, or experiment failure.
+- Smoke B authoritative resubmission `10292530` used the unchanged documented
+  sbatch job from a Mila login shell and completed `0:0` in `00:25:14` on
+  `cn-l072`, terminal runner state `complete`. It covered sample indices
+  `0`, `100`, `200`, `300`, and `400` (one fixed first question per subject),
+  natural `run_id=0`, and requested checkpoint indices `0`–`10`: 5 natural
+  results, 55 checkpoint results, and 120 audit events. Manifest, dry-run, and
+  lifecycle validation passed with 0 errors and 0 warnings; no production root
+  was created. All 5 natural records have `natural_execution_outcome=complete`;
+  `reasoning_status` is closed/missing_close `4/1`, `answer_parse_status` is
+  parsed/missing/out_of_domain `3/1/1`, and `confidence_parse_status` is
+  malformed/missing `4/1`. All 55 checkpoint records have
+  `checkpoint_execution_outcome=complete`; `checkpoint_model_output_status` is
+  valid/invalid `42/13`, `answer_token_status` is located/missing `46/9`, and
+  `entropy_status` is computed/unavailable `46/9`. This successful abnormal
+  output was retained as data; there was no retry, terminalization,
+  tail/recovery, lock, or takeover issue.
 
 ## Phase 1 implementation ledger
 
@@ -256,9 +289,10 @@ post-liveness/operator-evidence step, not ordinary recovery.
 Validation reports are written externally at an explicitly supplied path; the
 configured directory name is `validation_reports`.
 
-## Phase 2 pause boundary, blockers, and risks
+## Historical pre-completion Smoke A monitoring record
 
-The paused Smoke A artifacts are:
+This is the pre-completion monitoring record, retained for provenance only; it
+is not current operational instruction. The then-active Smoke A artifacts were:
 
 ```text
 job:            10284742
@@ -269,7 +303,7 @@ model manifest: results/part1-smoke/model-runs/smoke_a/model_run_manifest.json
 preflight:      results/part1-smoke/preflight/preflight.json
 ```
 
-Resume from the Mila repository root without submitting anything:
+The historical monitoring procedure was:
 
 ```bash
 ssh mila
@@ -298,19 +332,19 @@ uv run python scripts/part1_dry_run.py \
   --shard-root results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000
 ```
 
-For a successful Smoke A, require `COMPLETED` with exit `0:0`, the runner's
+For historical acceptance, Smoke A required `COMPLETED` with exit `0:0`, the runner's
 terminal JSON summary in the log, 10 natural terminal records and 110 checkpoint
 terminal records, all ten run IDs for the same fixed question, and all eleven
 requested checkpoint identities for every successful natural run (including
 physical aliases). The dry run must confirm compatible manifests and hashes,
 valid schemas/hierarchy/lifecycle, no invalid tail or pending recovery, no
-terminalization requirement, no unresolved writer/takeover lock, and no
+terminalization requirement, no writer/takeover lock, and no
 retry-required work. Counts must be stable after the job is terminal. Audit
 events must be policy-complete; a line count alone is not sufficient.
 
-Only after that independent post-job validation may Smoke A be marked passed
-and Smoke B become eligible. Smoke B has not been submitted and must not be
-submitted during this pause. Remaining Mila/GPU work is Smoke A terminal
-validation followed, after explicit continuation, by bounded Smoke B and its
-validation. Phase 3 remains deferred. The full 500-question experiment is
-forbidden, and no production model-run manifest may be created.
+That independent post-job validation passed, followed by authoritative Smoke B
+validation. The `10292499` launch-path failure remains diagnostic-only Phase 3
+SLURM-readiness hardening: non-interactive submission must expose `uv` on
+`PATH`. Phase 3 remains deferred and unauthorized until Prompt 4. The full
+500-question experiment is forbidden, and no production model-run manifest may
+be created.

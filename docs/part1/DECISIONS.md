@@ -59,9 +59,9 @@ MMLU is accessed with the explicit per-subject configuration strategy. The
 former `source_config: "all"` draft is invalid for this study and has been
 retired. Each listed subject is loaded as its own Hugging Face config at one
 shared resolved immutable commit, with test-split source row identity recorded
-as `(config, split, row_index)`. The immutable commit value itself remains
-unresolved until the Mila CPU job runs and is recorded in every question plus
-the question and study manifests.
+as `(config, split, row_index)`. The resolved immutable commit is
+`c30699e8356da336a370243923dbaf21066bb9fe`, recorded in every question and in
+the tracked question and study manifests.
 
 The saved dataset under `data/part1/mmlu-<question_manifest_hash>/` is an
 ignored reproducible cache. The three tracked files under `manifests/part1/`
@@ -94,17 +94,19 @@ and batch size one. Questions, natural runs, checkpoints, and checkpoint probes
 are never batched.
 
 Both requested settings and effective settings after resolving the pinned
-model's `GenerationConfig` are persisted in the model-run manifest. The exact
-model and tokenizer revisions are resolved during Phase 2 preflight and must be
-immutable before any production model-run identity is constructed.
+model's `GenerationConfig` are persisted in every operational model-run
+manifest. The exact model and tokenizer revision is
+`a07cc9a04f16550a088caea529712d1d335b0ac1`, as established by the completed
+Phase 2 preflight, and is immutable before any production model-run identity is
+constructed.
 
-The local SmolLM3 adapter assumes the documented `<think>` and `</think>` text
-and `</think>\nAnswer:` forced-close inducer only as candidates to test. GPU
-preflight must confirm their exact token sequences, the prompt-ending opening
-tag, A–D single-token behavior at the exact inducer boundary, BOS/EOS/PAD
-values, and both context budgets. PAD is recorded as found and is never
-silently reassigned to EOS. Until that preflight passes these are implementation
-assumptions, not observations about the real model/tokenizer.
+Phase 2 preflight confirmed the SmolLM3 adapter's documented `<think>` and
+`</think>` text, `</think>\nAnswer:` forced-close inducer, exact token
+sequences, A–D single-token behavior at the inducer boundary, BOS/EOS/PAD
+values, and both context budgets. The assistant prompt ends at the generation
+suffix; it does **not** itself end with `<think>`. The greedy generated next
+token is the one-token `<think>` opener. PAD is recorded as found and is never
+silently reassigned to EOS.
 
 ### Per-run seed
 
@@ -414,10 +416,12 @@ model-specific token IDs/sequences, environment versions, final production Git
 commit, and production/smoke provenance. Output paths/locations and mutable
 progress remain outside the immutable manifest.
 
-The manifest file itself is generated only in Phase 3 after final
-generation-path tests pass, final tracked production artifacts are committed,
-and the tracked worktree is clean except for intentional local exclusions. It
-lives under an explicitly ignored operational result root such as
+Non-production model-run manifests are generated in Phase 2 under the separate
+ignored smoke root and identify their `execution_scope`. Only the **production**
+model-run manifest is generated in Phase 3: after final generation-path tests
+pass, final tracked production artifacts are committed, and the tracked
+worktree is clean except for intentional local exclusions. It lives under an
+explicitly ignored operational root such as
 `results/part1/<model_run_id>/model_run_manifest.json`; creating it must not
 dirty the tracked worktree.
 
@@ -446,8 +450,10 @@ locked and golden-tested the exact canonical bytes and field lists described in
 
 ## Phase 1 executable engineering decisions
 
-These decisions are implemented in the Phase 1 modules and schemas. They do not
-create the Phase 2 question/study manifests or a production model-run manifest.
+These decisions were implemented in the Phase 1 modules and schemas. They did
+not themselves create the Phase 2 question/study manifests or a production
+model-run manifest; the tracked Phase 2 manifests and non-production
+operational manifests now exist.
 
 ### Versioned configuration and schema boundary
 
@@ -457,9 +463,10 @@ materialization, storage, retries, and analysis. It contains eight JSON Schema
 Draft 2020-12 contracts under `schemas/part1/` for question records, question
 manifests, study manifests, model-run manifests, natural terminal results,
 checkpoint terminal results, audit events, and validation reports. These are
-templates and validators, not concrete immutable Phase 2 revisions or
-manifests. Dataset/model/tokenizer revisions remain unresolved until their
-compute-node work.
+templates and validators, not the concrete immutable tracked or operational
+manifest instances. The completed compute-node work resolved the MMLU revision
+to `c30699e8356da336a370243923dbaf21066bb9fe` and the model/tokenizer revision
+to `a07cc9a04f16550a088caea529712d1d335b0ac1`.
 
 All six templates are compared against a complete executable oracle that is
 independent of the files being checked and uses canonical JSON-typed equality,
@@ -588,10 +595,11 @@ scheduler state is unknown. A non-SLURM owner requires same-host PID DEAD.
 Every ambiguous or failed probe refuses. Operator takeover always requires a
 nonblank reason and writes `operator_unlock`.
 
-The local two-process POSIX lock regression passed. Actual `flock`, directory
-fsync, no-overwrite hard-link, and atomic-replacement behavior on the selected
-Mila persistent filesystem, plus exact Mila `squeue` array-job behavior, remain
-Phase 2 operational readiness checks, not completed cluster validation.
+The local two-process POSIX lock regression passed. The Phase 2 Mila
+persistent-filesystem gate also passed `flock`, directory `fsync`, no-overwrite
+hard-link, and atomic-replacement checks; the scheduler-liveness gate passed
+its exact live/completed behavior while retaining the fail-closed rule that a
+purged `squeue` error is `UNKNOWN`, not `DEAD`.
 
 ### Resume and shard hierarchy
 

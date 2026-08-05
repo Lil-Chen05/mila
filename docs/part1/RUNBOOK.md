@@ -2,12 +2,14 @@
 
 ## Status and safety boundary
 
-Phase 1's login-safe infrastructure remains implemented. Phase 2 is paused
-during bounded Smoke A. At snapshot `2026-08-04T18:52:39-04:00`, SLURM job
-`10284742` was `RUNNING` for `33:14` on `cn-l018`; the shard contained 7 natural
-results, 66 checkpoint results, and 146 audit events. Monitoring stopped then,
-without cancelling the job. Smoke A is still running or awaiting post-job
-validation; it is not passed. Smoke B has not been submitted.
+Phase 1's login-safe infrastructure remains implemented and Phase 2 is
+complete. Authoritative Smoke A job `10284742` completed `0:0` in `01:26:28`
+on `cn-l018`; authoritative Smoke B job `10292530` completed `0:0` in
+`00:25:14` on `cn-l072`. Both non-production smokes reached terminal runner
+state `complete` and passed manifest, dry-run, and lifecycle validation with 0
+errors and 0 warnings. Phase 3 remains unauthorized and deferred until Prompt
+4. No production root/model-run manifest exists and no full 500-question job
+may be submitted.
 
 Never load a model, tokenizer, or Hugging Face dataset on a login node. Dataset
 materialization runs in a CPU SLURM job. Model/tokenizer preflight and generation
@@ -107,7 +109,7 @@ uv run python scripts/validate_part1_manifests.py \
 
 The materialization job must not be resubmitted as part of Smoke A monitoring.
 
-## GPU sequence — current pause
+## GPU sequence — completed Phase 2 evidence
 
 GPU preflight, including provenance refresh job `10284702`, passed on one L40S
 at Git commit `e19edf22c8a3f7462ab66d5cae11b38247df5ed9`. It records immutable
@@ -125,11 +127,42 @@ The Mila filesystem gate passed all four focused tests at
 `results/part1-smoke/mila-filesystem-gate.EUEXDB`, and the real scheduler
 liveness gate is approved with its documented fail-closed purged-job nuance.
 
-Smoke A job `10284742` was already submitted. Do not cancel it, resubmit it, or
-submit Smoke B or any other job while monitoring is paused. Do not submit the
-full 500-question run.
+Smoke A job `10284742` completed `0:0` in `01:26:28` on `cn-l018`, with terminal
+runner state `complete`, 10 natural results, 110 checkpoint results, and 240
+audit events. It covered exactly one question, natural run IDs `0`–`9`, and
+checkpoint indices `0`–`10` for every run. Manifest, dry-run, and lifecycle
+validation passed with 0 errors and 0 warnings; no production root was created.
+All 10 natural records have `natural_execution_outcome=complete`,
+`reasoning_status=closed`, `answer_parse_status=parsed`, and
+`confidence_parse_status=malformed`. All 110 checkpoint records have
+`checkpoint_execution_outcome=complete`; `checkpoint_model_output_status` is
+valid/invalid `93/17`, `answer_token_status` is located/missing `109/1`, and
+`entropy_status` is computed/unavailable `109/1`. This successful abnormal
+output was retained as data.
 
-## Resume Smoke A monitoring and validation
+Smoke B job `10292499` is historical diagnostic evidence only: it failed in one
+second before Python, model, dataset, or artifact creation because a
+non-interactive SSH `PATH` omitted `~/.local/bin`, so `srun` could not execute
+`uv`. It created no Smoke B root. The unchanged documented sbatch job was then
+submitted from a Mila login shell as authoritative job `10292530`, which
+completed `0:0` in `00:25:14` on `cn-l072` with terminal runner state
+`complete`. It covered sample indices `0`, `100`, `200`, `300`, and `400` (the
+fixed first question of each subject), natural `run_id=0`, and checkpoint
+indices `0`–`10`: 5 natural results, 55 checkpoint results, and 120 audit
+events. Manifest, dry-run, and lifecycle validation passed with 0 errors and 0
+warnings; no production root was created. All 5 natural records have
+`natural_execution_outcome=complete`; `reasoning_status` is
+closed/missing_close `4/1`, `answer_parse_status` is
+parsed/missing/out_of_domain `3/1/1`, and `confidence_parse_status` is
+malformed/missing `4/1`. All 55 checkpoint records have
+`checkpoint_execution_outcome=complete`; `checkpoint_model_output_status` is
+valid/invalid `42/13`, `answer_token_status` is located/missing `46/9`, and
+`entropy_status` is computed/unavailable `46/9`. This successful abnormal
+output was retained as data; there were no retries, terminalization,
+tail/recovery, lock, or takeover issues. Do not submit the full 500-question
+run.
+
+## Historical Smoke A monitoring and validation procedure
 
 Reconnect and inspect the exact existing job from the Mila repository root:
 
@@ -227,9 +260,10 @@ Smoke A passes only if all of the following hold:
    every natural and checkpoint execution completed without infrastructure
    terminalization.
 
-Only after independent review of all five checks may Smoke A be marked passed.
-Smoke B then becomes eligible, but must not be submitted until the user resumes
-this work explicitly.
+All five checks subsequently passed. Smoke B was then independently validated
+as recorded above. The one-second `10292499` launch failure is a Phase 3
+SLURM-readiness hardening item, not a model, reproducibility, or experimental
+failure.
 
 ## Implemented shard layout
 
@@ -421,10 +455,10 @@ quarantines them before continuing. The active claim is removed last.
 
 First creation of a stream/control/report/finalization file fsyncs both the
 file and its containing directory. Creating a missing shard-root or history
-directory component also fsyncs the parent directory entry. Before a Mila GPU
-smoke relies on this protocol, exercise directory `fsync`, no-overwrite hard-link
+directory component also fsyncs the parent directory entry. The Phase 2 Mila
+filesystem gate exercised directory `fsync`, no-overwrite hard-link
 publication, atomic replacement, and two-process POSIX `flock` on the selected
-Mila persistent filesystem.
+persistent filesystem.
 
 ## Result, event, retry, and resume ordering
 
@@ -496,17 +530,15 @@ does not make drifted science compatible.
 ## Remaining Phase 2/3 lifecycle
 
 1. CPU materialization, tracked-manifest validation/commit, GPU preflight,
-   filesystem/scheduler checks, and corrected reproducibility are complete.
-2. Resume observation of existing Smoke A job `10284742`; do not resubmit it.
-   Validate its terminal accounting, log, counts, provenance, schemas,
-   lifecycle, hierarchy, tails, recovery, and lock state before marking it
-   passed.
-3. After explicit continuation and only if Smoke A passes, run the bounded
-   Smoke B job under `results/part1-smoke/` and validate it independently.
-4. Phase 3 adds analysis, complete raw validation, validate-before-publish
+   filesystem/scheduler checks, corrected reproducibility, Smoke A, and Smoke
+   B are complete.
+2. Phase 3 adds analysis, complete raw validation, validate-before-publish
    merge, SLURM readiness, and its final bounded smoke.
-5. Final tracked production artifacts are committed; the tracked worktree must
+3. Harden the documented SLURM launch path so a non-interactive submission also
+   exposes `uv`; job `10292499` was a diagnostic launch-environment failure,
+   not model or experiment evidence.
+4. Final tracked production artifacts are committed; the tracked worktree must
    be clean.
-6. Only then is the operational production model-run manifest generated under
+5. Only then is the operational production model-run manifest generated under
    `results/part1/<model_run_id>/`, after which Git must remain clean.
-7. Stop. Full production submission requires separate authorization.
+6. Stop. Full production submission requires separate authorization.

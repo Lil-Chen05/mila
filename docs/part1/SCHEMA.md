@@ -12,11 +12,14 @@ under `configs/part1/`; eight JSON Schema Draft 2020-12 files live under
 [DECISIONS.md](DECISIONS.md), operations by [RUNBOOK.md](RUNBOOK.md), and
 evidence by [VALIDATION.md](VALIDATION.md).
 
-Schema and code availability is not concrete manifest availability. The Mila
-CPU job must still create the tracked question and study manifests and resolve
-the immutable dataset revision; GPU preflight must resolve real model/tokenizer
-provenance. No production model-run instance exists; Phase 3 owns its
-post-commit lifecycle.
+Schema and code availability is distinct from concrete manifest availability.
+The completed Phase 2 CPU job created the tracked question/study bundle and
+resolved the immutable MMLU revision to
+`c30699e8356da336a370243923dbaf21066bb9fe`; completed GPU preflight resolved
+the real model/tokenizer revision to
+`a07cc9a04f16550a088caea529712d1d335b0ac1`. Non-production model-run
+instances exist only under the ignored smoke root. No production model-run
+instance exists; Phase 3 owns its post-commit lifecycle.
 
 Historical 20q/200q JSON is legacy and incompatible. It must not be upgraded by
 silently filling missing provenance.
@@ -98,7 +101,8 @@ hash; model/tokenizer/environment fields do not.
 Every model-run manifest carries `execution_scope`. Non-production manifests
 use one of `smoke_a`, `smoke_b`, or `reproducibility`; a production manifest
 must use `production`. The field participates in the complete model-run hash
-and separates their identities. Synthetic fixtures do not populate real
+and separates their identities. Phase 2 generated and validated the
+non-production instances; synthetic fixtures do not populate real
 revision/token/environment observations.
 
 ## Canonical serialization

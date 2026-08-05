@@ -13,7 +13,7 @@ SmolLM3 behavior, MMLU provenance, Mila filesystem locking, real scheduler
 semantics, compute-node execution, or production readiness. Those remain
 resource-appropriate Phase 2/3 gates.
 
-## Phase 2 evidence and current Smoke A boundary
+## Phase 2 evidence and completed smoke record
 
 The login-safe preparation evidence covers:
 
@@ -46,13 +46,41 @@ unimplemented and unverified.
 | Same-environment reproducibility | **PASSED — job `10284721`, `0:0`; exact tokens, parse, and entropy arrays at tolerance 0.0; seed `2552280803631819986`; report under model run `14c49484a4eebdb79372cb14b3e0076812e983d688c49aa7e3c2280bb44be7c0`** |
 | Mila persistent filesystem | **PASSED — four focused tests at `results/part1-smoke/mila-filesystem-gate.EUEXDB`** |
 | Mila scheduler liveness | **PASSED with fail-closed nuance — live exact output; immediate completed empty/rc0 is `DEAD`; later purged/rc1 is `UNKNOWN`** |
-| Smoke A | **RUNNING OR AWAITING VALIDATION — job `10284742`; not passed** |
-| Smoke B | **NOT SUBMITTED** |
+| Smoke A | **PASSED — authoritative job `10284742`, `COMPLETED`/`0:0`, `01:26:28`, `cn-l018`; terminal runner `complete`, 10 natural/110 checkpoint/240 audit** |
+| Smoke B first submission | **DIAGNOSTIC ONLY — job `10292499` failed in 1s before Python/model/data/artifact creation because non-interactive SSH `PATH` omitted `~/.local/bin`, so `srun` could not execute `uv`; no Smoke B root** |
+| Smoke B | **PASSED — authoritative job `10292530`, unchanged documented sbatch job from Mila login shell, `COMPLETED`/`0:0`, `00:25:14`, `cn-l072`; terminal runner `complete`, 5 natural/55 checkpoint/120 audit** |
 
-At pause snapshot `2026-08-04T18:52:39-04:00`, Smoke A job `10284742` was
-`RUNNING` for `33:14` on `cn-l018`, with 7 natural results, 66 checkpoint
-results, and 146 audit events. Monitoring stopped then and the job was not
-cancelled. The shard, log, model-run manifest, and preflight are respectively:
+The `2026-08-04T18:52:39-04:00` Smoke A running snapshot is historical only.
+Authoritative job `10284742` subsequently completed with exactly one question,
+natural run IDs `0`–`9`, checkpoint indices `0`–`10` for every run, and passed
+manifest, dry-run, and lifecycle validation with 0 errors and 0 warnings. It
+created no production root. All 10 natural records have
+`natural_execution_outcome=complete`, `reasoning_status=closed`,
+`answer_parse_status=parsed`, and `confidence_parse_status=malformed`. All 110
+checkpoint records have `checkpoint_execution_outcome=complete`;
+`checkpoint_model_output_status` is valid/invalid `93/17`,
+`answer_token_status` is located/missing `109/1`, and `entropy_status` is
+computed/unavailable `109/1`. This successful abnormal output was retained as
+data.
+
+Authoritative Smoke B job `10292530` covered sample indices `0`, `100`, `200`,
+`300`, and `400` (one fixed first question per subject), each with natural
+`run_id=0` and checkpoint indices `0`–`10`. It passed manifest, dry-run, and
+lifecycle validation with 0 errors and 0 warnings, and created no production
+root. All 5 natural records have `natural_execution_outcome=complete`;
+`reasoning_status` is closed/missing_close `4/1`, `answer_parse_status` is
+parsed/missing/out_of_domain `3/1/1`, and `confidence_parse_status` is
+malformed/missing `4/1`. All 55 checkpoint records have
+`checkpoint_execution_outcome=complete`; `checkpoint_model_output_status` is
+valid/invalid `42/13`, `answer_token_status` is located/missing `46/9`, and
+`entropy_status` is computed/unavailable `46/9`. This successful abnormal
+output was retained as data; there were no retries, terminalization,
+tail/recovery, lock, or takeover issue. Job `10292499` is not
+experiment evidence; its non-interactive `uv` `PATH` failure is a Phase 3
+SLURM-readiness hardening item.
+
+The following Smoke A paths and commands are retained as the historical
+post-job validation record:
 
 ```text
 results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000
@@ -61,9 +89,9 @@ results/part1-smoke/model-runs/smoke_a/model_run_manifest.json
 results/part1-smoke/preflight/preflight.json
 ```
 
-Do not infer success from partial counts. On resume, establish terminal state
-with `squeue`/`sacct`, inspect the terminal log, rerun both read-only validators,
-and inspect stable stream counts:
+Do not infer success from partial counts. The historical validation procedure
+used `squeue`/`sacct` to establish terminal state, inspected the terminal log,
+reran both read-only validators, and inspected stable stream counts:
 
 ```bash
 ssh mila
@@ -86,7 +114,7 @@ uv run python scripts/part1_dry_run.py \
   --shard-root results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000
 ```
 
-Smoke A can pass only with `COMPLETED`/`0:0`, the runner terminal JSON, exactly
+Smoke A passed with `COMPLETED`/`0:0`, the runner terminal JSON, exactly
 10 natural and 110 checkpoint terminal records, all ten run IDs for the same
 fixed question, all eleven checkpoint identities per successful natural
 (including aliases), compatible manifests/hashes/provenance, valid schemas and
@@ -281,19 +309,21 @@ warning until reconciliation; it never authorizes retry.
 | Mila filesystem operation | **Passed** | Gate 4 under `results/part1-smoke/mila-filesystem-gate.EUEXDB`. |
 | Mila scheduler liveness | **Passed with nuance** | Exact live output and immediate completed/absent semantics approved; purged rc1 remains `UNKNOWN` and fails closed. |
 | Reproducibility | **Passed** | Job `10284721`, `0:0`; exact tokens, parse, and entropy arrays at tolerance 0.0. |
-| Smoke A runtime integration | **Awaiting validation** | Existing job `10284742`; require policy-complete writes, terminal runner JSON, valid read-only dry run, and exact completed counts. |
-| Natural generation | **Awaiting Smoke A validation** | Require 10 stochastic run identities, no extra greedy run, fixed settings, raw pre-warper float32 entropy, exact alignment, and abnormal-output retention. |
-| Checkpoints | **Awaiting Smoke A validation** | Require 110 checkpoint records: all eleven requested identities per successful natural, with valid aliases and metrics/statuses. |
-| Smoke separation | **Awaiting final check** | Confirm non-production manifest/output under ignored smoke root and absence of production artifacts. |
-| Smoke B | **Not submitted** | Eligible only after Smoke A passes independent validation and work explicitly resumes. |
+| Smoke A runtime integration | **Passed** | Job `10284742`: policy-complete writes, terminal runner `complete`, valid manifest/dry-run/lifecycle reports with 0 errors/warnings, and exact 10/110/240 counts. |
+| Natural generation | **Passed** | Ten stochastic run identities `0`–`9`, no extra greedy run, fixed settings, aligned raw pre-warper float32 entropy, and abnormal-output retention. |
+| Checkpoints | **Passed** | 110 records: all eleven requested identities per successful natural, including aliases and valid retained metric/status conditions. |
+| Smoke separation | **Passed** | Both authorized smokes used non-production manifests/output under the ignored smoke root; no production root was created. |
+| Smoke B | **Passed** | Job `10292530`: one fixed first question from each subject, `run_id=0`, all eleven checkpoints, and exact 5/55/120 counts. Job `10292499` is diagnostic-only launch-path evidence. |
 
-Phase 2 cannot pass until Smoke A and then bounded Smoke B are independently
-validated. The full experiment remains forbidden.
+Phase 2 is complete: Smoke A and Smoke B were independently validated. The
+full experiment remains forbidden.
 
 ## Phase 3 and production-manifest gate
 
 Analysis, bootstrap/calibration, complete raw validation, validate-before-
-publish merge, SLURM launchers, and end-to-end bounded smoke remain Phase 3.
+publish merge, SLURM readiness hardening (including non-interactive `uv`
+availability), and end-to-end bounded smoke remain Phase 3 and are unauthorized
+until Prompt 4.
 Only after final tracked production artifacts are committed and the tracked
 worktree is clean may the operational production model-run manifest be created
 under the ignored persistent production root. The manifest must record the

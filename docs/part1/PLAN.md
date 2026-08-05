@@ -8,14 +8,12 @@ procedures are in [RUNBOOK.md](RUNBOOK.md), and acceptance evidence is in
 [VALIDATION.md](VALIDATION.md). Scientific changes require explicit approval and
 a versioned manifest change.
 
-**Current phase: Phase 2 is paused during bounded Smoke A.** CPU materialization
-and manifest validation, GPU preflight, Mila filesystem/scheduler checks, and
-same-environment reproducibility are complete. At
-`2026-08-04T18:52:39-04:00`, job `10284742` was `RUNNING` for `33:14` on
-`cn-l018`, with 7 durable natural results, 66 durable checkpoint results, and
-146 audit events. Monitoring stopped at that snapshot without cancelling the
-job. Smoke A is not passed until its completed artifacts are independently
-validated. Smoke B has not been submitted.
+**Current phase: Phase 2 is complete.** CPU materialization and manifest
+validation, GPU preflight, Mila filesystem/scheduler checks, same-environment
+reproducibility, and both authorized bounded GPU smokes have passed independent
+post-job validation. Phase 3 remains unauthorized and deferred until Prompt 4.
+No production model-run manifest exists, and the full 500-question experiment
+remains forbidden.
 
 Historical root documentation, old 20q/200q code, results, and analyses remain
 pilot artifacts. They are not instructions or evidence for Part 1.
@@ -180,33 +178,52 @@ The scoped preparation commit provides:
    local suite at that commit was 367 passed. The durable report is
    `results/part1-smoke/reproducibility/14c49484a4eebdb79372cb14b3e0076812e983d688c49aa7e3c2280bb44be7c0/reproducibility_report.json`.
 
-### Current Smoke A gate
+### Completed Smoke A and Smoke B gates
 
-Smoke A job `10284742` was still running at the pause snapshot. Its output is
-under:
+Smoke A authoritative job `10284742` completed `0:0` in `01:26:28` on
+`cn-l018`. The runner reached its terminal `complete` state. Its one-question
+non-production shard has exactly natural run IDs `0`–`9`, all requested
+checkpoint indices `0`–`10` for each run, 10 natural results, 110 checkpoint
+results, and 240 audit events. Manifest, dry-run, and lifecycle validation all
+passed with 0 errors and 0 warnings; no production root was created. All 10
+natural records have `natural_execution_outcome=complete`,
+`reasoning_status=closed`, `answer_parse_status=parsed`, and
+`confidence_parse_status=malformed`. All 110 checkpoint records have
+`checkpoint_execution_outcome=complete`; `checkpoint_model_output_status` is
+valid/invalid `93/17`, `answer_token_status` is located/missing `109/1`, and
+`entropy_status` is computed/unavailable `109/1`. This successful abnormal
+output was retained as data.
 
-```text
-results/part1-smoke/smoke_a/a332786f767d9f84c23ad0ddd057b46d5d3a8d7b266458d9b0352f5bf90ea374/shard-000
-```
+Smoke B's first submission, job `10292499`, failed in one second before
+Python, model, dataset, or artifact creation because non-interactive SSH did
+not include `~/.local/bin` in `PATH`, so `srun` could not execute `uv`. It
+created no Smoke B root and is diagnostic only, not a model, reproducibility,
+or experiment failure. The authoritative resubmission, job `10292530`, used
+the unchanged documented sbatch job from a Mila login shell and completed
+`0:0` in `00:25:14` on `cn-l072`. Its non-production shard exercised sample
+indices `0`, `100`, `200`, `300`, and `400` (one fixed first question per
+subject), each at natural `run_id=0` and checkpoint indices `0`–`10`: 5
+natural results, 55 checkpoint results, and 120 audit events. The terminal
+runner state was `complete`; manifest, dry-run, and lifecycle validation all
+passed with 0 errors and 0 warnings; no production root was created. All 5
+natural records have `natural_execution_outcome=complete`;
+`reasoning_status` is closed/missing_close `4/1`, `answer_parse_status` is
+parsed/missing/out_of_domain `3/1/1`, and `confidence_parse_status` is
+malformed/missing `4/1`. All 55 checkpoint records have
+`checkpoint_execution_outcome=complete`; `checkpoint_model_output_status` is
+valid/invalid `42/13`, `answer_token_status` is located/missing `46/9`, and
+`entropy_status` is computed/unavailable `46/9`. This successful abnormal
+output was retained as data. There were no retries, terminalization,
+tail/recovery, lock, or takeover issues.
 
-The log is `logs/part1-smoke-a-10284742.out`; its model-run manifest is
-`results/part1-smoke/model-runs/smoke_a/model_run_manifest.json`. Do not equate
-partial counts with success. Resume with the exact monitoring and validation
-procedure in [RUNBOOK.md](RUNBOOK.md). Require terminal `COMPLETED`/`0:0`, the
-runner's terminal JSON summary, 10 natural and 110 checkpoint terminal records, and a
-clean read-only lifecycle/schema/hash/tail/lock validation before marking the
-gate passed.
+### Phase 2 completion record
 
-### Phase 2 dependencies and operational checks
-
-- Smoke A needs terminal-state and artifact validation; no success claim may be
-  made from the running snapshot.
-- A purged/error `squeue` response is `UNKNOWN`, not `DEAD`; use `sacct` and
-  retained job evidence for the post-job decision.
-- Generation integration must never bypass `LockedShardSession` or construct
-  incomplete events/results by hand.
-- Smoke B remains GPU-dependent and unsubmitted. It becomes eligible only after
-  Smoke A passes independent post-job validation and work explicitly resumes.
+- A purged/error `squeue` response remains `UNKNOWN`, not `DEAD`; post-job
+  decisions use `sacct` and retained job evidence.
+- Generation integration used `LockedShardSession`; terminal records and audit
+  evidence were policy-complete.
+- The non-interactive `uv` `PATH` failure is a Phase 3 SLURM-readiness
+  hardening item, not a reproducibility or experimental failure.
 
 ### Phase 2 completion criteria
 
@@ -223,10 +240,9 @@ gate passed.
 - Login-safe tests and the authorized bounded compute smoke pass without
   creating production artifacts.
 
-The dataset, study-manifest, preflight, filesystem, scheduler, and
-reproducibility criteria are passed. Smoke A remains awaiting post-job
-validation; Smoke B is unsubmitted. The full 500-question experiment remains
-forbidden.
+The dataset, study-manifest, preflight, filesystem, scheduler,
+reproducibility, Smoke A, and Smoke B criteria are passed. The full
+500-question experiment remains forbidden.
 
 ## Phase 3 — completion
 
