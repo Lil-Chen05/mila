@@ -15,7 +15,7 @@ set -euo pipefail
 export HF_HOME="$SCRATCH/hf_cache"
 
 UV_BIN="$(command -v uv || true)"
-if [[ -z "$UV_BIN" ]]; then
+if [[ -z "$UV_BIN" || ! -x "$UV_BIN" ]]; then
   UV_BIN="$HOME/.local/bin/uv"
 fi
 if [[ ! -x "$UV_BIN" ]]; then

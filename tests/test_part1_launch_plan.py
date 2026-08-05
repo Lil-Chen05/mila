@@ -77,6 +77,7 @@ def test_part1_jobs_have_exact_resources_uv_resolution_and_future_clis() -> None
     for content in jobs.values():
         assert "command -v uv" in content
         assert '$HOME/.local/bin/uv' in content
+        assert '[[ -z "$UV_BIN" || ! -x "$UV_BIN" ]]' in content
         assert '[[ ! -x "$UV_BIN" ]]' in content
         assert 'srun "$UV_BIN" run python' in content
     for name in ("part1_generate_array.sh", "part1_phase3_smoke.sh"):
@@ -97,4 +98,3 @@ def test_part1_jobs_have_exact_resources_uv_resolution_and_future_clis() -> None
         assert "#SBATCH --gpus-per-task" not in jobs[name]
         assert "#SBATCH --cpus-per-task=4" in jobs[name]
         assert cli in jobs[name]
-

@@ -19,7 +19,11 @@ from create_part1_model_run_manifest import (
     _manifest_bytes,
     _sha256_regular_file,
 )
-from part1_model_run import build_smoke_model_run_manifest
+from part1_manifests import load_manifest_bundle
+from part1_model_run import (
+    build_smoke_model_run_manifest,
+    validate_preflight_model_run_compatibility,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +33,7 @@ OUTPUT_ROOT = Path("results/part1-smoke/model-runs/phase3_smoke")
 def publish_phase3_smoke_manifest(
     *,
     study_manifest: Mapping[str, Any],
+    question_manifest: Mapping[str, Any],
     preflight_report: Mapping[str, Any],
     repository_root: Path = REPOSITORY_ROOT,
     output_root: Path = OUTPUT_ROOT,
@@ -52,6 +57,12 @@ def publish_phase3_smoke_manifest(
         execution_scope="phase3_smoke",
         base_git_commit=head,
         diff_hash=hashlib.sha256(b"").hexdigest(),
+    )
+    validate_preflight_model_run_compatibility(
+        preflight_report=preflight_report,
+        model_manifest=manifest,
+        study_manifest=study_manifest,
+        question_manifest=question_manifest,
     )
     content = _manifest_bytes(manifest)
     parent = _ensure_regular_directory_chain(repository_root, output_root)
@@ -97,9 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository-root", type=Path, default=REPOSITORY_ROOT)
     parser.add_argument(
-        "--study-manifest",
-        type=Path,
-        default=REPOSITORY_ROOT / "manifests/part1/study_manifest.json",
+        "--manifest-root", type=Path, default=REPOSITORY_ROOT / "manifests/part1"
     )
     parser.add_argument(
         "--preflight",
@@ -108,8 +117,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     try:
+        bundle = load_manifest_bundle(
+            questions_path=args.manifest_root / "questions.jsonl",
+            question_manifest_path=args.manifest_root / "questions.manifest.json",
+            study_manifest_path=args.manifest_root / "study_manifest.json",
+        )
         path = publish_phase3_smoke_manifest(
-            study_manifest=_load_json(args.study_manifest),
+            study_manifest=bundle.study_manifest,
+            question_manifest=bundle.question_manifest,
             preflight_report=_load_json(args.preflight),
             repository_root=args.repository_root,
         )

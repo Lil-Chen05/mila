@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 from typing import Any, Callable, Mapping, Sequence
@@ -29,6 +30,7 @@ from part1_runtime import (
     LockHeldError,
     LockMetadata,
     LockedShardSession,
+    FinalizedRuntimeShardError,
     WorkSpec,
 )
 from part1_smollm3_adapter import (
@@ -36,7 +38,7 @@ from part1_smollm3_adapter import (
     preflight_tokenizer_contract,
 )
 from part1_storage_estimate import assess_free_space, estimate_part1_storage
-from part1_store import Part1ShardStore
+from part1_store import Part1ShardStore, STORE_VERSION
 from run_part1_smoke import (
     _execute_checkpoint,
     _execute_natural,
@@ -129,7 +131,9 @@ def _resolve_raw_shards_root(
     execution_scope: str,
     output_root: Path | None,
 ) -> Path:
-    production_root = (repository_root / "results" / "part1").resolve()
+    repository_root = Path(os.path.abspath(repository_root))
+    if repository_root.is_symlink() or not repository_root.is_dir():
+        raise ValueError("repository root must be a non-symlink directory")
     if execution_scope == "production":
         expected_relative = Path("results/part1") / str(model_manifest["model_run_id"]) / (
             "raw_shards"
@@ -137,27 +141,59 @@ def _resolve_raw_shards_root(
         recorded = model_manifest.get("output_paths", {}).get("raw_shards")
         if recorded != expected_relative.as_posix():
             raise ValueError("production manifest raw_shards output root is not canonical")
-        expected = (repository_root / expected_relative).resolve()
-        if output_root is not None and Path(output_root).resolve() != expected:
+        expected = repository_root / expected_relative
+        if output_root is not None:
+            requested = Path(output_root)
+            if not requested.is_absolute():
+                requested = repository_root / requested
+            requested = Path(os.path.abspath(requested))
+        else:
+            requested = expected
+        if requested != expected:
             raise ValueError("requested output root differs from manifest raw_shards path")
         return expected
     if execution_scope != "phase3_smoke":
         raise ValueError(f"unsupported shard execution scope: {execution_scope}")
-    default = (
+    expected = (
         repository_root
         / "results"
         / "part1-smoke"
         / "phase3_smoke"
         / str(model_manifest["model_run_id"])
         / "raw_shards"
-    ).resolve()
-    selected = default if output_root is None else Path(output_root).resolve()
-    smoke_base = (repository_root / "results" / "part1-smoke" / "phase3_smoke").resolve()
-    if selected == production_root or production_root in selected.parents:
-        raise ValueError("phase3 smoke output must remain separate from production paths")
-    if selected != smoke_base and smoke_base not in selected.parents:
-        raise ValueError("phase3 smoke output root must use the dedicated smoke root")
-    return selected
+    )
+    if output_root is None:
+        selected = expected
+    else:
+        selected = Path(output_root)
+        if not selected.is_absolute():
+            selected = repository_root / selected
+        selected = Path(os.path.abspath(selected))
+    if selected != expected:
+        raise ValueError("phase3 smoke output root must equal the exact canonical smoke path")
+    return expected
+
+
+def _ensure_safe_directory_chain(repository_root: Path, target: Path) -> None:
+    """Create repository-relative directories without following unsafe components."""
+
+    repository_root = Path(os.path.abspath(repository_root))
+    target = Path(os.path.abspath(target))
+    try:
+        relative = target.relative_to(repository_root)
+    except ValueError as exc:
+        raise ValueError("output root must remain inside the repository") from exc
+    current = repository_root
+    for part in relative.parts:
+        current = current / part
+        if os.path.lexists(current):
+            mode = current.lstat().st_mode
+            if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+                raise ValueError(
+                    f"output path component is a symlink or non-directory: {current}"
+                )
+            continue
+        current.mkdir()
 
 
 def _owner(model_manifest: Mapping[str, Any], shard_id: str) -> LockMetadata:
@@ -195,11 +231,52 @@ def _require_complete_shard_coverage(
     model_manifest: Mapping[str, Any],
     selected: Sequence[tuple[Mapping[str, Any], int]],
 ) -> None:
-    index = store.build_index()
+    if not _inspect_active_shard_state(
+        store, model_manifest=model_manifest, selected=selected
+    ):
+        raise RuntimeError("shard finalization coverage is incomplete")
+
+
+def _inspect_active_shard_state(
+    store: Part1ShardStore,
+    *,
+    model_manifest: Mapping[str, Any],
+    selected: Sequence[tuple[Mapping[str, Any], int]],
+) -> bool:
+    """Return completeness for a structurally compatible, resumable shard subset."""
+
+    try:
+        inspection = store.inspect()
+        if inspection.trailing_tails or inspection.unterminated_streams:
+            raise RuntimeError("active shard contains an unrecovered trailing stream")
+        index = store.build_index()
+    except Exception as exc:
+        raise RuntimeError(f"active shard streams are malformed or incompatible: {exc}") from exc
     expected_natural = _expected_natural_keys(model_manifest, selected)
     actual_natural = set(index.natural_terminal_by_key)
-    if actual_natural != expected_natural:
-        raise RuntimeError("shard finalization coverage is incomplete or contains extra naturals")
+    extra_natural = actual_natural.difference(expected_natural)
+    if extra_natural:
+        raise RuntimeError("active shard contains natural keys not assigned to this shard")
+    if index.hierarchy_errors or index.lifecycle_errors:
+        raise RuntimeError("active shard hierarchy or lifecycle is incompatible")
+    if index.missing_started_attempt_ids or index.inconsistent_completion_attempt_ids:
+        raise RuntimeError("active shard attempt lifecycle is corrupt")
+
+    allowed_work_keys: set[tuple[Any, ...]] = set(expected_natural)
+    allowed_work_keys.update(
+        (*natural_key, checkpoint_id)
+        for natural_key in expected_natural
+        for checkpoint_id in CHECKPOINT_IDS
+    )
+    extra_attempt_keys = set(index.attempts_consumed).difference(allowed_work_keys)
+    if extra_attempt_keys:
+        raise RuntimeError("active shard contains attempt keys not assigned to this shard")
+    for work_key in index.attempts_consumed:
+        if len(work_key) == 5:
+            parent = index.natural_terminal_by_key.get(work_key[:4])
+            if parent is None or parent.get("natural_execution_outcome") != "complete":
+                raise RuntimeError("checkpoint attempt lacks a complete durable parent")
+
     expected_checkpoints: set[tuple[str, str, str, int, str]] = set()
     for key, parent in index.natural_terminal_by_key.items():
         outcome = parent["natural_execution_outcome"]
@@ -216,30 +293,72 @@ def _require_complete_shard_coverage(
                 raise RuntimeError("complete natural does not request the fixed checkpoints")
             required = {(*key, checkpoint_id) for checkpoint_id in CHECKPOINT_IDS}
             expected_checkpoints.update(required)
-            if child_keys != required:
-                raise RuntimeError("complete natural is missing terminal checkpoint coverage")
+            if not child_keys.issubset(required):
+                raise RuntimeError("complete natural contains unexpected checkpoint keys")
         elif outcome == "terminal_infrastructure_failure":
             if parent.get("checkpoint_eligible") or child_keys:
                 raise RuntimeError("failed natural has checkpoint work")
         else:
             raise RuntimeError("natural result has a nonterminal execution outcome")
-    if set(index.checkpoint_terminal_by_key) != expected_checkpoints:
-        raise RuntimeError("shard checkpoint coverage contains unexpected keys")
-    if (
-        index.hierarchy_errors
-        or index.lifecycle_errors
-        or index.missing_started_attempt_ids
-        or index.inconsistent_completion_attempt_ids
-        or index.orphaned_attempt_ids
-        or index.terminalization_required
-        or index.missing_completion_record_ids
-    ):
-        raise RuntimeError("shard lifecycle or hierarchy is invalid")
-    report = store.validate_shard(
-        artifact_kind="natural_shard", started_at=_now(), completed_at=_now()
+    actual_checkpoints = set(index.checkpoint_terminal_by_key)
+    expected_for_existing_complete = expected_checkpoints
+    if not actual_checkpoints.issubset(expected_for_existing_complete):
+        raise RuntimeError("active shard checkpoint coverage contains unexpected keys")
+
+    complete = (
+        actual_natural == expected_natural
+        and actual_checkpoints == expected_checkpoints
+        and not index.orphaned_attempt_ids
+        and not index.terminalization_required
+        and not index.missing_completion_record_ids
     )
-    if not report["is_valid"] or report["warning_count"]:
-        raise RuntimeError("shard validation did not pass cleanly")
+    if complete:
+        report = store.validate_shard(
+            artifact_kind="natural_shard", started_at=_now(), completed_at=_now()
+        )
+        if not report["is_valid"] or report["warning_count"]:
+            raise RuntimeError("shard validation did not pass cleanly")
+    return complete
+
+
+def _validate_finalization_marker(store: Part1ShardStore) -> dict[str, Any]:
+    path = store.finalization_path
+    if not os.path.lexists(path):
+        raise RuntimeError("finalized marker is missing")
+    mode = path.lstat().st_mode
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        raise RuntimeError("finalized marker must be a non-symlink regular file")
+    try:
+        marker = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"finalized marker contains invalid JSON: {exc}") from exc
+    expected_fields = {
+        "store_version",
+        "shard_id",
+        "study_id",
+        "model_run_id",
+        "finalized_at",
+    }
+    if not isinstance(marker, dict) or set(marker) != expected_fields:
+        raise RuntimeError("finalized marker has invalid fields")
+    expected = {
+        "store_version": STORE_VERSION,
+        "shard_id": store.shard_id,
+        "study_id": store.study_id,
+        "model_run_id": store.model_run_id,
+    }
+    if any(marker.get(field) != value for field, value in expected.items()):
+        raise RuntimeError("finalized marker identity or store version is incompatible")
+    timestamp = marker.get("finalized_at")
+    if not isinstance(timestamp, str) or not timestamp.endswith("Z"):
+        raise RuntimeError("finalized marker timestamp is invalid")
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RuntimeError("finalized marker timestamp is invalid") from exc
+    if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise RuntimeError("finalized marker timestamp must be UTC")
+    return marker
 
 
 def _acquire_or_recover(
@@ -335,7 +454,7 @@ def run_part1_shard(
     )
     if execution_scope == "phase3_smoke" and len(selected) != 10:
         raise ValueError("Phase 3 smoke budget is exactly one question by ten runs")
-    raw_shards_root.mkdir(parents=True, exist_ok=True)
+    _ensure_safe_directory_chain(repository_root, raw_shards_root)
     estimated_questions = 500 if execution_scope == "production" else 1
     estimate = estimate_part1_storage(
         question_count=estimated_questions,
@@ -357,7 +476,8 @@ def run_part1_shard(
         model_run_id=model_manifest["model_run_id"],
         model_run_manifest_hash=model_manifest["model_run_manifest_hash"],
     )
-    if read_store.finalization_path.exists():
+    if os.path.lexists(read_store.finalization_path):
+        _validate_finalization_marker(read_store)
         _require_complete_shard_coverage(
             read_store, model_manifest=model_manifest, selected=selected
         )
@@ -375,18 +495,31 @@ def run_part1_shard(
     completed_natural = 0
     completed_checkpoints = 0
     owner = _owner(model_manifest, shard_id)
-    with _acquire_or_recover(
-        shard_root,
-        owner=owner,
-        model_run_manifest_hash=model_manifest["model_run_manifest_hash"],
-    ) as session:
-        try:
-            _require_complete_shard_coverage(
-                session.store, model_manifest=model_manifest, selected=selected
-            )
-        except RuntimeError:
-            pass
-        else:
+    try:
+        acquired = _acquire_or_recover(
+            shard_root,
+            owner=owner,
+            model_run_manifest_hash=model_manifest["model_run_manifest_hash"],
+        )
+    except FinalizedRuntimeShardError:
+        _validate_finalization_marker(read_store)
+        _require_complete_shard_coverage(
+            read_store, model_manifest=model_manifest, selected=selected
+        )
+        return {
+            "status": "already_finalized",
+            "execution_scope": execution_scope,
+            "model_run_id": model_manifest["model_run_id"],
+            "shard_root": str(shard_root),
+            "new_natural_results": 0,
+            "new_checkpoint_results": 0,
+            "storage_estimate": estimate,
+            "free_space_assessment": free_space,
+        }
+    with acquired as session:
+        if _inspect_active_shard_state(
+            session.store, model_manifest=model_manifest, selected=selected
+        ):
             session.store.finalize()
             return {
                 "status": "completed",
