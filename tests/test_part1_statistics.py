@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+from fractions import Fraction
 from typing import Any
 
+import numpy as np
 import pytest
 
 from part1_contract import (
@@ -61,7 +63,7 @@ def _balanced_rows() -> list[dict[str, Any]]:
     ]
 
 
-def _one_draw_each_subject() -> list[dict[str, Any]]:
+def _one_draw_each_subject() -> Any:
     from part1_bootstrap import build_question_draw_plan
 
     return build_question_draw_plan(
@@ -71,6 +73,20 @@ def _one_draw_each_subject() -> list[dict[str, Any]]:
         ],
         replicates=3,
     )
+
+
+def _plan_for_rows(rows: list[dict[str, Any]], *, replicates: int = 3) -> Any:
+    from part1_bootstrap import build_question_draw_plan
+
+    seen: set[tuple[str, str]] = set()
+    questions = []
+    for subject in FIXED_SUBJECTS:
+        for row in rows:
+            pair = (row["subject"], row["question_id"])
+            if row["subject"] == subject and pair not in seen:
+                seen.add(pair)
+                questions.append({"subject": pair[0], "question_id": pair[1]})
+    return build_question_draw_plan(questions, replicates=replicates)
 
 
 @pytest.mark.parametrize(
@@ -104,6 +120,35 @@ def test_rank_auroc_rejects_nonboolean_targets_and_nonfinite_scores(
 
     with pytest.raises(ValueError):
         rank_auroc(targets, scores)
+
+
+def test_rank_auroc_preserves_native_large_integer_order_and_exact_mixed_ties() -> None:
+    from part1_statistics import rank_auroc
+
+    assert rank_auroc([False, True], [2**53, 2**53 + 1]) == 1.0
+    assert rank_auroc(
+        [False, True, True],
+        [2**53, Fraction(2**53, 1), 2**53 + 1],
+    ) == 0.75
+
+
+def test_weighted_rank_auroc_multiplicity_ties_zero_weights_and_validation() -> None:
+    from part1_statistics import weighted_rank_auroc
+
+    assert weighted_rank_auroc([False, True], [0.1, 0.9], [3, 1]) == 1.0
+    assert weighted_rank_auroc([False, True], [0.5, 0.5], [3, 2]) == 0.5
+    assert weighted_rank_auroc([False, True, True], [0.1, 0.2, 0.3], [0, 2, 1]) is None
+    with pytest.raises(ValueError, match="nonnegative integer weights"):
+        weighted_rank_auroc([False, True], [0.1, 0.9], [1, 0.5])
+
+    class IncomparableFloat(float):
+        def __lt__(self, other: object) -> bool:
+            raise TypeError("not comparable")
+
+    with pytest.raises(ValueError, match="mutually comparable"):
+        weighted_rank_auroc(
+            [False, True], [IncomparableFloat(1), IncomparableFloat(2)], [1, 1]
+        )
 
 
 def test_reliability_boundaries_empty_bins_and_weighted_ece() -> None:
@@ -145,6 +190,20 @@ def test_reliability_rejects_out_of_range_and_has_explicit_empty_result() -> Non
         reliability_ece([True], [1.01])
 
 
+def test_weighted_reliability_uses_integer_multiplicity_for_bins_and_ece() -> None:
+    from part1_statistics import weighted_reliability_ece
+
+    result = weighted_reliability_ece(
+        [False, True, True], [0.1, 0.9, 0.9], [3, 2, 0]
+    )
+    assert result["sample_size"] == 5
+    assert result["bins"][1]["count"] == 3
+    assert result["bins"][9]["count"] == 2
+    assert result["ece"] == pytest.approx(0.1)
+    with pytest.raises(ValueError, match="nonnegative integer weights"):
+        weighted_reliability_ece([True], [0.9], [True])
+
+
 def test_primary_auroc_exact_registry_groups_counts_and_json_safety() -> None:
     from part1_statistics import primary_auroc_analysis
 
@@ -153,7 +212,7 @@ def test_primary_auroc_exact_registry_groups_counts_and_json_safety() -> None:
     rows.append(_row(FIXED_SUBJECTS[0], "missing-predictor", 0, True, None))
     rows[-1]["reasoning_status"] = "malformed"
     rows[-1]["stop_reason"] = "length"
-    result = primary_auroc_analysis(rows, _one_draw_each_subject())
+    result = primary_auroc_analysis(rows, _plan_for_rows(rows))
 
     assert result["analysis_label"] == "primary_auroc"
     assert result["target"] == "natural_correct"
@@ -182,6 +241,7 @@ def test_primary_auroc_exact_registry_groups_counts_and_json_safety() -> None:
     )
     assert macro["point_estimate"] == 1.0
     assert macro["subject"] is None
+    assert "bootstrap_rows" not in result
     json.dumps(result, allow_nan=False)
 
 
@@ -200,52 +260,55 @@ def test_primary_auroc_rejects_registry_target_and_malformed_predictors() -> Non
 
 
 def test_primary_bootstrap_one_class_subject_invalidates_macro_only() -> None:
+    from part1_bootstrap import question_draw_plan_from_indices
     from part1_statistics import primary_auroc_analysis
 
     feature = FIXED_PRIMARY_AUROC_FEATURE_REGISTRY[0]
     rows: list[dict[str, Any]] = []
-    draw_plan: list[dict[str, Any]] = []
+    questions: list[dict[str, str]] = []
     for subject_index, subject in enumerate(FIXED_SUBJECTS):
         if subject_index == 0:
             rows.extend([
                 _row(subject, "false-q", 0, False, 0.1),
                 _row(subject, "true-q", 0, True, 0.9),
             ])
-            selected = "false-q"
+            questions.extend([
+                {"subject": subject, "question_id": "false-q"},
+                {"subject": subject, "question_id": "true-q"},
+            ])
         else:
             question_id = f"{subject}-mixed-q"
             rows.extend([
                 _row(subject, question_id, 0, False, 0.1),
                 _row(subject, question_id, 1, True, 0.9),
             ])
-            selected = question_id
-        draw_plan.append({
-            "replicate_id": 0,
-            "subject": subject,
-            "draw_index": 0,
-            "draw_id": f"draw-{subject_index}",
-            "question_id": selected,
-        })
+            questions.append({"subject": subject, "question_id": question_id})
+    # Mathematics draws its false question twice; all other subjects draw their
+    # sole mixed-correctness question once.
+    draw_plan = question_draw_plan_from_indices(
+        questions, np.array([[0, 0, 0, 0, 0, 0]]), seed=42
+    )
 
     result = primary_auroc_analysis(rows, draw_plan)
     math_bootstrap = next(
-        row for row in result["bootstrap_rows"]
+        row for row in result["metric_rows"]
         if row["feature"] == feature and row["grouping"] == "subject"
         and row["subject"] == FIXED_SUBJECTS[0]
     )
     macro_bootstrap = next(
-        row for row in result["bootstrap_rows"]
+        row for row in result["metric_rows"]
         if row["feature"] == feature and row["grouping"] == "macro"
     )
     pooled_bootstrap = next(
-        row for row in result["bootstrap_rows"]
+        row for row in result["metric_rows"]
         if row["feature"] == feature and row["grouping"] == "pooled"
     )
-    assert math_bootstrap["point_estimate"] is None
-    assert math_bootstrap["invalid_reason"] == "single_target_class"
-    assert macro_bootstrap["point_estimate"] is None
-    assert macro_bootstrap["invalid_reason"] == "incomplete_subject_macro"
-    assert pooled_bootstrap["point_estimate"] == 1.0
+    assert math_bootstrap["valid_replicates"] == 0
+    assert math_bootstrap["invalid_replicates"] == 1
+    assert macro_bootstrap["valid_replicates"] == 0
+    assert macro_bootstrap["invalid_replicates"] == 1
+    assert pooled_bootstrap["valid_replicates"] == 1
+    assert "bootstrap_rows" not in result
 
 
 def test_natural_calibration_uses_only_natural_confidence_and_subject_macro() -> None:
@@ -380,6 +443,7 @@ def test_within_question_exact_means_equal_weights_missing_sides_and_distributio
 
 
 def test_within_question_bootstrap_preserves_repeated_draws_in_mean() -> None:
+    from part1_bootstrap import question_draw_plan_from_indices
     from part1_statistics import within_question_analysis
 
     subject = FIXED_SUBJECTS[0]
@@ -388,35 +452,34 @@ def test_within_question_bootstrap_preserves_repeated_draws_in_mean() -> None:
         _row(subject, "q1", 1, False, 1.0),
         _row(subject, "q2", 0, True, 4.0),
         _row(subject, "q2", 1, False, 1.0),
+        _row(subject, "q3", 0, True, 9.0),
+        _row(subject, "q4", 0, False, 0.0),
     ]
-    plan = []
-    for replicate_id, questions in enumerate((("q1", "q1", "q1", "q2"), ("q1", "q2", "q2", "q2"))):
-        for draw_index, question_id in enumerate(questions):
-            plan.append({
-                "replicate_id": replicate_id,
-                "subject": subject,
-                "draw_index": draw_index,
-                "draw_id": f"r{replicate_id}-d{draw_index}",
-                "question_id": question_id,
-            })
+    question_frame = [
+        {"subject": subject, "question_id": question_id}
+        for question_id in ("q1", "q2", "q3", "q4")
+    ]
+    plan = question_draw_plan_from_indices(
+        question_frame,
+        np.array([[0, 0, 0, 1], [0, 1, 1, 1]]),
+        seed=42,
+        small_fixture=True,
+    )
     result = within_question_analysis(rows, plan)
     feature = FIXED_PRIMARY_AUROC_FEATURE_REGISTRY[0]
-    bootstrap = [row for row in result["bootstrap_rows"] if row["feature"] == feature]
-    assert [row["point_estimate"] for row in bootstrap] == [4.5, 3.5]
-    draw_rows = [
-        row for row in result["bootstrap_draw_rows"] if row["feature"] == feature
-    ]
-    assert [row["draw_id"] for row in draw_rows] == [
-        "r0-d0", "r0-d1", "r0-d2", "r0-d3", "r1-d0", "r1-d1", "r1-d2", "r1-d3"
-    ]
-    assert [row["question_id"] for row in draw_rows[:4]] == ["q1", "q1", "q1", "q2"]
     summary = next(row for row in result["summary_rows"] if row["feature"] == feature)
     assert summary["lower"] == pytest.approx(3.525)
     assert summary["upper"] == pytest.approx(4.475)
+    assert "bootstrap_rows" not in result
+    assert "bootstrap_draw_rows" not in result
+    assert [row["question_id"] for row in plan.iter_draw_rows(0)] == [
+        "q1", "q1", "q1", "q2"
+    ]
     json.dumps(result, allow_nan=False)
 
 
 def test_within_question_replicate_without_qualifying_draw_is_invalid() -> None:
+    from part1_bootstrap import question_draw_plan_from_indices
     from part1_statistics import within_question_analysis
 
     subject = FIXED_SUBJECTS[0]
@@ -425,15 +488,63 @@ def test_within_question_replicate_without_qualifying_draw_is_invalid() -> None:
         _row(subject, "mixed", 1, False, 1.0),
         _row(subject, "one-class", 0, True, 3.0),
     ]
-    plan = [{
-        "replicate_id": 0,
-        "subject": subject,
-        "draw_index": 0,
-        "draw_id": "draw-0",
-        "question_id": "one-class",
-    }]
+    plan = question_draw_plan_from_indices(
+        [
+            {"subject": subject, "question_id": "mixed"},
+            {"subject": subject, "question_id": "one-class"},
+        ],
+        np.array([[1, 1]]),
+        seed=42,
+        small_fixture=True,
+    )
     result = within_question_analysis(rows, plan)
-    assert all(row["point_estimate"] is None for row in result["bootstrap_rows"])
-    assert {row["invalid_reason"] for row in result["bootstrap_rows"]} == {
-        "no_qualifying_drawn_questions"
-    }
+    assert all(row["valid_replicates"] == 0 for row in result["summary_rows"])
+    assert all(row["invalid_replicates"] == 1 for row in result["summary_rows"])
+    assert "bootstrap_rows" not in result
+
+
+def test_streaming_bootstrap_never_deepcopies_or_reflattens_replicate_payloads() -> None:
+    from part1_bootstrap import build_question_draw_plan
+    from part1_statistics import (
+        checkpoint_calibration_analysis,
+        primary_auroc_analysis,
+    )
+
+    class NoDeepcopyDict(dict[str, Any]):
+        def __deepcopy__(self, memo: dict[int, Any]) -> Any:
+            raise AssertionError("production bootstrap must not deepcopy source rows")
+
+    class CountingSlots(list[dict[str, Any]]):
+        accesses = 0
+
+        def __getitem__(self, index: int) -> dict[str, Any]:
+            type(self).accesses += 1
+            return super().__getitem__(index)
+
+    rows: list[dict[str, Any]] = []
+    question_frame: list[dict[str, str]] = []
+    for subject in FIXED_SUBJECTS:
+        for question_index in range(3):
+            question_id = f"{subject}-q{question_index}"
+            question_frame.append({"subject": subject, "question_id": question_id})
+            for run_id, (correct, value) in enumerate(((False, 0.1), (True, 0.9))):
+                row = NoDeepcopyDict(
+                    _row(subject, question_id, run_id, correct, value)
+                )
+                row["checkpoint_calibration"] = CountingSlots(
+                    row["checkpoint_calibration"]
+                )
+                rows.append(row)
+    plan = build_question_draw_plan(question_frame, replicates=100)
+
+    primary = primary_auroc_analysis(rows, plan)
+    checkpoint = checkpoint_calibration_analysis(rows, plan)
+
+    assert all(row["requested_replicates"] == 100 for row in primary["metric_rows"])
+    assert all(row["requested_replicates"] == 100 for row in checkpoint["metric_rows"])
+    assert "bootstrap_rows" not in primary
+    assert "bootstrap_rows" not in checkpoint
+    assert "bootstrap_draw_rows" not in primary
+    assert "bootstrap_draw_rows" not in checkpoint
+    assert CountingSlots.accesses == len(rows) * 11
+    assert plan.selected_index_cell_count == 100 * 15

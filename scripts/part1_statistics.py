@@ -1,14 +1,14 @@
-"""Fixed, pure statistical analyses for Part 1 trajectory rows."""
+"""Fixed point estimates and compact weighted bootstrap analyses for Part 1."""
 
 from __future__ import annotations
 
 from collections import defaultdict
 import math
-from numbers import Real
+from numbers import Integral, Real
 from statistics import median
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
-from part1_bootstrap import expand_question_draws, percentile_interval
+from part1_bootstrap import QuestionDrawPlan, percentile_interval
 from part1_contract import (
     FIXED_CHECKPOINT_FRACTIONS,
     FIXED_PRIMARY_AUROC_FEATURE_REGISTRY,
@@ -25,75 +25,127 @@ CHECKPOINT_PREDICTORS = (
 MAIN_CHECKPOINT_FRACTIONS = frozenset((0.0, 0.5, 1.0))
 COHORT_DEFINITION = "boolean_target_and_finite_predictor"
 
+_MetricKey = tuple[str, str, str | None, float | None]
+_QuestionWeights = Mapping[tuple[str, str], int]
+
 
 def _finite_real(value: Any) -> bool:
-    return (
-        not isinstance(value, bool)
-        and isinstance(value, Real)
-        and math.isfinite(float(value))
-    )
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return False
+    if isinstance(value, Integral):
+        return True
+    try:
+        return bool(math.isfinite(value))
+    except (OverflowError, TypeError, ValueError):
+        return False
 
 
-def rank_auroc(targets: Sequence[bool], scores: Sequence[Real]) -> float | None:
-    """Return average-rank Mann--Whitney AUROC, or None for one target class."""
-
-    if len(targets) != len(scores) or not targets:
-        raise ValueError("targets and scores must have equal nonzero length")
+def _validate_targets_scores_weights(
+    targets: Sequence[bool], scores: Sequence[Real], weights: Sequence[int]
+) -> list[int]:
+    if len(targets) != len(scores) or len(targets) != len(weights) or not targets:
+        raise ValueError("targets, scores, and weights must have equal nonzero length")
     if any(type(target) is not bool for target in targets):
         raise ValueError("AUROC targets must be actual booleans")
     if any(not _finite_real(score) for score in scores):
         raise ValueError("AUROC scores must be finite real numbers and not booleans")
+    output: list[int] = []
+    for weight in weights:
+        if isinstance(weight, bool) or not isinstance(weight, Integral) or weight < 0:
+            raise ValueError("AUROC requires nonnegative integer weights")
+        output.append(int(weight))
+    return output
 
-    positive_count = sum(targets)
-    negative_count = len(targets) - positive_count
-    if positive_count == 0 or negative_count == 0:
+
+def weighted_rank_auroc(
+    targets: Sequence[bool], scores: Sequence[Real], weights: Sequence[int]
+) -> float | None:
+    """Exact native-score weighted AUROC with half credit for tied pairs."""
+
+    integer_weights = _validate_targets_scores_weights(targets, scores, weights)
+    active = [index for index, weight in enumerate(integer_weights) if weight > 0]
+    positive_total = sum(
+        integer_weights[index] for index in active if targets[index]
+    )
+    negative_total = sum(
+        integer_weights[index] for index in active if not targets[index]
+    )
+    if positive_total == 0 or negative_total == 0:
         return None
-    order = sorted(range(len(scores)), key=lambda index: float(scores[index]))
-    ranks = [0.0] * len(scores)
+    try:
+        order = sorted(active, key=lambda index: scores[index])
+    except (TypeError, ValueError) as error:
+        raise ValueError("AUROC scores must be mutually comparable") from error
+
+    twice_concordant = 0
+    negative_below = 0
     start = 0
     while start < len(order):
         end = start + 1
-        value = float(scores[order[start]])
-        while end < len(order) and float(scores[order[end]]) == value:
-            end += 1
-        average_rank = ((start + 1) + end) / 2.0
-        for position in range(start, end):
-            ranks[order[position]] = average_rank
+        group_score = scores[order[start]]
+        try:
+            while end < len(order) and bool(scores[order[end]] == group_score):
+                end += 1
+        except (TypeError, ValueError) as error:
+            raise ValueError("AUROC scores must support exact tie equality") from error
+        positive_weight = sum(
+            integer_weights[index]
+            for index in order[start:end]
+            if targets[index]
+        )
+        negative_weight = sum(
+            integer_weights[index]
+            for index in order[start:end]
+            if not targets[index]
+        )
+        twice_concordant += 2 * positive_weight * negative_below
+        twice_concordant += positive_weight * negative_weight
+        negative_below += negative_weight
         start = end
-    positive_rank_sum = sum(
-        rank for rank, target in zip(ranks, targets, strict=True) if target
-    )
-    statistic = positive_rank_sum - positive_count * (positive_count + 1) / 2.0
-    return float(statistic / (positive_count * negative_count))
+    return float(twice_concordant / (2 * positive_total * negative_total))
 
 
-def reliability_ece(
-    targets: Sequence[bool], confidences: Sequence[Real]
+def rank_auroc(targets: Sequence[bool], scores: Sequence[Real]) -> float | None:
+    """Average-rank/Mann--Whitney AUROC using exact native score ordering."""
+
+    return weighted_rank_auroc(targets, scores, [1] * len(targets))
+
+
+def weighted_reliability_ece(
+    targets: Sequence[bool], confidences: Sequence[Real], weights: Sequence[int]
 ) -> dict[str, Any]:
-    """Compute fixed ten-bin, count-weighted ECE and all reliability bins."""
+    """Fixed ten-bin reliability/ECE using nonnegative integer multiplicities."""
 
-    if len(targets) != len(confidences):
-        raise ValueError("targets and confidences must have equal length")
+    if len(targets) != len(confidences) or len(targets) != len(weights):
+        raise ValueError("targets, confidences, and weights must have equal length")
     if any(type(target) is not bool for target in targets):
         raise ValueError("calibration targets must be actual booleans")
     values: list[float] = []
+    integer_weights: list[int] = []
     for confidence in confidences:
         if not _finite_real(confidence) or not 0.0 <= float(confidence) <= 1.0:
             raise ValueError("calibration confidences must be finite real numbers in [0,1]")
         values.append(float(confidence))
+    for weight in weights:
+        if isinstance(weight, bool) or not isinstance(weight, Integral) or weight < 0:
+            raise ValueError("calibration requires nonnegative integer weights")
+        integer_weights.append(int(weight))
 
-    sample_size = len(values)
-    bin_members: list[list[int]] = [[] for _ in range(10)]
+    sample_size = sum(integer_weights)
+    bin_indices: list[list[int]] = [[] for _ in range(10)]
     for index, confidence in enumerate(values):
-        bin_index = min(9, int(confidence * 10.0))
-        bin_members[bin_index].append(index)
+        bin_indices[min(9, int(confidence * 10.0))].append(index)
     bins: list[dict[str, Any]] = []
     ece = 0.0
-    for bin_index, members in enumerate(bin_members):
-        count = len(members)
+    for bin_index, members in enumerate(bin_indices):
+        count = sum(integer_weights[index] for index in members)
         if count:
-            mean_confidence = sum(values[index] for index in members) / count
-            accuracy = sum(targets[index] for index in members) / count
+            mean_confidence = sum(
+                values[index] * integer_weights[index] for index in members
+            ) / count
+            accuracy = sum(
+                int(targets[index]) * integer_weights[index] for index in members
+            ) / count
             gap = abs(mean_confidence - accuracy)
             contribution = gap * count / sample_size
             ece += contribution
@@ -108,7 +160,7 @@ def reliability_ece(
                 "bin_lower": bin_index / 10.0,
                 "bin_upper": (bin_index + 1) / 10.0,
                 "upper_inclusive": bin_index == 9,
-                "count": count,
+                "count": int(count),
                 "mean_confidence": (
                     None if mean_confidence is None else float(mean_confidence)
                 ),
@@ -118,52 +170,103 @@ def reliability_ece(
             }
         )
     return {
-        "sample_size": sample_size,
+        "sample_size": int(sample_size),
         "ece": None if sample_size == 0 else float(ece),
         "bins": bins,
     }
 
 
+def reliability_ece(
+    targets: Sequence[bool], confidences: Sequence[Real]
+) -> dict[str, Any]:
+    """Fixed ten-bin reliability/ECE with unit observation weights."""
+
+    return weighted_reliability_ece(targets, confidences, [1] * len(targets))
+
+
+def _canonical_plan_pairs(draw_plan: QuestionDrawPlan) -> set[tuple[str, str]]:
+    if not isinstance(draw_plan, QuestionDrawPlan):
+        raise ValueError("draw_plan must be a compact QuestionDrawPlan")
+    return {
+        (subject, question_id)
+        for subject, group in zip(
+            draw_plan.subjects, draw_plan.question_ids_by_subject, strict=True
+        )
+        for question_id in group
+    }
+
+
+def _validate_source_rows(
+    rows: Sequence[Mapping[str, Any]], draw_plan: QuestionDrawPlan
+) -> None:
+    canonical_pairs = _canonical_plan_pairs(draw_plan)
+    question_subject: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("analysis rows must be mappings")
+        subject = row.get("subject")
+        question_id = row.get("question_id")
+        if not isinstance(subject, str) or not subject:
+            raise ValueError("analysis rows require a nonempty subject")
+        if not isinstance(question_id, str) or not question_id:
+            raise ValueError("analysis rows require a nonempty question_id")
+        pair = (subject, question_id)
+        if pair not in canonical_pairs:
+            raise ValueError("analysis row question is absent from the compact draw plan")
+        previous = question_subject.setdefault(question_id, subject)
+        if previous != subject:
+            raise ValueError("analysis rows violate subject/question consistency")
+
+
 def _cohort(
-    rows: Sequence[Mapping[str, Any]], predictor: str, target: str
+    rows: Sequence[Mapping[str, Any]],
+    predictor: str,
+    target: str,
+    question_weights: _QuestionWeights | None = None,
 ) -> dict[str, Any]:
     targets: list[bool] = []
-    predictors: list[float] = []
+    predictors: list[Real] = []
+    weights: list[int] = []
+    total_candidate = 0
     target_missing = 0
     predictor_missing = 0
     for row in rows:
+        weight = (
+            1
+            if question_weights is None
+            else int(question_weights[(str(row["subject"]), str(row["question_id"]))])
+        )
+        total_candidate += weight
         target_value = row.get(target)
         if target_value is None:
-            target_missing += 1
+            target_missing += weight
             continue
         if type(target_value) is not bool:
             raise ValueError(f"{target} must be an actual boolean or None")
         predictor_value = row.get(predictor)
         if predictor_value is None:
-            predictor_missing += 1
+            predictor_missing += weight
             continue
         if not _finite_real(predictor_value):
             raise ValueError(f"{predictor} must be a finite real number or None")
         targets.append(target_value)
-        predictors.append(float(predictor_value))
+        predictors.append(predictor_value)
+        weights.append(weight)
+    positive_count = sum(
+        weight for target_value, weight in zip(targets, weights, strict=True) if target_value
+    )
+    sample_size = sum(weights)
     return {
-        "total_candidate_rows": len(rows),
-        "target_missing_count": target_missing,
-        "predictor_missing_count": predictor_missing,
-        "sample_size": len(targets),
-        "positive_count": sum(targets),
-        "negative_count": len(targets) - sum(targets),
+        "total_candidate_rows": int(total_candidate),
+        "target_missing_count": int(target_missing),
+        "predictor_missing_count": int(predictor_missing),
+        "sample_size": int(sample_size),
+        "positive_count": int(positive_count),
+        "negative_count": int(sample_size - positive_count),
         "targets": targets,
         "predictors": predictors,
+        "weights": weights,
     }
-
-
-def _point_reason(sample_size: int, positive_count: int, negative_count: int) -> str | None:
-    if sample_size == 0:
-        return "no_eligible_observations"
-    if positive_count == 0 or negative_count == 0:
-        return "single_target_class"
-    return None
 
 
 def _base_metric_row(
@@ -200,16 +303,22 @@ def _auroc_metric_row(
     target: str,
     grouping: str,
     subject: str | None,
+    question_weights: _QuestionWeights | None = None,
 ) -> dict[str, Any]:
-    cohort = _cohort(rows, predictor, target)
-    reason = _point_reason(
-        cohort["sample_size"], cohort["positive_count"], cohort["negative_count"]
-    )
+    cohort = _cohort(rows, predictor, target, question_weights)
     estimate = (
         None
-        if reason is not None
-        else rank_auroc(cohort["targets"], cohort["predictors"])
+        if cohort["sample_size"] == 0
+        else weighted_rank_auroc(
+            cohort["targets"], cohort["predictors"], cohort["weights"]
+        )
     )
+    if cohort["sample_size"] == 0:
+        reason = "no_eligible_observations"
+    elif estimate is None:
+        reason = "single_target_class"
+    else:
+        reason = None
     output = _base_metric_row(
         analysis_label=analysis_label,
         predictor=predictor,
@@ -228,6 +337,57 @@ def _auroc_metric_row(
     return output
 
 
+def _calibration_metric_row(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    analysis_label: str,
+    predictor: str,
+    target: str,
+    grouping: str,
+    subject: str | None,
+    question_weights: _QuestionWeights | None = None,
+    include_bins: bool = True,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    cohort = _cohort(rows, predictor, target, question_weights)
+    reliability = weighted_reliability_ece(
+        cohort["targets"], cohort["predictors"], cohort["weights"]
+    )
+    estimate = reliability["ece"]
+    metric = _base_metric_row(
+        analysis_label=analysis_label,
+        predictor=predictor,
+        target=target,
+        grouping=grouping,
+        subject=subject,
+        cohort=cohort,
+    )
+    metric.update(
+        {
+            "point_estimate": estimate,
+            "point_estimate_status": "defined" if estimate is not None else "undefined",
+            "point_undefined_reason": (
+                None if estimate is not None else "no_eligible_observations"
+            ),
+        }
+    )
+    if not include_bins:
+        return metric, []
+    bins = [
+        {
+            "analysis_label": analysis_label,
+            "feature": predictor,
+            "predictor": predictor,
+            "target": target,
+            "cohort_definition": COHORT_DEFINITION,
+            "grouping": grouping,
+            "subject": subject,
+            **bin_row,
+        }
+        for bin_row in reliability["bins"]
+    ]
+    return metric, bins
+
+
 def _macro_row(
     subject_rows: Sequence[Mapping[str, Any]],
     *,
@@ -240,7 +400,7 @@ def _macro_row(
         estimate is not None for estimate in estimates
     )
     estimate = float(sum(estimates) / len(FIXED_SUBJECTS)) if defined else None
-    output = {
+    return {
         "analysis_label": analysis_label,
         "feature": predictor,
         "predictor": predictor,
@@ -260,358 +420,266 @@ def _macro_row(
         "grouping": "macro",
         "subject": None,
     }
-    return output
 
 
-def _replicate_ids(draw_plan: Sequence[Mapping[str, Any]]) -> list[int]:
-    replicate_ids = sorted({draw.get("replicate_id") for draw in draw_plan})
-    if not replicate_ids or any(type(value) is not int or value < 0 for value in replicate_ids):
-        raise ValueError("draw plan requires nonnegative integer replicate IDs")
-    return replicate_ids
-
-
-def _bootstrap_auroc_rows(
-    rows: Sequence[Mapping[str, Any]],
-    draw_plan: Sequence[Mapping[str, Any]],
-    *,
-    analysis_label: str,
-    predictors: Sequence[str],
-    target: str,
-    metadata: Mapping[str, Mapping[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    expanded = expand_question_draws(draw_plan, rows)
-    replicate_ids = _replicate_ids(draw_plan)
-    output: list[dict[str, Any]] = []
-    for predictor in predictors:
-        extra = {} if metadata is None else dict(metadata[predictor])
-        for replicate_id in replicate_ids:
-            replicate_rows = [
-                row for row in expanded if row["replicate_id"] == replicate_id
-            ]
-            pooled = _auroc_metric_row(
-                replicate_rows,
-                analysis_label=analysis_label,
-                predictor=predictor,
-                target=target,
-                grouping="pooled",
-                subject=None,
-            )
-            subject_rows = [
-                _auroc_metric_row(
-                    [row for row in replicate_rows if row["subject"] == subject],
-                    analysis_label=analysis_label,
-                    predictor=predictor,
-                    target=target,
-                    grouping="subject",
-                    subject=subject,
-                )
-                for subject in FIXED_SUBJECTS
-            ]
-            macro = _macro_row(
-                subject_rows,
-                analysis_label=analysis_label,
-                predictor=predictor,
-                target=target,
-            )
-            for metric in (pooled, *subject_rows, macro):
-                output.append(
-                    {
-                        "analysis_label": analysis_label,
-                        "feature": predictor,
-                        "predictor": predictor,
-                        "target": target,
-                        "replicate_id": replicate_id,
-                        "grouping": metric["grouping"],
-                        "subject": metric["subject"],
-                        "sample_size": metric["sample_size"],
-                        "positive_count": metric["positive_count"],
-                        "negative_count": metric["negative_count"],
-                        "point_estimate": metric["point_estimate"],
-                        "invalid_reason": metric["point_undefined_reason"],
-                        **extra,
-                    }
-                )
-    return output
-
-
-def _attach_intervals(
-    metric_rows: list[dict[str, Any]],
-    bootstrap_rows: Sequence[Mapping[str, Any]],
-    requested_replicates: int,
-) -> None:
-    for metric in metric_rows:
-        estimates = [
-            row["point_estimate"]
-            for row in bootstrap_rows
-            if row["predictor"] == metric["predictor"]
-            and row["grouping"] == metric["grouping"]
-            and row["subject"] == metric["subject"]
-            and row.get("requested_fraction") == metric.get("requested_fraction")
-        ]
-        metric.update(
-            percentile_interval(
-                estimates, requested_replicates=requested_replicates
-            )
-        )
-
-
-def primary_auroc_analysis(
-    rows: Sequence[Mapping[str, Any]],
-    draw_plan: Sequence[Mapping[str, Any]],
-    *,
-    target: str = PRIMARY_TARGET,
-    feature_registry: Sequence[str] = PRIMARY_FEATURE_REGISTRY,
-) -> dict[str, Any]:
-    """Compute the fixed eleven-feature primary AUROC table and shared bootstrap."""
-
-    if target != PRIMARY_TARGET:
-        raise ValueError("primary AUROC target must be natural_correct")
-    if tuple(feature_registry) != PRIMARY_FEATURE_REGISTRY:
-        raise ValueError("primary AUROC feature registry mismatch")
-    metric_rows: list[dict[str, Any]] = []
-    for feature in PRIMARY_FEATURE_REGISTRY:
-        pooled = _auroc_metric_row(
-            rows,
-            analysis_label="primary_auroc",
-            predictor=feature,
-            target=target,
-            grouping="pooled",
-            subject=None,
-        )
-        subjects = [
-            _auroc_metric_row(
-                [row for row in rows if row.get("subject") == subject],
-                analysis_label="primary_auroc",
-                predictor=feature,
-                target=target,
-                grouping="subject",
-                subject=subject,
-            )
-            for subject in FIXED_SUBJECTS
-        ]
-        metric_rows.extend((pooled, *subjects, _macro_row(
-            subjects,
-            analysis_label="primary_auroc",
-            predictor=feature,
-            target=target,
-        )))
-    bootstrap_rows = _bootstrap_auroc_rows(
-        rows,
-        draw_plan,
-        analysis_label="primary_auroc",
-        predictors=PRIMARY_FEATURE_REGISTRY,
-        target=target,
-    )
-    _attach_intervals(metric_rows, bootstrap_rows, len(_replicate_ids(draw_plan)))
-    return {
-        "analysis_label": "primary_auroc",
-        "target": target,
-        "feature_registry": list(PRIMARY_FEATURE_REGISTRY),
-        "metric_rows": metric_rows,
-        "bootstrap_rows": bootstrap_rows,
-    }
-
-
-def _calibration_metric_row(
+def _group_metric_rows(
     rows: Sequence[Mapping[str, Any]],
     *,
     analysis_label: str,
     predictor: str,
     target: str,
-    grouping: str,
-    subject: str | None,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    cohort = _cohort(rows, predictor, target)
-    reliability = reliability_ece(cohort["targets"], cohort["predictors"])
-    metric = _base_metric_row(
+    metric_builder: Callable[..., Any],
+    question_weights: _QuestionWeights | None = None,
+    include_bins: bool = True,
+    rows_by_subject: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def build(
+        group_rows: Sequence[Mapping[str, Any]], grouping: str, subject: str | None
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        result = metric_builder(
+            group_rows,
+            analysis_label=analysis_label,
+            predictor=predictor,
+            target=target,
+            grouping=grouping,
+            subject=subject,
+            question_weights=question_weights,
+            **({"include_bins": include_bins} if metric_builder is _calibration_metric_row else {}),
+        )
+        return result if isinstance(result, tuple) else (result, [])
+
+    pooled, pooled_bins = build(rows, "pooled", None)
+    subject_rows: list[dict[str, Any]] = []
+    reliability_rows: list[dict[str, Any]] = list(pooled_bins)
+    for subject in FIXED_SUBJECTS:
+        metric, bins = build(
+            (
+                rows_by_subject.get(subject, ())
+                if rows_by_subject is not None
+                else [row for row in rows if row.get("subject") == subject]
+            ),
+            "subject",
+            subject,
+        )
+        subject_rows.append(metric)
+        reliability_rows.extend(bins)
+    macro = _macro_row(
+        subject_rows,
         analysis_label=analysis_label,
         predictor=predictor,
         target=target,
-        grouping=grouping,
-        subject=subject,
-        cohort=cohort,
     )
-    estimate = reliability["ece"]
-    metric.update(
-        {
-            "point_estimate": estimate,
-            "point_estimate_status": "defined" if estimate is not None else "undefined",
-            "point_undefined_reason": (
-                None if estimate is not None else "no_eligible_observations"
-            ),
-        }
-    )
-    bin_rows = [
-        {
-            "analysis_label": analysis_label,
-            "feature": predictor,
-            "predictor": predictor,
-            "target": target,
-            "cohort_definition": COHORT_DEFINITION,
-            "grouping": grouping,
-            "subject": subject,
-            **bin_row,
-        }
-        for bin_row in reliability["bins"]
-    ]
-    return metric, bin_rows
+    return [pooled, *subject_rows, macro], reliability_rows
 
 
-def _bootstrap_calibration_rows(
+def _index_rows_by_subject(
     rows: Sequence[Mapping[str, Any]],
-    draw_plan: Sequence[Mapping[str, Any]],
+) -> dict[str, list[Mapping[str, Any]]]:
+    indexed = {subject: [] for subject in FIXED_SUBJECTS}
+    for row in rows:
+        subject = row.get("subject")
+        if subject in indexed:
+            indexed[str(subject)].append(row)
+    return indexed
+
+
+def _metric_spec(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    predictor: str,
+    target: str,
+    metadata: Mapping[str, Any] | None = None,
+    rows_by_subject: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "rows": rows,
+        "rows_by_subject": (
+            _index_rows_by_subject(rows) if rows_by_subject is None else rows_by_subject
+        ),
+        "predictor": predictor,
+        "target": target,
+        "metadata": {} if metadata is None else dict(metadata),
+    }
+
+
+def _metric_key(metric: Mapping[str, Any]) -> _MetricKey:
+    return (
+        str(metric["predictor"]),
+        str(metric["grouping"]),
+        None if metric["subject"] is None else str(metric["subject"]),
+        metric.get("requested_fraction"),
+    )
+
+
+def _stream_metric_estimates(
+    specs: Sequence[Mapping[str, Any]],
+    draw_plan: QuestionDrawPlan,
     *,
     analysis_label: str,
-    predictors: Sequence[str],
-    target: str,
-    metadata: Mapping[str, Mapping[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    expanded = expand_question_draws(draw_plan, rows)
-    output: list[dict[str, Any]] = []
-    for predictor in predictors:
-        extra = {} if metadata is None else dict(metadata[predictor])
-        for replicate_id in _replicate_ids(draw_plan):
-            replicate_rows = [
-                row for row in expanded if row["replicate_id"] == replicate_id
-            ]
-            pooled, _ = _calibration_metric_row(
-                replicate_rows,
+    metric_builder: Callable[..., Any],
+) -> dict[_MetricKey, list[float | None]]:
+    estimates: dict[_MetricKey, list[float | None]] = defaultdict(list)
+    for replicate_id in range(draw_plan.replicates):
+        question_weights = draw_plan.question_multiplicities(replicate_id)
+        for spec in specs:
+            metrics, _ = _group_metric_rows(
+                spec["rows"],
                 analysis_label=analysis_label,
-                predictor=predictor,
-                target=target,
-                grouping="pooled",
-                subject=None,
+                predictor=str(spec["predictor"]),
+                target=str(spec["target"]),
+                metric_builder=metric_builder,
+                question_weights=question_weights,
+                include_bins=False,
+                rows_by_subject=spec["rows_by_subject"],
             )
-            subjects = [
-                _calibration_metric_row(
-                    [row for row in replicate_rows if row["subject"] == subject],
-                    analysis_label=analysis_label,
-                    predictor=predictor,
-                    target=target,
-                    grouping="subject",
-                    subject=subject,
-                )[0]
-                for subject in FIXED_SUBJECTS
-            ]
-            macro = _macro_row(
-                subjects,
-                analysis_label=analysis_label,
-                predictor=predictor,
-                target=target,
+            metadata = spec.get("metadata", {})
+            for metric in metrics:
+                metric.update(metadata)
+                estimates[_metric_key(metric)].append(metric["point_estimate"])
+    return dict(estimates)
+
+
+def _attach_intervals(
+    metric_rows: list[dict[str, Any]],
+    estimates: Mapping[_MetricKey, Sequence[float | None]],
+    requested_replicates: int,
+) -> None:
+    for metric in metric_rows:
+        metric.update(
+            percentile_interval(
+                estimates.get(_metric_key(metric), ()),
+                requested_replicates=requested_replicates,
             )
-            for metric in (pooled, *subjects, macro):
-                output.append(
-                    {
-                        "analysis_label": analysis_label,
-                        "feature": predictor,
-                        "predictor": predictor,
-                        "target": target,
-                        "replicate_id": replicate_id,
-                        "grouping": metric["grouping"],
-                        "subject": metric["subject"],
-                        "sample_size": metric["sample_size"],
-                        "point_estimate": metric["point_estimate"],
-                        "invalid_reason": metric["point_undefined_reason"],
-                        **extra,
-                    }
-                )
-    return output
+        )
+
+
+def _bootstrap_metadata(draw_plan: QuestionDrawPlan) -> dict[str, Any]:
+    return {
+        "representation": "compact_question_multiplicity_weights",
+        "replicates": draw_plan.replicates,
+        "logical_draw_count": draw_plan.logical_draw_count,
+        "selected_index_cell_count": draw_plan.selected_index_cell_count,
+        "selected_index_storage_bytes": draw_plan.estimated_storage_bytes,
+        "replicate_diagnostic_rows_retained": False,
+        "draw_rows_retained": False,
+    }
+
+
+def primary_auroc_analysis(
+    rows: Sequence[Mapping[str, Any]],
+    draw_plan: QuestionDrawPlan,
+    *,
+    target: str = PRIMARY_TARGET,
+    feature_registry: Sequence[str] = PRIMARY_FEATURE_REGISTRY,
+) -> dict[str, Any]:
+    """Fixed eleven-feature primary AUROC with compact weighted bootstrap."""
+
+    if target != PRIMARY_TARGET:
+        raise ValueError("primary AUROC target must be natural_correct")
+    if tuple(feature_registry) != PRIMARY_FEATURE_REGISTRY:
+        raise ValueError("primary AUROC feature registry mismatch")
+    _validate_source_rows(rows, draw_plan)
+    metric_rows: list[dict[str, Any]] = []
+    specs: list[dict[str, Any]] = []
+    rows_by_subject = _index_rows_by_subject(rows)
+    for feature in PRIMARY_FEATURE_REGISTRY:
+        metrics, _ = _group_metric_rows(
+            rows,
+            analysis_label="primary_auroc",
+            predictor=feature,
+            target=target,
+            metric_builder=_auroc_metric_row,
+            rows_by_subject=rows_by_subject,
+        )
+        metric_rows.extend(metrics)
+        specs.append(
+            _metric_spec(
+                rows,
+                predictor=feature,
+                target=target,
+                rows_by_subject=rows_by_subject,
+            )
+        )
+    estimates = _stream_metric_estimates(
+        specs,
+        draw_plan,
+        analysis_label="primary_auroc",
+        metric_builder=_auroc_metric_row,
+    )
+    _attach_intervals(metric_rows, estimates, draw_plan.replicates)
+    return {
+        "analysis_label": "primary_auroc",
+        "target": target,
+        "feature_registry": list(PRIMARY_FEATURE_REGISTRY),
+        "metric_rows": metric_rows,
+        "bootstrap": _bootstrap_metadata(draw_plan),
+    }
+
+
+def _calibration_point_tables(
+    specs: Sequence[Mapping[str, Any]], *, analysis_label: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    metric_rows: list[dict[str, Any]] = []
+    reliability_rows: list[dict[str, Any]] = []
+    for spec in specs:
+        metrics, bins = _group_metric_rows(
+            spec["rows"],
+            analysis_label=analysis_label,
+            predictor=str(spec["predictor"]),
+            target=str(spec["target"]),
+            metric_builder=_calibration_metric_row,
+            rows_by_subject=spec["rows_by_subject"],
+        )
+        metadata = spec.get("metadata", {})
+        for metric in metrics:
+            metric.update(metadata)
+            metric_rows.append(metric)
+        for bin_row in bins:
+            bin_row.update(metadata)
+            reliability_rows.append(bin_row)
+    return metric_rows, reliability_rows
 
 
 def _calibration_analysis(
-    rows: Sequence[Mapping[str, Any]],
-    draw_plan: Sequence[Mapping[str, Any]],
+    specs: Sequence[Mapping[str, Any]],
+    draw_plan: QuestionDrawPlan,
     *,
     analysis_label: str,
     predictors: Sequence[str],
     target: str,
-    metadata: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     metric_rows, reliability_rows = _calibration_point_tables(
-        rows,
-        analysis_label=analysis_label,
-        predictors=predictors,
-        target=target,
-        metadata=metadata,
+        specs, analysis_label=analysis_label
     )
-    bootstrap_rows = _bootstrap_calibration_rows(
-        rows,
+    estimates = _stream_metric_estimates(
+        specs,
         draw_plan,
         analysis_label=analysis_label,
-        predictors=predictors,
-        target=target,
-        metadata=metadata,
+        metric_builder=_calibration_metric_row,
     )
-    _attach_intervals(metric_rows, bootstrap_rows, len(_replicate_ids(draw_plan)))
+    _attach_intervals(metric_rows, estimates, draw_plan.replicates)
     return {
         "analysis_label": analysis_label,
         "target": target,
         "predictors": list(predictors),
         "metric_rows": metric_rows,
         "reliability_rows": reliability_rows,
-        "bootstrap_rows": bootstrap_rows,
+        "bootstrap": _bootstrap_metadata(draw_plan),
     }
 
 
-def _calibration_point_tables(
-    rows: Sequence[Mapping[str, Any]],
-    *,
-    analysis_label: str,
-    predictors: Sequence[str],
-    target: str,
-    metadata: Mapping[str, Mapping[str, Any]] | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    metric_rows: list[dict[str, Any]] = []
-    reliability_rows: list[dict[str, Any]] = []
-    for predictor in predictors:
-        extra = {} if metadata is None else dict(metadata[predictor])
-        pooled, pooled_bins = _calibration_metric_row(
-            rows,
-            analysis_label=analysis_label,
-            predictor=predictor,
-            target=target,
-            grouping="pooled",
-            subject=None,
-        )
-        subject_metrics: list[dict[str, Any]] = []
-        subject_bins: list[dict[str, Any]] = []
-        for subject in FIXED_SUBJECTS:
-            metric, bins = _calibration_metric_row(
-                [row for row in rows if row.get("subject") == subject],
-                analysis_label=analysis_label,
-                predictor=predictor,
-                target=target,
-                grouping="subject",
-                subject=subject,
-            )
-            subject_metrics.append(metric)
-            subject_bins.extend(bins)
-        macro = _macro_row(
-            subject_metrics,
-            analysis_label=analysis_label,
-            predictor=predictor,
-            target=target,
-        )
-        for metric in (pooled, *subject_metrics, macro):
-            metric.update(extra)
-            metric_rows.append(metric)
-        for bin_row in (*pooled_bins, *subject_bins):
-            bin_row.update(extra)
-            reliability_rows.append(bin_row)
-    return metric_rows, reliability_rows
-
-
 def natural_calibration_analysis(
-    rows: Sequence[Mapping[str, Any]],
-    draw_plan: Sequence[Mapping[str, Any]],
+    rows: Sequence[Mapping[str, Any]], draw_plan: QuestionDrawPlan
 ) -> dict[str, Any]:
-    """Calibrate natural verbalized confidence only against natural correctness."""
+    """Calibrate natural confidence only against natural correctness."""
 
+    _validate_source_rows(rows, draw_plan)
+    predictor = "natural_verbalized_confidence"
     return _calibration_analysis(
-        rows,
+        [_metric_spec(rows, predictor=predictor, target=PRIMARY_TARGET)],
         draw_plan,
         analysis_label="natural_calibration",
-        predictors=("natural_verbalized_confidence",),
+        predictors=(predictor,),
         target=PRIMARY_TARGET,
     )
 
@@ -628,280 +696,119 @@ def _flatten_checkpoint_rows(
             slot = slots[index]
             if not isinstance(slot, Mapping):
                 raise ValueError("checkpoint calibration slots must be mappings")
-            if slot.get("requested_checkpoint_index") != index or not _finite_real(
-                slot.get("requested_fraction")
-            ) or float(slot["requested_fraction"]) != expected_fraction:
+            if (
+                type(slot.get("requested_checkpoint_index")) is not int
+                or slot["requested_checkpoint_index"] != index
+                or type(slot.get("requested_fraction")) is not float
+                or slot["requested_fraction"] != expected_fraction
+            ):
                 raise ValueError("checkpoint calibration slots must use canonical fractions")
-            output = {
-                "study_id": row.get("study_id"),
-                "model_run_id": row.get("model_run_id"),
-                "subject": row.get("subject"),
-                "question_id": row.get("question_id"),
-                "run_id": row.get("run_id"),
-                "requested_checkpoint_index": index,
-                "requested_fraction": expected_fraction,
-                "checkpoint_local_correct": slot.get("checkpoint_local_correct"),
-                "checkpoint_normalized_confidence": slot.get("normalized_confidence"),
-                "checkpoint_maximum_ad_probability": slot.get(
-                    "maximum_ad_probability"
-                ),
-            }
-            for bootstrap_field in ("replicate_id", "draw_index", "draw_id"):
-                if bootstrap_field in row:
-                    output[bootstrap_field] = row[bootstrap_field]
-            flat.append(output)
+            flat.append(
+                {
+                    "study_id": row.get("study_id"),
+                    "model_run_id": row.get("model_run_id"),
+                    "subject": row.get("subject"),
+                    "question_id": row.get("question_id"),
+                    "run_id": row.get("run_id"),
+                    "requested_checkpoint_index": index,
+                    "requested_fraction": expected_fraction,
+                    "checkpoint_local_correct": slot.get("checkpoint_local_correct"),
+                    "checkpoint_normalized_confidence": slot.get(
+                        "normalized_confidence"
+                    ),
+                    "checkpoint_maximum_ad_probability": slot.get(
+                        "maximum_ad_probability"
+                    ),
+                }
+            )
     return flat
 
 
-def _checkpoint_metadata(
-    predictors: Sequence[str], fraction: float
-) -> dict[str, dict[str, Any]]:
-    return {
-        predictor: {
-            "requested_fraction": fraction,
-            "is_main_checkpoint": fraction in MAIN_CHECKPOINT_FRACTIONS,
-        }
-        for predictor in predictors
-    }
+def _checkpoint_specs(
+    flat_rows: Sequence[Mapping[str, Any]], predictors: Sequence[str]
+) -> list[dict[str, Any]]:
+    specs: list[dict[str, Any]] = []
+    for fraction in FIXED_CHECKPOINT_FRACTIONS:
+        fraction_rows = [
+            row for row in flat_rows if row["requested_fraction"] == fraction
+        ]
+        rows_by_subject = _index_rows_by_subject(fraction_rows)
+        for predictor in predictors:
+            specs.append(
+                _metric_spec(
+                    fraction_rows,
+                    predictor=predictor,
+                    target="checkpoint_local_correct",
+                    metadata={
+                        "requested_fraction": fraction,
+                        "is_main_checkpoint": fraction in MAIN_CHECKPOINT_FRACTIONS,
+                    },
+                    rows_by_subject=rows_by_subject,
+                )
+            )
+    return specs
 
 
 def checkpoint_calibration_analysis(
     rows: Sequence[Mapping[str, Any]],
-    draw_plan: Sequence[Mapping[str, Any]],
+    draw_plan: QuestionDrawPlan,
     *,
     predictors: Sequence[str] = CHECKPOINT_PREDICTORS,
 ) -> dict[str, Any]:
-    """Compute both fixed checkpoint-local calibration families by fraction."""
+    """Both fixed checkpoint-local calibration families by logical fraction."""
 
     if tuple(predictors) != CHECKPOINT_PREDICTORS:
         raise ValueError("checkpoint calibration predictors are fixed and exclude entropy")
+    _validate_source_rows(rows, draw_plan)
     flat = _flatten_checkpoint_rows(rows)
-    expanded = expand_question_draws(draw_plan, rows)
-    expanded_flat = _flatten_checkpoint_rows(expanded)
-    combined_metrics: list[dict[str, Any]] = []
-    combined_reliability: list[dict[str, Any]] = []
-    combined_bootstrap: list[dict[str, Any]] = []
-    for fraction in FIXED_CHECKPOINT_FRACTIONS:
-        fraction_rows = [row for row in flat if row["requested_fraction"] == fraction]
-        fraction_expanded = [
-            row for row in expanded_flat if row["requested_fraction"] == fraction
-        ]
-        metadata = _checkpoint_metadata(predictors, fraction)
-        point_metrics, point_reliability = _calibration_point_tables(
-            fraction_rows,
-            analysis_label="checkpoint_calibration",
-            predictors=predictors,
-            target="checkpoint_local_correct",
-            metadata=metadata,
-        )
-        bootstrap = _bootstrap_calibration_from_expanded(
-            fraction_expanded,
-            draw_plan,
-            analysis_label="checkpoint_calibration",
-            predictors=predictors,
-            target="checkpoint_local_correct",
-            metadata=metadata,
-        )
-        _attach_intervals(
-            point_metrics, bootstrap, len(_replicate_ids(draw_plan))
-        )
-        combined_metrics.extend(point_metrics)
-        combined_reliability.extend(point_reliability)
-        combined_bootstrap.extend(bootstrap)
-    return {
-        "analysis_label": "checkpoint_calibration",
-        "target": "checkpoint_local_correct",
-        "predictors": list(predictors),
-        "metric_rows": combined_metrics,
-        "reliability_rows": combined_reliability,
-        "bootstrap_rows": combined_bootstrap,
-    }
-
-
-def _bootstrap_calibration_from_expanded(
-    expanded_rows: Sequence[Mapping[str, Any]],
-    draw_plan: Sequence[Mapping[str, Any]],
-    *,
-    analysis_label: str,
-    predictors: Sequence[str],
-    target: str,
-    metadata: Mapping[str, Mapping[str, Any]],
-) -> list[dict[str, Any]]:
-    output: list[dict[str, Any]] = []
-    for predictor in predictors:
-        for replicate_id in _replicate_ids(draw_plan):
-            replicate_rows = [
-                row for row in expanded_rows if row.get("replicate_id") == replicate_id
-            ]
-            pooled, _ = _calibration_metric_row(
-                replicate_rows,
-                analysis_label=analysis_label,
-                predictor=predictor,
-                target=target,
-                grouping="pooled",
-                subject=None,
-            )
-            subjects = [
-                _calibration_metric_row(
-                    [row for row in replicate_rows if row.get("subject") == subject],
-                    analysis_label=analysis_label,
-                    predictor=predictor,
-                    target=target,
-                    grouping="subject",
-                    subject=subject,
-                )[0]
-                for subject in FIXED_SUBJECTS
-            ]
-            macro = _macro_row(
-                subjects,
-                analysis_label=analysis_label,
-                predictor=predictor,
-                target=target,
-            )
-            for metric in (pooled, *subjects, macro):
-                output.append(
-                    {
-                        "analysis_label": analysis_label,
-                        "feature": predictor,
-                        "predictor": predictor,
-                        "target": target,
-                        "replicate_id": replicate_id,
-                        "grouping": metric["grouping"],
-                        "subject": metric["subject"],
-                        "sample_size": metric["sample_size"],
-                        "point_estimate": metric["point_estimate"],
-                        "invalid_reason": metric["point_undefined_reason"],
-                        **metadata[predictor],
-                    }
-                )
-    return output
+    return _calibration_analysis(
+        _checkpoint_specs(flat, predictors),
+        draw_plan,
+        analysis_label="checkpoint_calibration",
+        predictors=predictors,
+        target="checkpoint_local_correct",
+    )
 
 
 def secondary_checkpoint_auroc_analysis(
     rows: Sequence[Mapping[str, Any]],
-    draw_plan: Sequence[Mapping[str, Any]],
+    draw_plan: QuestionDrawPlan,
     *,
     predictors: Sequence[str] = CHECKPOINT_PREDICTORS,
 ) -> dict[str, Any]:
-    """Compute separately labelled checkpoint-local AUROC by requested fraction."""
+    """Separately labelled checkpoint-local AUROC by logical fraction."""
 
     if tuple(predictors) != CHECKPOINT_PREDICTORS:
         raise ValueError("secondary checkpoint AUROC predictors are fixed")
-    flat = _flatten_checkpoint_rows(rows)
-    expanded_flat = _flatten_checkpoint_rows(expand_question_draws(draw_plan, rows))
+    _validate_source_rows(rows, draw_plan)
+    specs = _checkpoint_specs(_flatten_checkpoint_rows(rows), predictors)
     metric_rows: list[dict[str, Any]] = []
-    bootstrap_rows: list[dict[str, Any]] = []
-    for fraction in FIXED_CHECKPOINT_FRACTIONS:
-        metadata = _checkpoint_metadata(predictors, fraction)
-        fraction_rows = [row for row in flat if row["requested_fraction"] == fraction]
-        fraction_expanded = [
-            row for row in expanded_flat if row["requested_fraction"] == fraction
-        ]
-        for predictor in predictors:
-            pooled = _auroc_metric_row(
-                fraction_rows,
-                analysis_label="secondary_checkpoint_local_auroc",
-                predictor=predictor,
-                target="checkpoint_local_correct",
-                grouping="pooled",
-                subject=None,
-            )
-            subjects = [
-                _auroc_metric_row(
-                    [row for row in fraction_rows if row.get("subject") == subject],
-                    analysis_label="secondary_checkpoint_local_auroc",
-                    predictor=predictor,
-                    target="checkpoint_local_correct",
-                    grouping="subject",
-                    subject=subject,
-                )
-                for subject in FIXED_SUBJECTS
-            ]
-            macro = _macro_row(
-                subjects,
-                analysis_label="secondary_checkpoint_local_auroc",
-                predictor=predictor,
-                target="checkpoint_local_correct",
-            )
-            for metric in (pooled, *subjects, macro):
-                metric.update(metadata[predictor])
-                metric_rows.append(metric)
-        fraction_bootstrap = _bootstrap_auroc_from_expanded(
-            fraction_expanded,
-            draw_plan,
-            predictors=predictors,
-            metadata=metadata,
+    for spec in specs:
+        metrics, _ = _group_metric_rows(
+            spec["rows"],
+            analysis_label="secondary_checkpoint_local_auroc",
+            predictor=str(spec["predictor"]),
+            target="checkpoint_local_correct",
+            metric_builder=_auroc_metric_row,
+            rows_by_subject=spec["rows_by_subject"],
         )
-        bootstrap_rows.extend(fraction_bootstrap)
-    _attach_intervals(metric_rows, bootstrap_rows, len(_replicate_ids(draw_plan)))
+        for metric in metrics:
+            metric.update(spec["metadata"])
+            metric_rows.append(metric)
+    estimates = _stream_metric_estimates(
+        specs,
+        draw_plan,
+        analysis_label="secondary_checkpoint_local_auroc",
+        metric_builder=_auroc_metric_row,
+    )
+    _attach_intervals(metric_rows, estimates, draw_plan.replicates)
     return {
         "analysis_label": "secondary_checkpoint_local_auroc",
         "target": "checkpoint_local_correct",
         "predictors": list(predictors),
         "metric_rows": metric_rows,
-        "bootstrap_rows": bootstrap_rows,
+        "bootstrap": _bootstrap_metadata(draw_plan),
     }
-
-
-def _bootstrap_auroc_from_expanded(
-    expanded_rows: Sequence[Mapping[str, Any]],
-    draw_plan: Sequence[Mapping[str, Any]],
-    *,
-    predictors: Sequence[str],
-    metadata: Mapping[str, Mapping[str, Any]],
-) -> list[dict[str, Any]]:
-    output: list[dict[str, Any]] = []
-    label = "secondary_checkpoint_local_auroc"
-    target = "checkpoint_local_correct"
-    for predictor in predictors:
-        for replicate_id in _replicate_ids(draw_plan):
-            replicate_rows = [
-                row for row in expanded_rows if row.get("replicate_id") == replicate_id
-            ]
-            pooled = _auroc_metric_row(
-                replicate_rows,
-                analysis_label=label,
-                predictor=predictor,
-                target=target,
-                grouping="pooled",
-                subject=None,
-            )
-            subjects = [
-                _auroc_metric_row(
-                    [row for row in replicate_rows if row.get("subject") == subject],
-                    analysis_label=label,
-                    predictor=predictor,
-                    target=target,
-                    grouping="subject",
-                    subject=subject,
-                )
-                for subject in FIXED_SUBJECTS
-            ]
-            macro = _macro_row(
-                subjects,
-                analysis_label=label,
-                predictor=predictor,
-                target=target,
-            )
-            for metric in (pooled, *subjects, macro):
-                output.append(
-                    {
-                        "analysis_label": label,
-                        "feature": predictor,
-                        "predictor": predictor,
-                        "target": target,
-                        "replicate_id": replicate_id,
-                        "grouping": metric["grouping"],
-                        "subject": metric["subject"],
-                        "sample_size": metric["sample_size"],
-                        "positive_count": metric["positive_count"],
-                        "negative_count": metric["negative_count"],
-                        "point_estimate": metric["point_estimate"],
-                        "invalid_reason": metric["point_undefined_reason"],
-                        **metadata[predictor],
-                    }
-                )
-    return output
 
 
 def _question_order_key(pair: tuple[str, str]) -> tuple[int, str, str]:
@@ -915,24 +822,17 @@ def _question_order_key(pair: tuple[str, str]) -> tuple[int, str, str]:
 
 def within_question_analysis(
     rows: Sequence[Mapping[str, Any]],
-    draw_plan: Sequence[Mapping[str, Any]],
+    draw_plan: QuestionDrawPlan,
     *,
     feature_registry: Sequence[str] = PRIMARY_FEATURE_REGISTRY,
 ) -> dict[str, Any]:
-    """Compute equal-question paired differences and their shared-plan bootstrap."""
+    """Equal-question paired differences with compact multiplicity bootstrap."""
 
     if tuple(feature_registry) != PRIMARY_FEATURE_REGISTRY:
         raise ValueError("within-question feature registry mismatch")
+    _validate_source_rows(rows, draw_plan)
     grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
-    question_subject: dict[str, str] = {}
     for row in rows:
-        subject = row.get("subject")
-        question_id = row.get("question_id")
-        if not isinstance(subject, str) or not subject or not isinstance(question_id, str) or not question_id:
-            raise ValueError("within-question rows require subject and question_id")
-        previous_subject = question_subject.setdefault(question_id, subject)
-        if previous_subject != subject:
-            raise ValueError("within-question rows violate subject/question consistency")
         target = row.get(PRIMARY_TARGET)
         if target is not None and type(target) is not bool:
             raise ValueError("natural_correct must be an actual boolean or None")
@@ -940,7 +840,7 @@ def within_question_analysis(
             value = row.get(feature)
             if value is not None and not _finite_real(value):
                 raise ValueError(f"{feature} must be a finite real number or None")
-        grouped[(subject, question_id)].append(row)
+        grouped[(str(row["subject"]), str(row["question_id"]))].append(row)
 
     distribution_rows: list[dict[str, Any]] = []
     for feature in PRIMARY_FEATURE_REGISTRY:
@@ -985,39 +885,29 @@ def within_question_analysis(
                 }
             )
 
-    expanded_differences = expand_question_draws(draw_plan, distribution_rows)
-    replicate_ids = _replicate_ids(draw_plan)
-    bootstrap_rows: list[dict[str, Any]] = []
+    estimates: dict[str, list[float | None]] = {
+        feature: [] for feature in PRIMARY_FEATURE_REGISTRY
+    }
+    by_feature = {
+        feature: [row for row in distribution_rows if row["feature"] == feature]
+        for feature in PRIMARY_FEATURE_REGISTRY
+    }
+    for replicate_id in range(draw_plan.replicates):
+        question_weights = draw_plan.question_multiplicities(replicate_id)
+        for feature, feature_rows in by_feature.items():
+            weighted_sum = 0.0
+            weight_total = 0
+            for row in feature_rows:
+                weight = question_weights[(row["subject"], row["question_id"])]
+                weighted_sum += row["paired_difference"] * weight
+                weight_total += weight
+            estimates[feature].append(
+                None if weight_total == 0 else float(weighted_sum / weight_total)
+            )
+
     summary_rows: list[dict[str, Any]] = []
     for feature in PRIMARY_FEATURE_REGISTRY:
-        feature_distribution = [
-            row for row in distribution_rows if row["feature"] == feature
-        ]
-        differences = [row["paired_difference"] for row in feature_distribution]
-        for replicate_id in replicate_ids:
-            drawn = [
-                row["paired_difference"]
-                for row in expanded_differences
-                if row["feature"] == feature
-                and row["replicate_id"] == replicate_id
-            ]
-            estimate = None if not drawn else float(sum(drawn) / len(drawn))
-            bootstrap_rows.append(
-                {
-                    "analysis_label": "within_question_paired_difference",
-                    "feature": feature,
-                    "target": PRIMARY_TARGET,
-                    "replicate_id": replicate_id,
-                    "drawn_qualifying_question_count": len(drawn),
-                    "point_estimate": estimate,
-                    "invalid_reason": (
-                        None if estimate is not None else "no_qualifying_drawn_questions"
-                    ),
-                }
-            )
-        feature_bootstrap = [
-            row["point_estimate"] for row in bootstrap_rows if row["feature"] == feature
-        ]
+        differences = [row["paired_difference"] for row in by_feature[feature]]
         summary = {
             "analysis_label": "within_question_paired_difference",
             "feature": feature,
@@ -1033,7 +923,7 @@ def within_question_analysis(
         }
         summary.update(
             percentile_interval(
-                feature_bootstrap, requested_replicates=len(replicate_ids)
+                estimates[feature], requested_replicates=draw_plan.replicates
             )
         )
         summary_rows.append(summary)
@@ -1042,14 +932,15 @@ def within_question_analysis(
         "target": PRIMARY_TARGET,
         "feature_registry": list(PRIMARY_FEATURE_REGISTRY),
         "distribution_rows": distribution_rows,
-        "bootstrap_draw_rows": expanded_differences,
         "summary_rows": summary_rows,
-        "bootstrap_rows": bootstrap_rows,
+        "bootstrap": _bootstrap_metadata(draw_plan),
     }
 
 
 __all__ = [
+    "weighted_rank_auroc",
     "rank_auroc",
+    "weighted_reliability_ece",
     "reliability_ece",
     "primary_auroc_analysis",
     "natural_calibration_analysis",
