@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 import math
 from numbers import Integral, Real
 from statistics import median
 from typing import Any, Callable, Mapping, Sequence
+
+import numpy as np
 
 from part1_bootstrap import QuestionDrawPlan, percentile_interval
 from part1_contract import (
@@ -27,6 +30,13 @@ COHORT_DEFINITION = "boolean_target_and_finite_predictor"
 
 _MetricKey = tuple[str, str, str | None, float | None]
 _QuestionWeights = Mapping[tuple[str, str], int]
+
+_STRUCTURAL_HOOK: Callable[[Sequence[str]], None] | None = None
+
+
+def _emit_structural(event: str) -> None:
+    if _STRUCTURAL_HOOK is not None:
+        _STRUCTURAL_HOOK([event])
 
 
 def _finite_real(value: Any) -> bool:
@@ -184,24 +194,56 @@ def reliability_ece(
     return weighted_reliability_ece(targets, confidences, [1] * len(targets))
 
 
-def _canonical_plan_pairs(draw_plan: QuestionDrawPlan) -> set[tuple[str, str]]:
+def _validate_analysis_plan(
+    draw_plan: QuestionDrawPlan, *, allow_small_fixture: bool
+) -> None:
     if not isinstance(draw_plan, QuestionDrawPlan):
         raise ValueError("draw_plan must be a compact QuestionDrawPlan")
-    return {
-        (subject, question_id)
-        for subject, group in zip(
-            draw_plan.subjects, draw_plan.question_ids_by_subject, strict=True
-        )
-        for question_id in group
-    }
+    if type(allow_small_fixture) is not bool:
+        raise ValueError("allow_small_fixture must be boolean")
+    if draw_plan.small_fixture and not allow_small_fixture:
+        raise ValueError("small-fixture draw plan requires explicit analysis opt-in")
 
 
-def _validate_source_rows(
-    rows: Sequence[Mapping[str, Any]], draw_plan: QuestionDrawPlan
-) -> None:
-    canonical_pairs = _canonical_plan_pairs(draw_plan)
+@dataclass(frozen=True, slots=True)
+class _SourceIndex:
+    rows: tuple[Mapping[str, Any], ...]
+    question_indices: np.ndarray[Any, Any]
+    subject_indices: np.ndarray[Any, Any]
+    question_lookup: Mapping[tuple[str, str], int]
+    rows_by_subject: Mapping[str, tuple[Mapping[str, Any], ...]]
+
+
+def _compile_source_index(
+    rows: Sequence[Mapping[str, Any]],
+    draw_plan: QuestionDrawPlan,
+    *,
+    allow_small_fixture: bool,
+) -> _SourceIndex:
+    _validate_analysis_plan(
+        draw_plan, allow_small_fixture=allow_small_fixture
+    )
+    question_lookup: dict[tuple[str, str], int] = {}
     question_subject: dict[str, str] = {}
-    for row in rows:
+    subject_lookup = {subject: index for index, subject in enumerate(FIXED_SUBJECTS)}
+    offset = 0
+    for subject, group in zip(
+        draw_plan.subjects, draw_plan.question_ids_by_subject, strict=True
+    ):
+        for question_id in group:
+            question_lookup[(subject, question_id)] = offset
+            question_subject[question_id] = subject
+            offset += 1
+
+    immutable_rows = tuple(rows)
+    question_indices = np.empty(len(immutable_rows), dtype=np.int32)
+    subject_indices = np.empty(len(immutable_rows), dtype=np.int8)
+    by_subject: dict[str, list[Mapping[str, Any]]] = {
+        subject: [] for subject in FIXED_SUBJECTS
+    }
+    observed_question_subject: dict[str, str] = {}
+    for row_index, row in enumerate(immutable_rows):
+        _emit_structural("source_row_indexed")
         if not isinstance(row, Mapping):
             raise ValueError("analysis rows must be mappings")
         subject = row.get("subject")
@@ -211,11 +253,27 @@ def _validate_source_rows(
         if not isinstance(question_id, str) or not question_id:
             raise ValueError("analysis rows require a nonempty question_id")
         pair = (subject, question_id)
-        if pair not in canonical_pairs:
+        if pair not in question_lookup:
             raise ValueError("analysis row question is absent from the compact draw plan")
-        previous = question_subject.setdefault(question_id, subject)
-        if previous != subject:
+        previous = observed_question_subject.setdefault(question_id, subject)
+        if previous != subject or question_subject[question_id] != subject:
             raise ValueError("analysis rows violate subject/question consistency")
+        question_indices[row_index] = question_lookup[pair]
+        subject_index = subject_lookup.get(subject)
+        if subject_index is None:
+            subject_indices[row_index] = -1
+        else:
+            subject_indices[row_index] = subject_index
+            by_subject[subject].append(row)
+    question_indices.setflags(write=False)
+    subject_indices.setflags(write=False)
+    return _SourceIndex(
+        rows=immutable_rows,
+        question_indices=question_indices,
+        subject_indices=subject_indices,
+        question_lookup=question_lookup,
+        rows_by_subject={key: tuple(value) for key, value in by_subject.items()},
+    )
 
 
 def _cohort(
@@ -224,6 +282,7 @@ def _cohort(
     target: str,
     question_weights: _QuestionWeights | None = None,
 ) -> dict[str, Any]:
+    _emit_structural("point_cohort_scan")
     targets: list[bool] = []
     predictors: list[Real] = []
     weights: list[int] = []
@@ -433,6 +492,7 @@ def _group_metric_rows(
     include_bins: bool = True,
     rows_by_subject: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    _emit_structural("point_group_compile")
     def build(
         group_rows: Sequence[Mapping[str, Any]], grouping: str, subject: str | None
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -490,6 +550,7 @@ def _metric_spec(
     target: str,
     metadata: Mapping[str, Any] | None = None,
     rows_by_subject: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    source_positions: Sequence[int] | None = None,
 ) -> dict[str, Any]:
     return {
         "rows": rows,
@@ -499,7 +560,217 @@ def _metric_spec(
         "predictor": predictor,
         "target": target,
         "metadata": {} if metadata is None else dict(metadata),
+        "source_positions": source_positions,
     }
+
+
+@dataclass(frozen=True, slots=True)
+class _CompiledAurocGroup:
+    all_question_indices: np.ndarray[Any, Any]
+    target_missing_question_indices: np.ndarray[Any, Any]
+    predictor_missing_question_indices: np.ndarray[Any, Any]
+    eligible_question_indices: np.ndarray[Any, Any]
+    sorted_targets: np.ndarray[Any, Any]
+    tie_boundaries: tuple[tuple[int, int], ...]
+
+    def evaluate(self, question_weights: np.ndarray[Any, Any]) -> float | None:
+        if len(self.eligible_question_indices) == 0:
+            return None
+        weights = question_weights[self.eligible_question_indices]
+        positive_total = int(weights[self.sorted_targets].sum())
+        negative_total = int(weights[~self.sorted_targets].sum())
+        if positive_total == 0 or negative_total == 0:
+            return None
+        twice_concordant = 0
+        negative_below = 0
+        for start, end in self.tie_boundaries:
+            group_weights = weights[start:end]
+            group_targets = self.sorted_targets[start:end]
+            positive_weight = int(group_weights[group_targets].sum())
+            negative_weight = int(group_weights[~group_targets].sum())
+            twice_concordant += 2 * positive_weight * negative_below
+            twice_concordant += positive_weight * negative_weight
+            negative_below += negative_weight
+        return float(twice_concordant / (2 * positive_total * negative_total))
+
+
+@dataclass(frozen=True, slots=True)
+class _CompiledCalibrationGroup:
+    all_question_indices: np.ndarray[Any, Any]
+    target_missing_question_indices: np.ndarray[Any, Any]
+    predictor_missing_question_indices: np.ndarray[Any, Any]
+    eligible_question_indices: np.ndarray[Any, Any]
+    targets: np.ndarray[Any, Any]
+    confidences: np.ndarray[Any, Any]
+    bin_indices: np.ndarray[Any, Any]
+
+    def evaluate(self, question_weights: np.ndarray[Any, Any]) -> float | None:
+        if len(self.eligible_question_indices) == 0:
+            return None
+        weights = question_weights[self.eligible_question_indices]
+        sample_size = int(weights.sum())
+        if sample_size == 0:
+            return None
+        counts = np.zeros(10, dtype=np.int64)
+        target_sums = np.zeros(10, dtype=np.int64)
+        np.add.at(counts, self.bin_indices, weights)
+        np.add.at(target_sums, self.bin_indices, weights * self.targets)
+        confidence_sums = np.bincount(
+            self.bin_indices,
+            weights=weights * self.confidences,
+            minlength=10,
+        )
+        occupied = counts > 0
+        gaps = np.zeros(10, dtype=float)
+        gaps[occupied] = np.abs(
+            confidence_sums[occupied] / counts[occupied]
+            - target_sums[occupied] / counts[occupied]
+        )
+        return float(np.sum(gaps * counts) / sample_size)
+
+
+@dataclass(frozen=True, slots=True)
+class _CompiledMetricSpec:
+    predictor: str
+    target: str
+    metadata: Mapping[str, Any]
+    groups: tuple[_CompiledAurocGroup | _CompiledCalibrationGroup, ...]
+
+
+@dataclass(slots=True)
+class _GroupAccumulator:
+    all_question_indices: list[int]
+    target_missing_question_indices: list[int]
+    predictor_missing_question_indices: list[int]
+    eligible_question_indices: list[int]
+    targets: list[bool]
+    predictors: list[Real]
+
+
+def _new_accumulator() -> _GroupAccumulator:
+    return _GroupAccumulator([], [], [], [], [], [])
+
+
+def _compile_auroc_group(accumulator: _GroupAccumulator) -> _CompiledAurocGroup:
+    _emit_structural("auroc_order_compiled")
+    active = list(range(len(accumulator.predictors)))
+    try:
+        order = sorted(active, key=lambda index: accumulator.predictors[index])
+    except (TypeError, ValueError) as error:
+        raise ValueError("AUROC scores must be mutually comparable") from error
+    boundaries: list[tuple[int, int]] = []
+    start = 0
+    while start < len(order):
+        end = start + 1
+        group_score = accumulator.predictors[order[start]]
+        try:
+            while end < len(order) and bool(
+                accumulator.predictors[order[end]] == group_score
+            ):
+                end += 1
+        except (TypeError, ValueError) as error:
+            raise ValueError("AUROC scores must support exact tie equality") from error
+        boundaries.append((start, end))
+        start = end
+    question_indices = np.asarray(
+        [accumulator.eligible_question_indices[index] for index in order],
+        dtype=np.int32,
+    )
+    targets = np.asarray(
+        [accumulator.targets[index] for index in order], dtype=bool
+    )
+    question_indices.setflags(write=False)
+    targets.setflags(write=False)
+    return _CompiledAurocGroup(
+        all_question_indices=np.asarray(accumulator.all_question_indices, dtype=np.int32),
+        target_missing_question_indices=np.asarray(
+            accumulator.target_missing_question_indices, dtype=np.int32
+        ),
+        predictor_missing_question_indices=np.asarray(
+            accumulator.predictor_missing_question_indices, dtype=np.int32
+        ),
+        eligible_question_indices=question_indices,
+        sorted_targets=targets,
+        tie_boundaries=tuple(boundaries),
+    )
+
+
+def _compile_calibration_group(
+    accumulator: _GroupAccumulator,
+) -> _CompiledCalibrationGroup:
+    _emit_structural("calibration_bins_compiled")
+    confidences = np.asarray(accumulator.predictors, dtype=float)
+    bins = np.minimum(9, (confidences * 10.0).astype(np.int8))
+    question_indices = np.asarray(
+        accumulator.eligible_question_indices, dtype=np.int32
+    )
+    targets = np.asarray(accumulator.targets, dtype=np.int64)
+    for array in (confidences, bins, question_indices, targets):
+        array.setflags(write=False)
+    return _CompiledCalibrationGroup(
+        all_question_indices=np.asarray(accumulator.all_question_indices, dtype=np.int32),
+        target_missing_question_indices=np.asarray(
+            accumulator.target_missing_question_indices, dtype=np.int32
+        ),
+        predictor_missing_question_indices=np.asarray(
+            accumulator.predictor_missing_question_indices, dtype=np.int32
+        ),
+        eligible_question_indices=question_indices,
+        targets=targets,
+        confidences=confidences,
+        bin_indices=bins,
+    )
+
+
+def _compile_metric_spec(
+    source: _SourceIndex,
+    spec: Mapping[str, Any],
+    *,
+    metric_kind: str,
+) -> _CompiledMetricSpec:
+    predictor = str(spec["predictor"])
+    target = str(spec["target"])
+    positions = spec.get("source_positions")
+    if positions is None:
+        positions = range(len(source.rows))
+    accumulators = [_new_accumulator() for _ in range(6)]
+    for position in positions:
+        _emit_structural("spec_source_row_compiled")
+        row = source.rows[position]
+        question_index = int(source.question_indices[position])
+        subject_index = int(source.subject_indices[position])
+        group_indices = [0]
+        if 0 <= subject_index < len(FIXED_SUBJECTS):
+            group_indices.append(subject_index + 1)
+        target_value = row.get(target)
+        predictor_value = row.get(predictor)
+        if target_value is not None and type(target_value) is not bool:
+            raise ValueError(f"{target} must be an actual boolean or None")
+        if predictor_value is not None and not _finite_real(predictor_value):
+            raise ValueError(f"{predictor} must be a finite real number or None")
+        for group_index in group_indices:
+            accumulator = accumulators[group_index]
+            accumulator.all_question_indices.append(question_index)
+            if target_value is None:
+                accumulator.target_missing_question_indices.append(question_index)
+            elif predictor_value is None:
+                accumulator.predictor_missing_question_indices.append(question_index)
+            else:
+                accumulator.eligible_question_indices.append(question_index)
+                accumulator.targets.append(target_value)
+                accumulator.predictors.append(predictor_value)
+    if metric_kind == "auroc":
+        groups = tuple(_compile_auroc_group(value) for value in accumulators)
+    elif metric_kind == "calibration":
+        groups = tuple(_compile_calibration_group(value) for value in accumulators)
+    else:
+        raise ValueError("unsupported compiled metric kind")
+    return _CompiledMetricSpec(
+        predictor=predictor,
+        target=target,
+        metadata=dict(spec.get("metadata", {})),
+        groups=groups,
+    )
 
 
 def _metric_key(metric: Mapping[str, Any]) -> _MetricKey:
@@ -512,30 +783,30 @@ def _metric_key(metric: Mapping[str, Any]) -> _MetricKey:
 
 
 def _stream_metric_estimates(
-    specs: Sequence[Mapping[str, Any]],
+    specs: Sequence[_CompiledMetricSpec],
     draw_plan: QuestionDrawPlan,
-    *,
-    analysis_label: str,
-    metric_builder: Callable[..., Any],
 ) -> dict[_MetricKey, list[float | None]]:
     estimates: dict[_MetricKey, list[float | None]] = defaultdict(list)
     for replicate_id in range(draw_plan.replicates):
-        question_weights = draw_plan.question_multiplicities(replicate_id)
+        question_weights = draw_plan.question_multiplicity_vector(replicate_id)
         for spec in specs:
-            metrics, _ = _group_metric_rows(
-                spec["rows"],
-                analysis_label=analysis_label,
-                predictor=str(spec["predictor"]),
-                target=str(spec["target"]),
-                metric_builder=metric_builder,
-                question_weights=question_weights,
-                include_bins=False,
-                rows_by_subject=spec["rows_by_subject"],
+            values = [group.evaluate(question_weights) for group in spec.groups]
+            macro = (
+                float(sum(values[1:]) / len(FIXED_SUBJECTS))
+                if all(value is not None for value in values[1:])
+                else None
             )
-            metadata = spec.get("metadata", {})
-            for metric in metrics:
-                metric.update(metadata)
-                estimates[_metric_key(metric)].append(metric["point_estimate"])
+            grouping_values = [
+                ("pooled", None, values[0]),
+                *[
+                    ("subject", subject, values[index + 1])
+                    for index, subject in enumerate(FIXED_SUBJECTS)
+                ],
+                ("macro", None, macro),
+            ]
+            fraction = spec.metadata.get("requested_fraction")
+            for grouping, subject, value in grouping_values:
+                estimates[(spec.predictor, grouping, subject, fraction)].append(value)
     return dict(estimates)
 
 
@@ -571,6 +842,7 @@ def primary_auroc_analysis(
     *,
     target: str = PRIMARY_TARGET,
     feature_registry: Sequence[str] = PRIMARY_FEATURE_REGISTRY,
+    allow_small_fixture: bool = False,
 ) -> dict[str, Any]:
     """Fixed eleven-feature primary AUROC with compact weighted bootstrap."""
 
@@ -578,33 +850,34 @@ def primary_auroc_analysis(
         raise ValueError("primary AUROC target must be natural_correct")
     if tuple(feature_registry) != PRIMARY_FEATURE_REGISTRY:
         raise ValueError("primary AUROC feature registry mismatch")
-    _validate_source_rows(rows, draw_plan)
+    source = _compile_source_index(
+        rows, draw_plan, allow_small_fixture=allow_small_fixture
+    )
     metric_rows: list[dict[str, Any]] = []
     specs: list[dict[str, Any]] = []
-    rows_by_subject = _index_rows_by_subject(rows)
     for feature in PRIMARY_FEATURE_REGISTRY:
         metrics, _ = _group_metric_rows(
-            rows,
+            source.rows,
             analysis_label="primary_auroc",
             predictor=feature,
             target=target,
             metric_builder=_auroc_metric_row,
-            rows_by_subject=rows_by_subject,
+            rows_by_subject=source.rows_by_subject,
         )
         metric_rows.extend(metrics)
         specs.append(
             _metric_spec(
-                rows,
+                source.rows,
                 predictor=feature,
                 target=target,
-                rows_by_subject=rows_by_subject,
+                rows_by_subject=source.rows_by_subject,
             )
         )
+    compiled_specs = [
+        _compile_metric_spec(source, spec, metric_kind="auroc") for spec in specs
+    ]
     estimates = _stream_metric_estimates(
-        specs,
-        draw_plan,
-        analysis_label="primary_auroc",
-        metric_builder=_auroc_metric_row,
+        compiled_specs, draw_plan
     )
     _attach_intervals(metric_rows, estimates, draw_plan.replicates)
     return {
@@ -642,6 +915,7 @@ def _calibration_point_tables(
 
 def _calibration_analysis(
     specs: Sequence[Mapping[str, Any]],
+    compiled_specs: Sequence[_CompiledMetricSpec],
     draw_plan: QuestionDrawPlan,
     *,
     analysis_label: str,
@@ -652,10 +926,7 @@ def _calibration_analysis(
         specs, analysis_label=analysis_label
     )
     estimates = _stream_metric_estimates(
-        specs,
-        draw_plan,
-        analysis_label=analysis_label,
-        metric_builder=_calibration_metric_row,
+        compiled_specs, draw_plan
     )
     _attach_intervals(metric_rows, estimates, draw_plan.replicates)
     return {
@@ -669,14 +940,28 @@ def _calibration_analysis(
 
 
 def natural_calibration_analysis(
-    rows: Sequence[Mapping[str, Any]], draw_plan: QuestionDrawPlan
+    rows: Sequence[Mapping[str, Any]],
+    draw_plan: QuestionDrawPlan,
+    *,
+    allow_small_fixture: bool = False,
 ) -> dict[str, Any]:
     """Calibrate natural confidence only against natural correctness."""
 
-    _validate_source_rows(rows, draw_plan)
+    source = _compile_source_index(
+        rows, draw_plan, allow_small_fixture=allow_small_fixture
+    )
     predictor = "natural_verbalized_confidence"
+    specs = [
+        _metric_spec(
+            source.rows,
+            predictor=predictor,
+            target=PRIMARY_TARGET,
+            rows_by_subject=source.rows_by_subject,
+        )
+    ]
     return _calibration_analysis(
-        [_metric_spec(rows, predictor=predictor, target=PRIMARY_TARGET)],
+        specs,
+        [_compile_metric_spec(source, specs[0], metric_kind="calibration")],
         draw_plan,
         analysis_label="natural_calibration",
         predictors=(predictor,),
@@ -729,9 +1014,12 @@ def _checkpoint_specs(
 ) -> list[dict[str, Any]]:
     specs: list[dict[str, Any]] = []
     for fraction in FIXED_CHECKPOINT_FRACTIONS:
-        fraction_rows = [
-            row for row in flat_rows if row["requested_fraction"] == fraction
+        positions = [
+            index
+            for index, row in enumerate(flat_rows)
+            if row["requested_fraction"] == fraction
         ]
+        fraction_rows = [flat_rows[index] for index in positions]
         rows_by_subject = _index_rows_by_subject(fraction_rows)
         for predictor in predictors:
             specs.append(
@@ -744,6 +1032,7 @@ def _checkpoint_specs(
                         "is_main_checkpoint": fraction in MAIN_CHECKPOINT_FRACTIONS,
                     },
                     rows_by_subject=rows_by_subject,
+                    source_positions=positions,
                 )
             )
     return specs
@@ -754,15 +1043,23 @@ def checkpoint_calibration_analysis(
     draw_plan: QuestionDrawPlan,
     *,
     predictors: Sequence[str] = CHECKPOINT_PREDICTORS,
+    allow_small_fixture: bool = False,
 ) -> dict[str, Any]:
     """Both fixed checkpoint-local calibration families by logical fraction."""
 
     if tuple(predictors) != CHECKPOINT_PREDICTORS:
         raise ValueError("checkpoint calibration predictors are fixed and exclude entropy")
-    _validate_source_rows(rows, draw_plan)
     flat = _flatten_checkpoint_rows(rows)
+    source = _compile_source_index(
+        flat, draw_plan, allow_small_fixture=allow_small_fixture
+    )
+    specs = _checkpoint_specs(source.rows, predictors)
     return _calibration_analysis(
-        _checkpoint_specs(flat, predictors),
+        specs,
+        [
+            _compile_metric_spec(source, spec, metric_kind="calibration")
+            for spec in specs
+        ],
         draw_plan,
         analysis_label="checkpoint_calibration",
         predictors=predictors,
@@ -775,13 +1072,17 @@ def secondary_checkpoint_auroc_analysis(
     draw_plan: QuestionDrawPlan,
     *,
     predictors: Sequence[str] = CHECKPOINT_PREDICTORS,
+    allow_small_fixture: bool = False,
 ) -> dict[str, Any]:
     """Separately labelled checkpoint-local AUROC by logical fraction."""
 
     if tuple(predictors) != CHECKPOINT_PREDICTORS:
         raise ValueError("secondary checkpoint AUROC predictors are fixed")
-    _validate_source_rows(rows, draw_plan)
-    specs = _checkpoint_specs(_flatten_checkpoint_rows(rows), predictors)
+    flat = _flatten_checkpoint_rows(rows)
+    source = _compile_source_index(
+        flat, draw_plan, allow_small_fixture=allow_small_fixture
+    )
+    specs = _checkpoint_specs(source.rows, predictors)
     metric_rows: list[dict[str, Any]] = []
     for spec in specs:
         metrics, _ = _group_metric_rows(
@@ -795,11 +1096,11 @@ def secondary_checkpoint_auroc_analysis(
         for metric in metrics:
             metric.update(spec["metadata"])
             metric_rows.append(metric)
+    compiled_specs = [
+        _compile_metric_spec(source, spec, metric_kind="auroc") for spec in specs
+    ]
     estimates = _stream_metric_estimates(
-        specs,
-        draw_plan,
-        analysis_label="secondary_checkpoint_local_auroc",
-        metric_builder=_auroc_metric_row,
+        compiled_specs, draw_plan
     )
     _attach_intervals(metric_rows, estimates, draw_plan.replicates)
     return {
@@ -825,14 +1126,17 @@ def within_question_analysis(
     draw_plan: QuestionDrawPlan,
     *,
     feature_registry: Sequence[str] = PRIMARY_FEATURE_REGISTRY,
+    allow_small_fixture: bool = False,
 ) -> dict[str, Any]:
     """Equal-question paired differences with compact multiplicity bootstrap."""
 
     if tuple(feature_registry) != PRIMARY_FEATURE_REGISTRY:
         raise ValueError("within-question feature registry mismatch")
-    _validate_source_rows(rows, draw_plan)
+    source = _compile_source_index(
+        rows, draw_plan, allow_small_fixture=allow_small_fixture
+    )
     grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
-    for row in rows:
+    for row in source.rows:
         target = row.get(PRIMARY_TARGET)
         if target is not None and type(target) is not bool:
             raise ValueError("natural_correct must be an actual boolean or None")
@@ -892,17 +1196,31 @@ def within_question_analysis(
         feature: [row for row in distribution_rows if row["feature"] == feature]
         for feature in PRIMARY_FEATURE_REGISTRY
     }
+    compiled_by_feature: dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]] = {}
+    for feature, feature_rows in by_feature.items():
+        _emit_structural("within_question_compiled")
+        question_indices = np.asarray(
+            [
+                source.question_lookup[(str(row["subject"]), str(row["question_id"]))]
+                for row in feature_rows
+            ],
+            dtype=np.int32,
+        )
+        paired_differences = np.asarray(
+            [row["paired_difference"] for row in feature_rows], dtype=float
+        )
+        question_indices.setflags(write=False)
+        paired_differences.setflags(write=False)
+        compiled_by_feature[feature] = (question_indices, paired_differences)
     for replicate_id in range(draw_plan.replicates):
-        question_weights = draw_plan.question_multiplicities(replicate_id)
-        for feature, feature_rows in by_feature.items():
-            weighted_sum = 0.0
-            weight_total = 0
-            for row in feature_rows:
-                weight = question_weights[(row["subject"], row["question_id"])]
-                weighted_sum += row["paired_difference"] * weight
-                weight_total += weight
+        question_weights = draw_plan.question_multiplicity_vector(replicate_id)
+        for feature, (question_indices, paired_differences) in compiled_by_feature.items():
+            feature_weights = question_weights[question_indices]
+            weight_total = int(feature_weights.sum())
             estimates[feature].append(
-                None if weight_total == 0 else float(weighted_sum / weight_total)
+                None
+                if weight_total == 0
+                else float(np.dot(paired_differences, feature_weights) / weight_total)
             )
 
     summary_rows: list[dict[str, Any]] = []

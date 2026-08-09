@@ -17,6 +17,7 @@ DEFAULT_BOOTSTRAP_SEED = 42
 DEFAULT_DEVELOPMENT_REPLICATES = 1_000
 DEFAULT_CONFIDENCE_LEVEL = 0.95
 DEFAULT_MINIMUM_VALID_FRACTION = 0.95
+MAX_AUDIT_MATERIALIZED_ROWS = 100_000
 
 _BOOTSTRAP_FIELDS = ("replicate_id", "draw_index", "draw_id")
 
@@ -76,6 +77,7 @@ class QuestionDrawPlan:
     question_ids_by_subject: tuple[tuple[str, ...], ...]
     replicates: int
     seed: int
+    small_fixture: bool
     _dtype_string: str
     _selected_index_bytes: bytes
 
@@ -88,6 +90,10 @@ class QuestionDrawPlan:
             raise ValueError("replicates must be a positive integer")
         if type(self.seed) is not int or self.seed < 0:
             raise ValueError("seed must be a nonnegative integer")
+        if type(self.small_fixture) is not bool:
+            raise ValueError("small_fixture must be boolean")
+        if not self.small_fixture and self.subjects != tuple(FIXED_SUBJECTS):
+            raise ValueError("compact plan must have exact fixed subject presence and order")
         seen_questions: set[str] = set()
         for subject, question_ids in zip(
             self.subjects, self.question_ids_by_subject, strict=True
@@ -181,24 +187,39 @@ class QuestionDrawPlan:
         """Return exact integer selection multiplicity for every canonical question."""
 
         self._validate_replicate_id(replicate_id)
-        selected = self.selected_indices[replicate_id]
+        multiplicities = self.question_multiplicity_vector(replicate_id)
         output: dict[tuple[str, str], int] = {}
         offset = 0
         for subject, question_ids in zip(
             self.subjects, self.question_ids_by_subject, strict=True
         ):
-            counts = np.bincount(
-                selected[offset : offset + len(question_ids)].astype(np.int64),
-                minlength=len(question_ids),
-            )
+            counts = multiplicities[offset : offset + len(question_ids)]
             for question_id, count in zip(question_ids, counts.tolist(), strict=True):
                 output[(subject, question_id)] = int(count)
             offset += len(question_ids)
         return output
 
+    def question_multiplicity_vector(self, replicate_id: int) -> np.ndarray[Any, Any]:
+        """Return one compact integer vector aligned to canonical question order."""
+
+        self._validate_replicate_id(replicate_id)
+        selected = self.selected_indices[replicate_id]
+        output = np.empty(self.total_question_count, dtype=np.int64)
+        offset = 0
+        for question_ids in self.question_ids_by_subject:
+            count = len(question_ids)
+            output[offset : offset + count] = np.bincount(
+                selected[offset : offset + count].astype(np.int64),
+                minlength=count,
+            )
+            offset += count
+        return output
+
     def materialize_draw_rows(self, *, max_rows: int) -> list[dict[str, Any]]:
         if type(max_rows) is not int or max_rows <= 0:
             raise ValueError("max_rows must be a positive integer")
+        if self.logical_draw_count > MAX_AUDIT_MATERIALIZED_ROWS:
+            raise ValueError("compact plan exceeds the fixed audit ceiling")
         if self.logical_draw_count > max_rows:
             raise ValueError("compact plan exceeds explicit audit materialization limit")
         return [
@@ -242,6 +263,7 @@ def question_draw_plan_from_indices(
         question_ids_by_subject=questions,
         replicates=int(owned.shape[0]),
         seed=seed,
+        small_fixture=small_fixture,
         _dtype_string=dtype.str,
         _selected_index_bytes=owned.tobytes(order="C"),
     )
@@ -417,6 +439,8 @@ def expand_question_draws(
     )
     if logical_rows > max_rows:
         raise ValueError("expanded rows exceed explicit audit materialization limit")
+    if logical_rows > MAX_AUDIT_MATERIALIZED_ROWS:
+        raise ValueError("expanded rows exceed the fixed audit ceiling")
     expanded: list[dict[str, Any]] = []
     for draw in draw_plan.iter_draw_rows(replicate_id):
         pair = (draw["subject"], draw["question_id"])
@@ -502,6 +526,7 @@ def percentile_interval(
 __all__ = [
     "DEFAULT_BOOTSTRAP_SEED",
     "DEFAULT_DEVELOPMENT_REPLICATES",
+    "MAX_AUDIT_MATERIALIZED_ROWS",
     "QuestionDrawPlan",
     "build_question_draw_plan",
     "question_draw_plan_from_indices",

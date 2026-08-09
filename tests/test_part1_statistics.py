@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from fractions import Fraction
 from typing import Any
 
@@ -422,7 +423,9 @@ def test_within_question_exact_means_equal_weights_missing_sides_and_distributio
         replicates=3,
         small_fixture=True,
     )
-    result = within_question_analysis(rows, plan)
+    with pytest.raises(ValueError, match="small-fixture draw plan"):
+        within_question_analysis(rows, plan)
+    result = within_question_analysis(rows, plan, allow_small_fixture=True)
 
     feature = FIXED_PRIMARY_AUROC_FEATURE_REGISTRY[0]
     distribution = [row for row in result["distribution_rows"] if row["feature"] == feature]
@@ -465,7 +468,7 @@ def test_within_question_bootstrap_preserves_repeated_draws_in_mean() -> None:
         seed=42,
         small_fixture=True,
     )
-    result = within_question_analysis(rows, plan)
+    result = within_question_analysis(rows, plan, allow_small_fixture=True)
     feature = FIXED_PRIMARY_AUROC_FEATURE_REGISTRY[0]
     summary = next(row for row in result["summary_rows"] if row["feature"] == feature)
     assert summary["lower"] == pytest.approx(3.525)
@@ -497,7 +500,7 @@ def test_within_question_replicate_without_qualifying_draw_is_invalid() -> None:
         seed=42,
         small_fixture=True,
     )
-    result = within_question_analysis(rows, plan)
+    result = within_question_analysis(rows, plan, allow_small_fixture=True)
     assert all(row["valid_replicates"] == 0 for row in result["summary_rows"])
     assert all(row["invalid_replicates"] == 1 for row in result["summary_rows"])
     assert "bootstrap_rows" not in result
@@ -548,3 +551,186 @@ def test_streaming_bootstrap_never_deepcopies_or_reflattens_replicate_payloads()
     assert "bootstrap_draw_rows" not in checkpoint
     assert CountingSlots.accesses == len(rows) * 11
     assert plan.selected_index_cell_count == 100 * 15
+
+
+def test_primary_compilation_and_native_sort_counts_are_replicate_independent() -> None:
+    import part1_statistics as statistics
+    from part1_bootstrap import build_question_draw_plan
+
+    rows = _balanced_rows()
+    question_frame = [
+        {"subject": subject, "question_id": f"{subject}-q"}
+        for subject in FIXED_SUBJECTS
+    ]
+
+    def run(replicates: int) -> Counter[str]:
+        counts: Counter[str] = Counter()
+        statistics._STRUCTURAL_HOOK = counts.update
+        try:
+            plan = build_question_draw_plan(question_frame, replicates=replicates)
+            statistics.primary_auroc_analysis(rows, plan)
+        finally:
+            statistics._STRUCTURAL_HOOK = None
+        return counts
+
+    one = run(1)
+    hundred = run(100)
+    for event in (
+        "source_row_indexed",
+        "spec_source_row_compiled",
+        "point_cohort_scan",
+        "point_group_compile",
+        "auroc_order_compiled",
+    ):
+        assert one[event] == hundred[event]
+        assert one[event] > 0
+    assert one["source_row_indexed"] == len(rows)
+    assert one["spec_source_row_compiled"] == len(rows) * 11
+    assert one["point_cohort_scan"] == 11 * 6
+    assert one["point_group_compile"] == 11
+    assert one["auroc_order_compiled"] == 11 * 6
+
+
+def test_calibration_bin_and_checkpoint_source_compilation_are_replicate_independent() -> None:
+    import part1_statistics as statistics
+    from part1_bootstrap import build_question_draw_plan
+
+    rows = _balanced_rows()
+    question_frame = [
+        {"subject": subject, "question_id": f"{subject}-q"}
+        for subject in FIXED_SUBJECTS
+    ]
+
+    def run(replicates: int) -> Counter[str]:
+        counts: Counter[str] = Counter()
+        statistics._STRUCTURAL_HOOK = counts.update
+        try:
+            plan = build_question_draw_plan(question_frame, replicates=replicates)
+            statistics.natural_calibration_analysis(rows, plan)
+            statistics.checkpoint_calibration_analysis(rows, plan)
+        finally:
+            statistics._STRUCTURAL_HOOK = None
+        return counts
+
+    one = run(1)
+    hundred = run(100)
+    for event in (
+        "source_row_indexed",
+        "spec_source_row_compiled",
+        "point_cohort_scan",
+        "point_group_compile",
+        "calibration_bins_compiled",
+    ):
+        assert one[event] == hundred[event]
+        assert one[event] > 0
+    assert one["calibration_bins_compiled"] == 6 + 22 * 6
+
+
+def test_compiled_intervals_match_physical_expansion_oracle() -> None:
+    from part1_bootstrap import build_question_draw_plan, percentile_interval
+    from part1_statistics import (
+        natural_calibration_analysis,
+        primary_auroc_analysis,
+        rank_auroc,
+        reliability_ece,
+    )
+
+    rows: list[dict[str, Any]] = []
+    question_frame: list[dict[str, str]] = []
+    for subject_index, subject in enumerate(FIXED_SUBJECTS):
+        for question_index, (correct, score) in enumerate(((False, 0.2), (True, 0.8))):
+            question_id = f"{subject}-q{question_index}"
+            question_frame.append({"subject": subject, "question_id": question_id})
+            rows.append(_row(subject, question_id, subject_index * 2 + question_index, correct, score))
+    plan = build_question_draw_plan(question_frame, replicates=100)
+    primary = primary_auroc_analysis(rows, plan)
+    calibration = natural_calibration_analysis(rows, plan)
+    feature = FIXED_PRIMARY_AUROC_FEATURE_REGISTRY[0]
+    auroc_estimates: list[float | None] = []
+    ece_estimates: list[float | None] = []
+    for replicate_id in range(plan.replicates):
+        physical = []
+        for draw in plan.iter_draw_rows(replicate_id):
+            physical.extend(
+                row
+                for row in rows
+                if row["subject"] == draw["subject"]
+                and row["question_id"] == draw["question_id"]
+            )
+        auroc_estimates.append(
+            rank_auroc(
+                [row["natural_correct"] for row in physical],
+                [row[feature] for row in physical],
+            )
+        )
+        ece_estimates.append(
+            reliability_ece(
+                [row["natural_correct"] for row in physical],
+                [row["natural_verbalized_confidence"] for row in physical],
+            )["ece"]
+        )
+    auroc_oracle = percentile_interval(auroc_estimates)
+    ece_oracle = percentile_interval(ece_estimates)
+    primary_pooled = next(
+        row for row in primary["metric_rows"]
+        if row["feature"] == feature and row["grouping"] == "pooled"
+    )
+    calibration_pooled = next(
+        row for row in calibration["metric_rows"] if row["grouping"] == "pooled"
+    )
+    for key in ("valid_replicates", "invalid_replicates", "interval_valid"):
+        assert primary_pooled[key] == auroc_oracle[key]
+        assert calibration_pooled[key] == ece_oracle[key]
+    for key in ("lower", "upper"):
+        assert primary_pooled[key] == pytest.approx(auroc_oracle[key])
+        assert calibration_pooled[key] == pytest.approx(ece_oracle[key])
+
+
+def test_production_shaped_all_analysis_structural_smoke() -> None:
+    import part1_statistics as statistics
+    from part1_bootstrap import build_question_draw_plan
+
+    class CountingSlots(list[dict[str, Any]]):
+        accesses = 0
+
+        def __getitem__(self, index: int) -> dict[str, Any]:
+            type(self).accesses += 1
+            return super().__getitem__(index)
+
+    rows: list[dict[str, Any]] = []
+    question_frame: list[dict[str, str]] = []
+    for subject in FIXED_SUBJECTS:
+        for question_index in range(100):
+            question_id = f"{subject}-q{question_index}"
+            question_frame.append({"subject": subject, "question_id": question_id})
+            for run_id in range(10):
+                correct = run_id % 2 == 1
+                value = 0.8 if correct else 0.2
+                row = _row(subject, question_id, run_id, correct, value)
+                row["checkpoint_calibration"] = CountingSlots(
+                    row["checkpoint_calibration"]
+                )
+                rows.append(row)
+    plan = build_question_draw_plan(question_frame, replicates=2)
+    counts: Counter[str] = Counter()
+    statistics._STRUCTURAL_HOOK = counts.update
+    try:
+        primary = statistics.primary_auroc_analysis(rows, plan)
+        natural = statistics.natural_calibration_analysis(rows, plan)
+        checkpoint = statistics.checkpoint_calibration_analysis(rows, plan)
+        secondary = statistics.secondary_checkpoint_auroc_analysis(rows, plan)
+        within = statistics.within_question_analysis(rows, plan)
+    finally:
+        statistics._STRUCTURAL_HOOK = None
+
+    assert len(primary["metric_rows"]) == 11 * 7
+    assert len(natural["metric_rows"]) == 7
+    assert len(checkpoint["metric_rows"]) == 22 * 7
+    assert len(secondary["metric_rows"]) == 22 * 7
+    assert len(within["summary_rows"]) == 11
+    assert all(row["requested_replicates"] == 2 for row in primary["metric_rows"])
+    assert counts["source_row_indexed"] == 5_000 + 5_000 + 55_000 + 55_000 + 5_000
+    assert counts["auroc_order_compiled"] == 11 * 6 + 22 * 6
+    assert counts["calibration_bins_compiled"] == 6 + 22 * 6
+    assert counts["within_question_compiled"] == 11
+    assert CountingSlots.accesses == 5_000 * 11 * 2

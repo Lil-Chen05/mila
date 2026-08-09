@@ -34,6 +34,7 @@ def test_compact_plan_seed_stability_loop_order_multiplicity_and_sensitivity() -
     )
     assert first.replicates == 2
     assert first.seed == 42
+    assert first.small_fixture is True
     assert first.selected_indices.tolist() == [
         [0, 2, 1, 1, 1, 2],
         [0, 2, 0, 0, 1, 2],
@@ -82,6 +83,7 @@ def test_default_plan_requires_fixed_subjects_and_rejects_duplicate_questions() 
     ]
     plan = build_question_draw_plan(production_fixture, replicates=1)
     assert plan.subjects == tuple(FIXED_SUBJECTS)
+    assert plan.small_fixture is False
     with pytest.raises(ValueError, match="fixed subject presence and order"):
         build_question_draw_plan(_questions(), replicates=1)
     with pytest.raises(ValueError, match="fixed subject presence and order"):
@@ -186,6 +188,51 @@ def test_bounded_audit_materialization_and_expansion_preserve_draw_ids_without_d
     assert all(row["replicate_id"] == 0 for row in expanded)
     assert len({row["draw_id"] for row in expanded}) == expected // 2
     assert expanded[0]["checkpoint_calibration"] is rows[0]["checkpoint_calibration"]
+
+
+def test_direct_construction_cannot_bypass_fixture_mode_and_audit_has_hard_ceiling() -> None:
+    from part1_bootstrap import (
+        MAX_AUDIT_MATERIALIZED_ROWS,
+        QuestionDrawPlan,
+        build_question_draw_plan,
+        question_draw_plan_from_indices,
+        question_draw_plan_from_rows,
+    )
+
+    fixture = build_question_draw_plan(
+        _questions(count=2), replicates=1, small_fixture=True
+    )
+    with pytest.raises(ValueError, match="fixed subject presence and order"):
+        QuestionDrawPlan(
+            subjects=fixture.subjects,
+            question_ids_by_subject=fixture.question_ids_by_subject,
+            replicates=fixture.replicates,
+            seed=fixture.seed,
+            small_fixture=False,
+            _dtype_string=fixture._dtype_string,
+            _selected_index_bytes=fixture._selected_index_bytes,
+        )
+    from_indices = question_draw_plan_from_indices(
+        _questions(count=2), np.zeros((1, 4), dtype=int), small_fixture=True
+    )
+    assert from_indices.small_fixture is True
+    legacy_rows = fixture.materialize_draw_rows(max_rows=4)
+    from_rows = question_draw_plan_from_rows(
+        _questions(count=2), legacy_rows, small_fixture=True
+    )
+    assert from_rows.small_fixture is True
+
+    production_frame = [
+        {"subject": subject, "question_id": f"{subject}-q{index}"}
+        for subject in FIXED_SUBJECTS
+        for index in range(2)
+    ]
+    too_large = build_question_draw_plan(
+        production_frame,
+        replicates=MAX_AUDIT_MATERIALIZED_ROWS // 10 + 1,
+    )
+    with pytest.raises(ValueError, match="fixed audit ceiling"):
+        too_large.materialize_draw_rows(max_rows=too_large.logical_draw_count)
 
 
 def test_storage_estimate_is_numeric_cells_not_python_draw_dictionaries() -> None:
