@@ -134,7 +134,9 @@ def _checkpoint(
         "prefix_hash": _hex(f"prefix-{natural['raw_record_id']}-{index}"),
         "inducer_version": "smollm3-inducer-v1",
         "inducer_text": "</think>\nAnswer:",
-        "forced_generated_token_ids": [10] if complete else None,
+        "forced_generated_token_ids": (
+            [10 + LETTERS.index(answer)] if valid else [10] if complete else None
+        ),
         "decoded_forced_output": f" {answer}" if complete else None,
         "terminal_answer_block_text": f"Answer: {answer}" if valid else None,
         "forced_answer": answer if valid else None,
@@ -143,7 +145,7 @@ def _checkpoint(
         "normalized_confidence": 0.7 if valid else None,
         "checkpoint_local_correct": answer == "C" if valid else None,
         "answer_token_index": 0 if valid else None,
-        "answer_token_id": 10 if valid else None,
+        "answer_token_id": 10 + LETTERS.index(answer) if valid else None,
         "token_convention": "bare" if valid else None,
         "ad_token_ids": [10, 11, 12, 13] if valid else None,
         "ad_logits_float32": [0.0, 0.0, 0.0, 1.0] if valid else None,
@@ -584,4 +586,307 @@ def test_ad_probability_vector_must_remain_renormalized() -> None:
     checkpoints[0]["ad_probabilities_float32"] = [0.2, 0.2, 0.2, 0.2]
     checkpoints[0]["maximum_ad_probability"] = 0.2
     with pytest.raises(ValueError, match="sum to one"):
+        _extract(natural, checkpoints)
+
+
+def _make_parsed_aggregate_invalid(checkpoint: dict[str, Any]) -> None:
+    """Keep parsed answer/confidence while making answer-step metrics unavailable."""
+
+    checkpoint.update(
+        {
+            "checkpoint_model_output_status": "invalid",
+            "answer_token_status": "missing",
+            "answer_token_index": None,
+            "answer_token_id": None,
+            "token_convention": None,
+            "ad_token_ids": None,
+            "ad_logits_float32": None,
+            "ad_probabilities_float32": None,
+            "answer_entropy_nats": None,
+            "full_vocabulary_answer_step_entropy_nats": None,
+            "maximum_ad_probability": None,
+            "entropy_status": "unavailable",
+        }
+    )
+
+
+def test_parsed_answer_survives_invalid_aggregate_output_status() -> None:
+    natural = _natural(answer="C")
+    checkpoints = _checkpoints(natural)
+    _make_parsed_aggregate_invalid(checkpoints[0])
+    validate_instance("checkpoint_terminal_result", checkpoints[0])
+
+    row = _extract(natural, checkpoints)
+
+    assert row["first_natural_answer_appearance_fraction"] == 0.0
+    assert row["valid_transition_count"] == 10
+    assert row["answer_switch_count"] == 0
+    assert row["stabilization_fraction"] == 0.0
+    slot = row["checkpoint_calibration"][0]
+    assert slot["answer_valid"] is True
+    assert slot["checkpoint_local_correct"] is True
+    assert slot["confidence_available"] is True
+    assert slot["normalized_confidence"] == 0.7
+    assert slot["maximum_ad_probability_available"] is False
+    assert slot["maximum_ad_probability"] is None
+    assert slot["maximum_ad_probability_missing_reason"] == "checkpoint_ad_probability_unavailable"
+
+
+def test_all_eleven_checkpoint_calibration_slots_are_logical_and_deterministic() -> None:
+    natural = _natural()
+    checkpoints = _checkpoints(natural, aliases={5}, invalid={4})
+    checkpoints[1].update(
+        {
+            "confidence_parse_status": "missing",
+            "raw_confidence_text": None,
+            "raw_parsed_confidence": None,
+            "normalized_confidence": None,
+        }
+    )
+    checkpoints[2].update(
+        {
+            "confidence_parse_status": "out_of_range",
+            "raw_confidence_text": "250",
+            "raw_parsed_confidence": 250,
+            "normalized_confidence": None,
+        }
+    )
+    _make_parsed_aggregate_invalid(checkpoints[3])
+    checkpoints[4].update(
+        {
+            "confidence_parse_status": "parsed",
+            "raw_confidence_text": "70",
+            "raw_parsed_confidence": 70,
+            "normalized_confidence": 0.7,
+        }
+    )
+    checkpoints[6] = _checkpoint(
+        natural, 6, answer=None, outcome="terminal_infrastructure_failure"
+    )
+    checkpoints = [
+        checkpoint
+        for checkpoint in checkpoints
+        if checkpoint["requested_checkpoint_index"] != 7
+    ]
+    before = copy.deepcopy((natural, checkpoints))
+
+    row = _extract(natural, checkpoints)
+    slots = row["checkpoint_calibration"]
+
+    assert len(slots) == 11
+    assert [slot["requested_checkpoint_index"] for slot in slots] == list(range(11))
+    assert [slot["requested_fraction"] for slot in slots] == [i / 10 for i in range(11)]
+    assert all(type(slot["requested_fraction"]) is float for slot in slots)
+    assert set(slots[0]) == {
+        "requested_checkpoint_index",
+        "requested_fraction",
+        "checkpoint_id",
+        "present",
+        "eligibility_status",
+        "is_alias",
+        "checkpoint_execution_outcome",
+        "checkpoint_model_output_status",
+        "answer_parse_status",
+        "forced_answer",
+        "answer_valid",
+        "checkpoint_local_correct",
+        "confidence_parse_status",
+        "normalized_confidence",
+        "confidence_available",
+        "confidence_missing_reason",
+        "entropy_status",
+        "maximum_ad_probability",
+        "maximum_ad_probability_available",
+        "maximum_ad_probability_missing_reason",
+    }
+    assert slots[0]["confidence_available"] is True
+    assert slots[0]["confidence_missing_reason"] is None
+    assert slots[0]["maximum_ad_probability_available"] is True
+    assert slots[0]["maximum_ad_probability_missing_reason"] is None
+    assert slots[1]["confidence_available"] is False
+    assert slots[1]["confidence_missing_reason"] == "checkpoint_confidence_not_parsed"
+    assert slots[2]["confidence_available"] is False
+    assert slots[2]["confidence_missing_reason"] == "checkpoint_confidence_not_parsed"
+    assert slots[3]["answer_valid"] is True
+    assert slots[3]["confidence_available"] is True
+    assert slots[3]["maximum_ad_probability_available"] is False
+    assert slots[3]["maximum_ad_probability_missing_reason"] == "checkpoint_ad_probability_unavailable"
+    assert slots[4]["answer_valid"] is False
+    assert slots[4]["confidence_available"] is False
+    assert slots[4]["confidence_missing_reason"] == "checkpoint_local_correctness_unavailable"
+    assert slots[4]["maximum_ad_probability_available"] is False
+    assert slots[4]["maximum_ad_probability_missing_reason"] == "checkpoint_local_correctness_unavailable"
+    assert slots[5]["present"] is True
+    assert slots[5]["is_alias"] is True
+    assert slots[6]["eligibility_status"] == "eligible"
+    assert slots[6]["confidence_missing_reason"] == "checkpoint_terminal_infrastructure_failure"
+    assert slots[6]["maximum_ad_probability_missing_reason"] == "checkpoint_terminal_infrastructure_failure"
+    assert slots[7] == {
+        "requested_checkpoint_index": 7,
+        "requested_fraction": 0.7,
+        "checkpoint_id": natural["checkpoint_ids"][7],
+        "present": False,
+        "eligibility_status": "missing",
+        "is_alias": None,
+        "checkpoint_execution_outcome": None,
+        "checkpoint_model_output_status": None,
+        "answer_parse_status": None,
+        "forced_answer": None,
+        "answer_valid": False,
+        "checkpoint_local_correct": None,
+        "confidence_parse_status": None,
+        "normalized_confidence": None,
+        "confidence_available": False,
+        "confidence_missing_reason": "checkpoint_missing",
+        "entropy_status": None,
+        "maximum_ad_probability": None,
+        "maximum_ad_probability_available": False,
+        "maximum_ad_probability_missing_reason": "checkpoint_missing",
+    }
+    assert (natural, checkpoints) == before
+
+
+def test_natural_failure_has_eleven_explicit_ineligible_calibration_slots() -> None:
+    natural = _natural(
+        outcome="terminal_infrastructure_failure", answer=None, confidence=None
+    )
+
+    slots = _extract(natural, [])["checkpoint_calibration"]
+
+    assert len(slots) == 11
+    assert [slot["requested_checkpoint_index"] for slot in slots] == list(range(11))
+    assert all(slot["requested_fraction"] == index / 10 for index, slot in enumerate(slots))
+    assert all(type(slot["requested_fraction"]) is float for slot in slots)
+    assert all(slot["checkpoint_id"] is None for slot in slots)
+    assert all(slot["present"] is False for slot in slots)
+    assert all(slot["eligibility_status"] == "ineligible_natural_failure" for slot in slots)
+    assert all(slot["confidence_available"] is False for slot in slots)
+    assert all(slot["confidence_missing_reason"] == "ineligible_natural_failure" for slot in slots)
+    assert all(slot["maximum_ad_probability_available"] is False for slot in slots)
+    assert all(
+        slot["maximum_ad_probability_missing_reason"] == "ineligible_natural_failure"
+        for slot in slots
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda row: row.__setitem__("checkpoint_eligible", False), "complete natural checkpoint eligibility"),
+        (lambda row: row.__setitem__("checkpoint_ids", None), "complete natural checkpoint_ids"),
+        (lambda row: row.__setitem__("checkpoint_ids", row["checkpoint_ids"][:10]), "complete natural checkpoint_ids"),
+        (lambda row: row.__setitem__("checkpoint_ids", ["duplicate"] * 11), "complete natural checkpoint_ids"),
+        (lambda row: row.__setitem__("checkpoint_ids", [*row["checkpoint_ids"][:10], 11]), "complete natural checkpoint_ids"),
+        (lambda row: row.__setitem__("infrastructure_failure_reference", "audit:failure"), "complete natural failure state"),
+        (lambda row: row.__setitem__("terminal_error_details", {"category": "failure"}), "complete natural failure state"),
+        (lambda row: row.__setitem__("rendered_prompt", None), "complete natural generation field"),
+        (lambda row: row.__setitem__("generated_token_ids", None), "complete natural generation field"),
+    ],
+)
+def test_complete_natural_bundle_is_validated_even_without_child_rows(
+    mutate: Callable[[dict[str, Any]], Any], message: str
+) -> None:
+    natural = _natural()
+    mutate(natural)
+    with pytest.raises(ValueError, match=message):
+        _extract(natural, [])
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda row: row.__setitem__("checkpoint_eligible", True), "natural terminal infrastructure failure"),
+        (lambda row: row.__setitem__("checkpoint_ids", [f"cp-{i}" for i in range(11)]), "natural terminal infrastructure failure"),
+        (lambda row: row.__setitem__("stop_reason", "eos"), "natural terminal infrastructure failure"),
+        (lambda row: row.__setitem__("reasoning_status", "closed"), "natural terminal infrastructure failure"),
+        (lambda row: row.__setitem__("answer_parse_status", "malformed"), "natural terminal infrastructure failure"),
+        (lambda row: row.__setitem__("confidence_parse_status", "malformed"), "natural terminal infrastructure failure"),
+        (lambda row: row.__setitem__("infrastructure_failure_reference", None), "natural terminal infrastructure failure"),
+        (lambda row: row.__setitem__("terminal_error_details", None), "natural terminal infrastructure failure"),
+        (lambda row: row.__setitem__("decoded_output", "stale"), "natural terminal infrastructure failure"),
+    ],
+)
+def test_natural_terminal_failure_bundle_rejects_contradictions(
+    mutate: Callable[[dict[str, Any]], Any], message: str
+) -> None:
+    natural = _natural(
+        outcome="terminal_infrastructure_failure", answer=None, confidence=None
+    )
+    mutate(natural)
+    with pytest.raises(ValueError, match=message):
+        _extract(natural, [])
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda row: row.__setitem__("infrastructure_failure_reference", "audit:failure"), "complete checkpoint failure state"),
+        (lambda row: row.__setitem__("terminal_error_details", {"category": "failure"}), "complete checkpoint failure state"),
+        (lambda row: row.__setitem__("forced_generated_token_ids", None), "complete checkpoint generation field"),
+        (lambda row: row.__setitem__("decoded_forced_output", None), "complete checkpoint generation field"),
+        (lambda row: row.__setitem__("confidence_parse_status", "missing"), "checkpoint confidence"),
+        (lambda row: row.__setitem__("normalized_confidence", float("inf")), "checkpoint confidence"),
+    ],
+)
+def test_complete_checkpoint_bundle_rejects_contradictions(
+    mutate: Callable[[dict[str, Any]], Any], message: str
+) -> None:
+    natural = _natural()
+    checkpoints = _checkpoints(natural)
+    mutate(checkpoints[0])
+    with pytest.raises(ValueError, match=message):
+        _extract(natural, checkpoints)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda row: row.__setitem__("checkpoint_model_output_status", "valid"),
+        lambda row: row.__setitem__("answer_parse_status", "malformed"),
+        lambda row: row.__setitem__("confidence_parse_status", "malformed"),
+        lambda row: row.__setitem__("answer_token_status", "missing"),
+        lambda row: row.__setitem__("entropy_status", "invalid"),
+        lambda row: row.__setitem__("infrastructure_failure_reference", None),
+        lambda row: row.__setitem__("terminal_error_details", None),
+        lambda row: row.__setitem__("decoded_forced_output", "stale"),
+        lambda row: row.__setitem__("normalized_confidence", 0.7),
+    ],
+)
+def test_checkpoint_terminal_failure_bundle_rejects_contradictions(
+    mutate: Callable[[dict[str, Any]], Any]
+) -> None:
+    natural = _natural()
+    checkpoints = _checkpoints(natural)
+    checkpoints[0] = _checkpoint(
+        natural, 0, answer=None, outcome="terminal_infrastructure_failure"
+    )
+    mutate(checkpoints[0])
+    with pytest.raises(ValueError, match="checkpoint terminal infrastructure failure"):
+        _extract(natural, checkpoints)
+
+
+def test_aggregate_model_output_status_requires_exact_valid_triad() -> None:
+    natural = _natural()
+    checkpoints = _checkpoints(natural)
+    checkpoints[0]["checkpoint_model_output_status"] = "invalid"
+    with pytest.raises(ValueError, match="aggregate invalid checkpoint"):
+        _extract(natural, checkpoints)
+
+    checkpoints = _checkpoints(natural)
+    checkpoints[0]["entropy_status"] = "unavailable"
+    checkpoints[0]["ad_logits_float32"] = None
+    checkpoints[0]["ad_probabilities_float32"] = None
+    checkpoints[0]["answer_entropy_nats"] = None
+    checkpoints[0]["full_vocabulary_answer_step_entropy_nats"] = None
+    checkpoints[0]["maximum_ad_probability"] = None
+    with pytest.raises(ValueError, match="aggregate valid checkpoint"):
+        _extract(natural, checkpoints)
+
+
+@pytest.mark.parametrize(("index", "value"), [(0, 0), (10, 1)])
+def test_requested_fraction_requires_canonical_float(index: int, value: int) -> None:
+    natural = _natural()
+    checkpoints = _checkpoints(natural)
+    checkpoints[index]["requested_fraction"] = value
+    with pytest.raises(ValueError, match="canonical float"):
         _extract(natural, checkpoints)

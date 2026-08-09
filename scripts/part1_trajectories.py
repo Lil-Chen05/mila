@@ -39,6 +39,51 @@ _OUTPUT_NATURAL_FIELDS = _GROUP_FIELDS + (
     "natural_correct",
 )
 _MAIN_FRACTION_INDICES = {"0.0": 0, "0.5": 5, "1.0": 10}
+_NATURAL_COMPLETE_GENERATION_FIELDS = (
+    "rendered_prompt",
+    "prompt_token_ids",
+    "generated_token_ids",
+    "decoded_output",
+    "reasoning_text",
+    "reasoning_boundaries",
+    "close_tag_information",
+    "generated_token_count",
+    "reasoning_token_count",
+    "per_token_entropy_nats",
+)
+_NATURAL_FAILURE_NULL_FIELDS = _NATURAL_COMPLETE_GENERATION_FIELDS + (
+    "mean_reasoning_entropy_nats",
+    "tail_reasoning_entropy_nats",
+    "terminal_answer_block_text",
+    "terminal_answer_block_span",
+    "natural_answer",
+    "raw_confidence_text",
+    "raw_parsed_confidence",
+    "normalized_confidence",
+    "natural_correct",
+    "diagnostic_answer_like_text",
+    "checkpoint_ids",
+)
+_CHECKPOINT_FAILURE_NULL_FIELDS = (
+    "forced_generated_token_ids",
+    "decoded_forced_output",
+    "terminal_answer_block_text",
+    "forced_answer",
+    "raw_confidence_text",
+    "raw_parsed_confidence",
+    "normalized_confidence",
+    "checkpoint_local_correct",
+    "answer_token_index",
+    "answer_token_id",
+    "token_convention",
+    "ad_token_ids",
+    "ad_logits_float32",
+    "ad_probabilities_float32",
+    "answer_entropy_nats",
+    "full_vocabulary_answer_step_entropy_nats",
+    "maximum_ad_probability",
+    "agrees_with_natural_answer",
+)
 
 
 def _same_json_scalar(left: Any, right: Any) -> bool:
@@ -68,7 +113,6 @@ def _natural_answer_is_valid(row: Mapping[str, Any]) -> bool:
 def _checkpoint_answer_is_valid(row: Mapping[str, Any]) -> bool:
     return (
         row.get("checkpoint_execution_outcome") == "complete"
-        and row.get("checkpoint_model_output_status") == "valid"
         and row.get("answer_parse_status") == "parsed"
         and row.get("forced_answer") in _ANSWERS
     )
@@ -80,19 +124,43 @@ def _validate_natural(row: Mapping[str, Any]) -> None:
         raise ValueError("unsupported natural_execution_outcome")
 
     if outcome == "terminal_infrastructure_failure":
-        for field in (
-            "reasoning_token_count",
-            "mean_reasoning_entropy_nats",
-            "tail_reasoning_entropy_nats",
-            "normalized_confidence",
-            "natural_answer",
-            "natural_correct",
+        if (
+            row.get("checkpoint_eligible") is not False
+            or row.get("stop_reason") != "error"
+            or row.get("reasoning_status") != "malformed"
+            or row.get("answer_parse_status") != "missing"
+            or row.get("confidence_parse_status") != "missing"
+            or not isinstance(row.get("infrastructure_failure_reference"), str)
+            or not row["infrastructure_failure_reference"]
+            or not isinstance(row.get("terminal_error_details"), Mapping)
+            or not row["terminal_error_details"]
         ):
+            raise ValueError("natural terminal infrastructure failure has an invalid status bundle")
+        for field in _NATURAL_FAILURE_NULL_FIELDS:
             if row.get(field) is not None:
                 raise ValueError(
                     f"natural terminal infrastructure failure requires null {field}"
                 )
         return
+
+    if row.get("checkpoint_eligible") is not True:
+        raise ValueError("complete natural checkpoint eligibility must be true")
+    checkpoint_ids = row.get("checkpoint_ids")
+    if (
+        not isinstance(checkpoint_ids, list)
+        or len(checkpoint_ids) != 11
+        or any(not isinstance(value, str) or not value for value in checkpoint_ids)
+        or len(set(checkpoint_ids)) != 11
+    ):
+        raise ValueError("complete natural checkpoint_ids must be eleven unique strings")
+    if (
+        row.get("infrastructure_failure_reference") is not None
+        or row.get("terminal_error_details") is not None
+    ):
+        raise ValueError("complete natural failure state must be null")
+    for field in _NATURAL_COMPLETE_GENERATION_FIELDS:
+        if row.get(field) is None:
+            raise ValueError(f"complete natural generation field {field} must be non-null")
 
     count = row.get("reasoning_token_count")
     if isinstance(count, bool) or not isinstance(count, int) or count < 0:
@@ -135,7 +203,9 @@ def _validate_checkpoint_metrics(row: Mapping[str, Any]) -> None:
     execution_complete = row.get("checkpoint_execution_outcome") == "complete"
     computed = row.get("entropy_status") == "computed"
     entropy = row.get("answer_entropy_nats")
+    full_entropy = row.get("full_vocabulary_answer_step_entropy_nats")
     maximum = row.get("maximum_ad_probability")
+    logits = row.get("ad_logits_float32")
     probabilities = row.get("ad_probabilities_float32")
 
     if computed:
@@ -143,8 +213,16 @@ def _validate_checkpoint_metrics(row: Mapping[str, Any]) -> None:
             raise ValueError("computed checkpoint metrics require complete execution")
         if not _finite_number(entropy, minimum=0.0):
             raise ValueError("computed answer_entropy_nats must be finite and nonnegative")
+        if not _finite_number(full_entropy, minimum=0.0):
+            raise ValueError(
+                "computed full_vocabulary_answer_step_entropy_nats must be finite and nonnegative"
+            )
         if not _finite_number(maximum, minimum=0.0, maximum=1.0):
             raise ValueError("computed maximum_ad_probability must be finite in [0,1]")
+        if not isinstance(logits, (list, tuple)) or len(logits) != 4:
+            raise ValueError("computed ad_logits_float32 must contain four values")
+        if not all(_finite_number(logit, minimum=-math.inf) for logit in logits):
+            raise ValueError("ad_logits_float32 must be finite")
         if not isinstance(probabilities, (list, tuple)) or len(probabilities) != 4:
             raise ValueError("computed ad_probabilities_float32 must contain four values")
         if not all(
@@ -167,11 +245,119 @@ def _validate_checkpoint_metrics(row: Mapping[str, Any]) -> None:
     else:
         for field, value in (
             ("answer_entropy_nats", entropy),
+            ("full_vocabulary_answer_step_entropy_nats", full_entropy),
             ("maximum_ad_probability", maximum),
+            ("ad_logits_float32", logits),
             ("ad_probabilities_float32", probabilities),
         ):
             if value is not None:
                 raise ValueError(f"{field} must be null when checkpoint entropy is unavailable")
+
+
+def _validate_checkpoint_bundle(row: Mapping[str, Any]) -> None:
+    outcome = row.get("checkpoint_execution_outcome")
+    if outcome not in {"complete", "terminal_infrastructure_failure"}:
+        raise ValueError("unsupported checkpoint_execution_outcome")
+
+    if outcome == "terminal_infrastructure_failure":
+        if (
+            row.get("checkpoint_model_output_status") != "invalid"
+            or row.get("answer_parse_status") != "missing"
+            or row.get("confidence_parse_status") != "missing"
+            or row.get("answer_token_status") != "unsupported"
+            or row.get("entropy_status") != "unavailable"
+            or not isinstance(row.get("infrastructure_failure_reference"), str)
+            or not row["infrastructure_failure_reference"]
+            or not isinstance(row.get("terminal_error_details"), Mapping)
+            or not row["terminal_error_details"]
+            or any(row.get(field) is not None for field in _CHECKPOINT_FAILURE_NULL_FIELDS)
+        ):
+            raise ValueError(
+                "checkpoint terminal infrastructure failure has an invalid status/output bundle"
+            )
+        return
+
+    if (
+        row.get("infrastructure_failure_reference") is not None
+        or row.get("terminal_error_details") is not None
+    ):
+        raise ValueError("complete checkpoint failure state must be null")
+    if not isinstance(row.get("forced_generated_token_ids"), list) or not isinstance(
+        row.get("decoded_forced_output"), str
+    ):
+        raise ValueError("complete checkpoint generation fields must be non-null")
+
+    output_status = row.get("checkpoint_model_output_status")
+    answer_status = row.get("answer_parse_status")
+    confidence_status = row.get("confidence_parse_status")
+    answer_token_status = row.get("answer_token_status")
+    entropy_status = row.get("entropy_status")
+    if output_status not in {"valid", "invalid"}:
+        raise ValueError("unsupported checkpoint_model_output_status")
+    if answer_status not in {"parsed", "missing", "malformed", "out_of_domain"}:
+        raise ValueError("unsupported checkpoint answer_parse_status")
+    if confidence_status not in {"parsed", "missing", "malformed", "out_of_range"}:
+        raise ValueError("unsupported checkpoint confidence_parse_status")
+    if answer_token_status not in {"located", "missing", "ambiguous", "unsupported"}:
+        raise ValueError("unsupported checkpoint answer_token_status")
+    if entropy_status not in {"computed", "unavailable", "invalid"}:
+        raise ValueError("unsupported checkpoint entropy_status")
+
+    answer_valid = _checkpoint_answer_is_valid(row)
+    if answer_status == "parsed":
+        if not answer_valid or type(row.get("checkpoint_local_correct")) is not bool:
+            raise ValueError(
+                "parsed checkpoint answer requires A-D and boolean checkpoint_local_correct"
+            )
+    elif row.get("forced_answer") is not None or row.get("checkpoint_local_correct") is not None:
+        raise ValueError(
+            "unparsed checkpoint answer requires null forced_answer and checkpoint_local_correct"
+        )
+
+    confidence = row.get("normalized_confidence")
+    if confidence_status == "parsed":
+        if not _finite_number(confidence, minimum=0.0, maximum=1.0):
+            raise ValueError("parsed checkpoint confidence must be finite in [0,1]")
+    elif confidence is not None:
+        raise ValueError("unparsed checkpoint confidence must be null")
+
+    if answer_token_status == "located":
+        ad_token_ids = row.get("ad_token_ids")
+        if (
+            type(row.get("answer_token_index")) is not int
+            or type(row.get("answer_token_id")) is not int
+            or not isinstance(row.get("token_convention"), str)
+            or not row["token_convention"]
+            or not isinstance(ad_token_ids, list)
+            or len(ad_token_ids) != 4
+            or any(type(token_id) is not int for token_id in ad_token_ids)
+        ):
+            raise ValueError("located checkpoint answer token has an invalid token bundle")
+    elif any(
+        row.get(field) is not None
+        for field in ("answer_token_index", "answer_token_id", "token_convention", "ad_token_ids")
+    ):
+        raise ValueError("unlocated checkpoint answer token requires null token fields")
+
+    if entropy_status == "computed" and answer_token_status != "located":
+        raise ValueError("computed checkpoint entropy requires a located answer token")
+
+    ad_token_ids = row.get("ad_token_ids")
+    answer_id_matches = (
+        answer_valid
+        and isinstance(ad_token_ids, list)
+        and row.get("answer_token_id") == ad_token_ids["ABCD".index(row["forced_answer"])]
+    )
+    complete_valid_triad = (
+        answer_valid
+        and answer_token_status == "located"
+        and entropy_status == "computed"
+        and answer_id_matches
+    )
+    if output_status == "valid" and not complete_valid_triad:
+        raise ValueError("aggregate valid checkpoint requires the complete valid triad")
+    if output_status == "invalid" and complete_valid_triad:
+        raise ValueError("aggregate invalid checkpoint cannot retain the complete valid triad")
 
 
 def _validate_checkpoint(row: Mapping[str, Any], natural: Mapping[str, Any]) -> int:
@@ -186,13 +372,10 @@ def _validate_checkpoint(row: Mapping[str, Any], natural: Mapping[str, Any]) -> 
     if type(index) is not int or not 0 <= index < len(FIXED_CHECKPOINT_FRACTIONS):
         raise ValueError("noncanonical requested checkpoint index")
     expected_fraction = FIXED_CHECKPOINT_FRACTIONS[index]
-    if (
-        isinstance(fraction, bool)
-        or not isinstance(fraction, (int, float))
-        or not math.isfinite(fraction)
-        or fraction != expected_fraction
-    ):
-        raise ValueError("noncanonical requested checkpoint index/fraction pair")
+    if type(fraction) is not float or not math.isfinite(fraction) or fraction != expected_fraction:
+        raise ValueError(
+            "noncanonical requested checkpoint: requested_fraction must be canonical float"
+        )
 
     expected_ids = natural.get("checkpoint_ids")
     if not isinstance(expected_ids, (list, tuple)) or len(expected_ids) != 11:
@@ -202,21 +385,8 @@ def _validate_checkpoint(row: Mapping[str, Any], natural: Mapping[str, Any]) -> 
     if type(row.get("is_alias")) is not bool:
         raise ValueError("is_alias must be boolean")
 
-    valid = _checkpoint_answer_is_valid(row)
-    local_correct = row.get("checkpoint_local_correct")
-    if valid:
-        if type(local_correct) is not bool:
-            raise ValueError("valid checkpoint requires boolean checkpoint_local_correct")
-    elif local_correct is not None:
-        raise ValueError("invalid checkpoint requires null checkpoint_local_correct")
-
-    if row.get("answer_parse_status") == "parsed":
-        if row.get("forced_answer") not in _ANSWERS:
-            raise ValueError("parsed forced_answer must be one of A-D")
-    elif row.get("forced_answer") is not None:
-        raise ValueError("unparsed forced_answer must be null")
-
     _validate_checkpoint_metrics(row)
+    _validate_checkpoint_bundle(row)
     return index
 
 
@@ -251,6 +421,135 @@ def _index_checkpoints(
     return by_index
 
 
+def _checkpoint_calibration_slot(
+    *,
+    index: int,
+    expected_checkpoint_id: str | None,
+    checkpoint: Mapping[str, Any] | None,
+    natural_failure: bool,
+) -> dict[str, Any]:
+    fraction = FIXED_CHECKPOINT_FRACTIONS[index]
+    if natural_failure:
+        return {
+            "requested_checkpoint_index": index,
+            "requested_fraction": fraction,
+            "checkpoint_id": None,
+            "present": False,
+            "eligibility_status": "ineligible_natural_failure",
+            "is_alias": None,
+            "checkpoint_execution_outcome": None,
+            "checkpoint_model_output_status": None,
+            "answer_parse_status": None,
+            "forced_answer": None,
+            "answer_valid": False,
+            "checkpoint_local_correct": None,
+            "confidence_parse_status": None,
+            "normalized_confidence": None,
+            "confidence_available": False,
+            "confidence_missing_reason": "ineligible_natural_failure",
+            "entropy_status": None,
+            "maximum_ad_probability": None,
+            "maximum_ad_probability_available": False,
+            "maximum_ad_probability_missing_reason": "ineligible_natural_failure",
+        }
+    if checkpoint is None:
+        return {
+            "requested_checkpoint_index": index,
+            "requested_fraction": fraction,
+            "checkpoint_id": expected_checkpoint_id,
+            "present": False,
+            "eligibility_status": "missing",
+            "is_alias": None,
+            "checkpoint_execution_outcome": None,
+            "checkpoint_model_output_status": None,
+            "answer_parse_status": None,
+            "forced_answer": None,
+            "answer_valid": False,
+            "checkpoint_local_correct": None,
+            "confidence_parse_status": None,
+            "normalized_confidence": None,
+            "confidence_available": False,
+            "confidence_missing_reason": "checkpoint_missing",
+            "entropy_status": None,
+            "maximum_ad_probability": None,
+            "maximum_ad_probability_available": False,
+            "maximum_ad_probability_missing_reason": "checkpoint_missing",
+        }
+
+    execution_complete = checkpoint["checkpoint_execution_outcome"] == "complete"
+    target_available = type(checkpoint["checkpoint_local_correct"]) is bool
+    confidence_available = (
+        execution_complete
+        and checkpoint["confidence_parse_status"] == "parsed"
+        and target_available
+    )
+    maximum_available = (
+        execution_complete
+        and checkpoint["entropy_status"] == "computed"
+        and target_available
+    )
+    if not execution_complete:
+        confidence_reason = "checkpoint_terminal_infrastructure_failure"
+        maximum_reason = "checkpoint_terminal_infrastructure_failure"
+    elif not target_available:
+        confidence_reason = "checkpoint_local_correctness_unavailable"
+        maximum_reason = "checkpoint_local_correctness_unavailable"
+    else:
+        confidence_reason = (
+            None if confidence_available else "checkpoint_confidence_not_parsed"
+        )
+        maximum_reason = (
+            None if maximum_available else "checkpoint_ad_probability_unavailable"
+        )
+
+    return {
+        "requested_checkpoint_index": index,
+        "requested_fraction": fraction,
+        "checkpoint_id": expected_checkpoint_id,
+        "present": True,
+        "eligibility_status": "eligible",
+        "is_alias": checkpoint["is_alias"],
+        "checkpoint_execution_outcome": checkpoint["checkpoint_execution_outcome"],
+        "checkpoint_model_output_status": checkpoint["checkpoint_model_output_status"],
+        "answer_parse_status": checkpoint["answer_parse_status"],
+        "forced_answer": checkpoint["forced_answer"],
+        "answer_valid": _checkpoint_answer_is_valid(checkpoint),
+        "checkpoint_local_correct": checkpoint["checkpoint_local_correct"],
+        "confidence_parse_status": checkpoint["confidence_parse_status"],
+        "normalized_confidence": (
+            checkpoint["normalized_confidence"] if confidence_available else None
+        ),
+        "confidence_available": confidence_available,
+        "confidence_missing_reason": confidence_reason,
+        "entropy_status": checkpoint["entropy_status"],
+        "maximum_ad_probability": (
+            checkpoint["maximum_ad_probability"] if maximum_available else None
+        ),
+        "maximum_ad_probability_available": maximum_available,
+        "maximum_ad_probability_missing_reason": maximum_reason,
+    }
+
+
+def _build_checkpoint_calibration(
+    natural: Mapping[str, Any], checkpoints: Mapping[int, Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    natural_failure = (
+        natural.get("natural_execution_outcome") == "terminal_infrastructure_failure"
+    )
+    expected_ids = natural.get("checkpoint_ids")
+    return [
+        _checkpoint_calibration_slot(
+            index=index,
+            expected_checkpoint_id=(
+                None if natural_failure else expected_ids[index]
+            ),
+            checkpoint=checkpoints.get(index),
+            natural_failure=natural_failure,
+        )
+        for index in range(11)
+    ]
+
+
 def _infrastructure_failure_row(natural: Mapping[str, Any]) -> dict[str, Any]:
     reason = "natural_terminal_infrastructure_failure"
     row = {field: natural.get(field) for field in _OUTPUT_NATURAL_FIELDS}
@@ -277,6 +576,7 @@ def _infrastructure_failure_row(natural: Mapping[str, Any]) -> dict[str, Any]:
             "stabilization_fraction": None,
             "stabilization_status": "unavailable",
             "stabilization_reason": reason,
+            "checkpoint_calibration": _build_checkpoint_calibration(natural, {}),
             "feature_missing_reasons": {
                 feature: reason for feature in PRIMARY_FEATURE_REGISTRY
             },
@@ -485,6 +785,9 @@ def extract_trajectory_features(
             "stabilization_fraction": stabilization,
             "stabilization_status": stabilization_status,
             "stabilization_reason": stabilization_reason,
+            "checkpoint_calibration": _build_checkpoint_calibration(
+                natural_row, checkpoints
+            ),
             "feature_missing_reasons": ordered_reasons,
         }
     )
