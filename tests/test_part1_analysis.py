@@ -1070,6 +1070,118 @@ def test_jointly_rehashed_summary_and_table_counts_still_bind_source_tables(
         validate_analysis_directory(output)
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        "event_switch",
+        "event_appearance",
+        "event_recovery",
+        "event_stabilization",
+        "within_mean_median",
+        "checkpoint_present",
+        "checkpoint_index",
+        "checkpoint_fraction",
+        "checkpoint_present_type",
+        "source_checkpoint_count",
+    ],
+)
+def test_coordinated_rehash_cannot_change_recomputable_source_semantics(
+    tmp_path: Path, case: str
+) -> None:
+    from part1_analysis import publish_analysis, validate_analysis_directory
+
+    source, _ = _fixture_source(tmp_path / case)
+    output, _ = publish_analysis(source, bootstrap_replicates=2)
+    summary_path = output / "analysis_summary.json"
+    summary = json.loads(summary_path.read_text())
+
+    if case.startswith("event_"):
+        table_row = summary["switching_stabilization_summaries"][0]
+        plot_row = summary["plot_series"]["switching_stabilization"][0]
+
+        def mutate_event(rows: list[dict[str, str]]) -> None:
+            row = rows[0]
+            if case == "event_switch":
+                row["switch_count_sum"] = str(int(row["switch_count_sum"]) + 1)
+                row["switch_count_mean"] = json.dumps(
+                    int(row["switch_count_sum"]) / int(row["switch_count_available"])
+                )
+            elif case == "event_appearance":
+                row["first_appearance_found"] = str(
+                    int(row["first_appearance_found"]) - 1
+                )
+                row["first_appearance_not_found"] = str(
+                    int(row["first_appearance_not_found"]) + 1
+                )
+            elif case == "event_recovery":
+                row["later_recovery_true"] = str(
+                    int(row["later_recovery_true"]) + 1
+                )
+                row["later_recovery_not_applicable"] = str(
+                    int(row["later_recovery_not_applicable"]) - 1
+                )
+            else:
+                row["stabilization_mean_fraction"] = json.dumps(
+                    float(row["stabilization_mean_fraction"]) + 0.1
+                )
+
+        _rewrite_csv(output / "trajectory_events.csv", mutate_event)
+        if case == "event_switch":
+            table_row["switch_count_sum"] += 1
+            table_row["switch_count_mean"] = (
+                table_row["switch_count_sum"] / table_row["switch_count_available"]
+            )
+            plot_row["switch_count_sum"] = table_row["switch_count_sum"]
+            plot_row["switch_count_mean"] = table_row["switch_count_mean"]
+        elif case == "event_appearance":
+            for row in (table_row, plot_row):
+                row["first_appearance_found"] -= 1
+                row["first_appearance_not_found"] += 1
+        elif case == "event_recovery":
+            for row in (table_row, plot_row):
+                row["later_recovery_true"] += 1
+                row["later_recovery_not_applicable"] -= 1
+        else:
+            for row in (table_row, plot_row):
+                row["stabilization_mean_fraction"] += 0.1
+    elif case == "within_mean_median":
+        _rewrite_csv(
+            output / "within_question_summary.csv",
+            lambda rows: [
+                rows[0].__setitem__(field, json.dumps(float(rows[0][field]) + 0.1))
+                for field in ("mean_paired_difference", "median_paired_difference")
+            ],
+        )
+        for field in ("mean_paired_difference", "median_paired_difference"):
+            summary["within_question_summaries"][0][field] += 0.1
+            summary["plot_series"]["within_question"][0][field] += 0.1
+    elif case == "source_checkpoint_count":
+        summary["source_checkpoint_row_count"] += 1
+    else:
+        def mutate_slots(rows: list[dict[str, str]]) -> None:
+            slots = json.loads(rows[0]["checkpoint_calibration"])
+            if case == "checkpoint_present":
+                slots[0]["present"] = False
+            elif case == "checkpoint_index":
+                slots[0]["requested_checkpoint_index"] = 1
+            elif case == "checkpoint_fraction":
+                slots[0]["requested_fraction"] = 0.2
+            else:
+                slots[0]["present"] = 1
+            rows[0]["checkpoint_calibration"] = json.dumps(
+                slots, sort_keys=True, separators=(",", ":")
+            )
+
+        _rewrite_csv(output / "trajectory_features.csv", mutate_slots)
+        if case == "checkpoint_present":
+            summary["source_checkpoint_row_count"] -= 1
+
+    _write_plain_json(summary_path, summary)
+    _rehash_analysis_directory(output, sync_table_sidecars=True)
+    with pytest.raises(ValueError, match="checkpoint|trajectory|within|event|source"):
+        validate_analysis_directory(output)
+
+
 def test_identity_is_relocation_invariant_and_sensitive_to_bootstrap_or_source(
     tmp_path: Path,
 ) -> None:
@@ -1158,8 +1270,10 @@ def test_prepublication_faults_leave_no_final_and_clean_own_stage(
     assert not list(analysis_root.glob(".development-r2.stage-*"))
 
 
-def test_postrename_fault_rolls_back_without_claiming_success(tmp_path: Path) -> None:
-    from part1_analysis import PublicationDurabilityError, publish_analysis
+def test_postrename_fault_preserves_final_as_indeterminate_without_rollback(
+    tmp_path: Path,
+) -> None:
+    from part1_analysis import PublicationStateIndeterminateError, publish_analysis
 
     source, _ = _fixture_source(tmp_path)
 
@@ -1167,10 +1281,10 @@ def test_postrename_fault_rolls_back_without_claiming_success(tmp_path: Path) ->
         if boundary == "after_exclusive_rename":
             raise OSError("injected post-rename durability failure")
 
-    with pytest.raises(PublicationDurabilityError, match="rolled back"):
+    with pytest.raises(PublicationStateIndeterminateError, match="preserv|indeterminate"):
         publish_analysis(source, bootstrap_replicates=2, fault_hook=fail)
     root = tmp_path / source.model_manifest["output_paths"]["analysis"]
-    assert not (root / "development-r2").exists()
+    assert (root / "development-r2").is_dir()
     assert not list(root.glob(".development-r2.stage-*"))
 
 
@@ -1304,7 +1418,7 @@ def test_final_substitution_after_descriptor_validation_is_rechecked_before_succ
     assert (root / "development-r2").is_dir()
 
 
-def test_final_substitution_before_rollback_is_preserved_and_not_moved(
+def test_final_substitution_on_postrename_failure_is_preserved_without_rollback(
     tmp_path: Path,
 ) -> None:
     from part1_analysis import PublicationStateIndeterminateError, publish_analysis
@@ -1319,7 +1433,7 @@ def test_final_substitution_before_rollback_is_preserved_and_not_moved(
             held = _replace_directory_with_copy(
                 root / "development-r2", "original-held"
             )
-            raise OSError("force rollback path")
+            raise OSError("force post-rename durability failure")
 
     with pytest.raises(PublicationStateIndeterminateError, match="rollback|inode"):
         publish_analysis(source, bootstrap_replicates=2, fault_hook=substitute_and_fail)
@@ -1328,29 +1442,49 @@ def test_final_substitution_before_rollback_is_preserved_and_not_moved(
     assert not list(root.glob(".development-r2.stage-*"))
 
 
-def test_rollback_name_substitution_is_preserved_and_indeterminate(
-    tmp_path: Path,
+def test_durability_failure_never_attempts_name_based_rollback_and_preserves_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from part1_analysis import PublicationStateIndeterminateError, publish_analysis
+    import part1_analysis as analysis
 
     source, _ = _fixture_source(tmp_path)
     root = tmp_path / source.model_manifest["output_paths"]["analysis"]
     held: Path | None = None
+    durability_armed = False
+    rename_calls = 0
+    original_fsync = analysis._fsync_directory_descriptor
+    original_rename = analysis._exclusive_rename_at
 
-    def fail_then_substitute(boundary: str) -> None:
-        nonlocal held
-        if boundary == "after_exclusive_rename":
-            raise OSError("force rollback")
-        if boundary == "after_rollback_rename":
-            stage = next(root.glob(".development-r2.stage-*"))
-            held = _replace_directory_with_copy(stage, "original-held")
+    def hook(boundary: str) -> None:
+        nonlocal durability_armed, held
+        if boundary == "published_final_validated":
+            durability_armed = True
+        if boundary == "durability_failure_preserved":
+            held = _replace_directory_with_copy(
+                root / "development-r2", "original-held"
+            )
 
-    with pytest.raises(PublicationStateIndeterminateError, match="rollback|inode"):
-        publish_analysis(source, bootstrap_replicates=2, fault_hook=fail_then_substitute)
+    def fail_durability(descriptor: int) -> None:
+        if durability_armed:
+            raise OSError("injected parent fsync failure")
+        original_fsync(descriptor)
+
+    def count_renames(*args: Any, **kwargs: Any) -> None:
+        nonlocal rename_calls
+        rename_calls += 1
+        original_rename(*args, **kwargs)
+
+    monkeypatch.setattr(analysis, "_fsync_directory_descriptor", fail_durability)
+    monkeypatch.setattr(analysis, "_exclusive_rename_at", count_renames)
+    with pytest.raises(
+        analysis.PublicationStateIndeterminateError,
+        match="preserv|durability|indeterminate",
+    ):
+        analysis.publish_analysis(source, bootstrap_replicates=2, fault_hook=hook)
+    assert rename_calls == 1
     assert held is not None and held.is_dir()
-    replacement = next(path for path in root.glob(".development-r2.stage-*") if path != held)
-    assert replacement.is_dir()
-    assert not (root / "development-r2").exists()
+    assert (root / "development-r2").is_dir()
+    assert not list(root.glob(".development-r2.stage-*"))
 
 
 def test_identical_existing_final_must_still_name_the_validated_open_inode(

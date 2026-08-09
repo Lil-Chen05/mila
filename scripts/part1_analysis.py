@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import stat
+from statistics import median
 import tempfile
 from typing import Any, Callable, Mapping, Sequence
 
@@ -44,7 +45,6 @@ from part1_coverage import (
 )
 from part1_manifests import load_manifest_bundle
 from part1_merge import (
-    PublicationDurabilityError,
     PublicationStateIndeterminateError,
     TABLE_FILENAMES as MERGE_TABLE_FILENAMES,
     _exclusive_rename_at,
@@ -412,6 +412,30 @@ TABLE_COLUMN_CONTRACTS = {
     table_name: _column_contract(table_name, columns)
     for table_name, (_filename, columns) in TABLE_SPECS.items()
 }
+CHECKPOINT_CALIBRATION_SLOT_FIELDS = frozenset(
+    {
+        "requested_checkpoint_index",
+        "requested_fraction",
+        "checkpoint_id",
+        "present",
+        "eligibility_status",
+        "is_alias",
+        "checkpoint_execution_outcome",
+        "checkpoint_model_output_status",
+        "answer_parse_status",
+        "forced_answer",
+        "answer_valid",
+        "checkpoint_local_correct",
+        "confidence_parse_status",
+        "normalized_confidence",
+        "confidence_available",
+        "confidence_missing_reason",
+        "entropy_status",
+        "maximum_ad_probability",
+        "maximum_ad_probability_available",
+        "maximum_ad_probability_missing_reason",
+    }
+)
 PLOT_FILENAMES = (
     "primary_auroc.png",
     "checkpoint_ece.png",
@@ -1657,6 +1681,34 @@ def _validate_table_semantics(
         for field, allowed in allowed_enums.items():
             if row[field] not in allowed:
                 raise ValueError(f"analysis trajectory enum differs: {field}")
+        slots = row["checkpoint_calibration"]
+        if type(slots) is not list or len(slots) != len(FIXED_CHECKPOINT_FRACTIONS):
+            raise ValueError(
+                "analysis trajectory checkpoint calibration must contain exactly "
+                "11 ordered slots"
+            )
+        for requested_index, (slot, requested_fraction) in enumerate(
+            zip(slots, FIXED_CHECKPOINT_FRACTIONS, strict=True)
+        ):
+            if type(slot) is not dict or set(slot) != CHECKPOINT_CALIBRATION_SLOT_FIELDS:
+                raise ValueError(
+                    "analysis trajectory checkpoint calibration slot fields differ"
+                )
+            if (
+                type(slot["requested_checkpoint_index"]) is not int
+                or slot["requested_checkpoint_index"] != requested_index
+                or type(slot["requested_fraction"]) is not float
+                or slot["requested_fraction"] != requested_fraction
+                or type(slot["present"]) is not bool
+                or slot["eligibility_status"]
+                not in {"eligible", "missing", "ineligible_natural_failure"}
+                or (slot["present"] is True)
+                != (slot["eligibility_status"] == "eligible")
+            ):
+                raise ValueError(
+                    "analysis trajectory checkpoint calibration slot identity/types "
+                    "differ"
+                )
 
     events = tables["trajectory_events"]
     _require_exact_sequence(
@@ -1673,6 +1725,12 @@ def _validate_table_semantics(
     ]
     if [row["trajectory_count"] for row in events] != expected_event_counts:
         raise ValueError("analysis trajectory event counts differ from source trajectories")
+    expected_events = summarize_trajectory_events(features)
+    if not _same_json(events, expected_events):
+        raise ValueError(
+            "analysis trajectory event rows differ from authoritative source "
+            "trajectory recomputation"
+        )
     for row in events:
         total = row["trajectory_count"]
         count_groups = (
@@ -1714,6 +1772,38 @@ def _validate_table_semantics(
         raise ValueError(
             "analysis within-question summary count differs from distribution"
         )
+    distribution_by_feature = {
+        feature: [
+            row["paired_difference"]
+            for row in distribution
+            if row["feature"] == feature
+        ]
+        for feature in FIXED_PRIMARY_AUROC_FEATURE_REGISTRY
+    }
+    for row in within_summary:
+        differences = distribution_by_feature[row["feature"]]
+        expected_mean = (
+            None if not differences else float(sum(differences) / len(differences))
+        )
+        expected_median = None if not differences else float(median(differences))
+        for field, expected in (
+            ("mean_paired_difference", expected_mean),
+            ("median_paired_difference", expected_median),
+        ):
+            observed = row[field]
+            if expected is None:
+                matches = observed is None
+            else:
+                # CSV round-tripping is deterministic but may move the final binary
+                # digit, so equality uses only a narrow serialization tolerance.
+                matches = observed is not None and math.isclose(
+                    observed, expected, rel_tol=0.0, abs_tol=1e-15
+                )
+            if not matches:
+                raise ValueError(
+                    "analysis within-question summary differs from distribution: "
+                    f"{field}"
+                )
 
 
 SUMMARY_FIELDS = frozenset(
@@ -1744,6 +1834,16 @@ def _validate_summary_semantics(
         raise ValueError("analysis summary source counts have wrong JSON types/values")
     if summary["source_natural_row_count"] != len(tables["trajectory_features"]) or summary["trajectory_row_count"] != len(tables["trajectory_features"]):
         raise ValueError("analysis summary trajectory/source counts differ")
+    expected_checkpoint_count = sum(
+        slot["present"] is True
+        for row in tables["trajectory_features"]
+        for slot in row["checkpoint_calibration"]
+    )
+    if summary["source_checkpoint_row_count"] != expected_checkpoint_count:
+        raise ValueError(
+            "analysis summary source checkpoint count differs from present "
+            "trajectory checkpoint slots"
+        )
     if summary["paper_analysis_ready"] is not True or summary["terminal_infrastructure_failure_count"] != 0 or type(summary["terminal_infrastructure_failure_count"]) is not int or summary["repetition_filter_applied"] is not False or summary["successful_abnormal_output_policy"] != "preserved":
         raise ValueError("analysis summary fixed readiness/policy contract differs")
     expected_scope = "production" if manifest["bootstrap_replicates"] in PRODUCTION_BOOTSTRAP_REPLICATES else FIXTURE_EVIDENCE_LIMITS
@@ -2093,60 +2193,31 @@ def publish_analysis(
     renamed = False
     retain_stage = False
 
-    def rollback_original(durability_error: BaseException) -> None:
-        nonlocal renamed, retain_stage
+    def preserve_durability_failure(durability_error: BaseException) -> None:
+        hook_error: BaseException | None = None
         try:
-            final_status = _stat_directory_name_at(
-                parent_descriptor, target.name, label="analysis rollback final"
+            hook("durability_failure_preserved")
+        except BaseException as exc:
+            hook_error = exc
+        try:
+            observed = os.stat(
+                target.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
             )
-        except PublicationStateIndeterminateError as identity_error:
-            retain_stage = True
-            raise PublicationStateIndeterminateError(
-                "analysis durability failed but the final pathname could not be "
-                f"verified for rollback: target={target}; error={durability_error}; "
-                f"identity={identity_error}"
-            ) from durability_error
-        if not _same_inode(original_stage, final_status):
-            retain_stage = True
-            raise PublicationStateIndeterminateError(
-                "analysis durability failed and rollback refused a substituted final "
-                f"inode: target={target}; expected=({original_stage.st_dev},"
-                f"{original_stage.st_ino}); observed=({final_status.st_dev},"
-                f"{final_status.st_ino}); error={durability_error}"
-            ) from durability_error
-        try:
-            _exclusive_rename_at(parent_descriptor, target.name, stage.name)
-        except BaseException as rollback_error:
-            retain_stage = True
-            raise PublicationStateIndeterminateError(
-                "analysis durability failed and exclusive rollback failed after "
-                f"verifying the original inode: target={target}; stage={stage}; "
-                f"error={durability_error}; rollback={rollback_error}"
-            ) from durability_error
-        renamed = False
-        hook("after_rollback_rename")
-        rollback_status = _stat_directory_name_at(
-            parent_descriptor, stage.name, label="analysis rollback stage"
-        )
-        if not _same_inode(original_stage, rollback_status):
-            retain_stage = True
-            raise PublicationStateIndeterminateError(
-                "analysis rollback pathname was substituted after rename; refusing "
-                f"cleanup: stage={stage}; expected=({original_stage.st_dev},"
-                f"{original_stage.st_ino}); observed=({rollback_status.st_dev},"
-                f"{rollback_status.st_ino})"
-            ) from durability_error
-        try:
-            _fsync_directory_descriptor(parent_descriptor)
-        except BaseException as rollback_fsync_error:
-            retain_stage = True
-            raise PublicationStateIndeterminateError(
-                "analysis rollback restored the original stage inode but parent "
-                f"durability is indeterminate: stage={stage}; "
-                f"rollback_fsync={rollback_fsync_error}"
-            ) from durability_error
-        raise PublicationDurabilityError(
-            f"analysis publication durability failed and was rolled back: {target}"
+            evidence = (
+                f"observed_mode={oct(observed.st_mode)}; "
+                f"observed_inode=({observed.st_dev},{observed.st_ino})"
+            )
+        except BaseException as evidence_error:
+            evidence = f"observed_path_error={evidence_error}"
+        raise PublicationStateIndeterminateError(
+            "analysis durability failed after exclusive publication; no name-based "
+            "rollback was attempted, and all current paths were preserved for "
+            f"operator inspection: target={target}; stage={stage}; "
+            f"expected_inode=({original_stage.st_dev},{original_stage.st_ino}); "
+            f"{evidence}; durability_error={durability_error}; "
+            f"evidence_hook_error={hook_error}"
         ) from durability_error
 
     try:
@@ -2203,7 +2274,7 @@ def publish_analysis(
         try:
             hook("after_exclusive_rename")
         except BaseException as durability_error:
-            rollback_original(durability_error)
+            preserve_durability_failure(durability_error)
         final_status = _stat_directory_name_at(
             parent_descriptor, target.name, label="published analysis"
         )
@@ -2251,7 +2322,7 @@ def publish_analysis(
         try:
             _fsync_directory_descriptor(parent_descriptor)
         except BaseException as durability_error:
-            rollback_original(durability_error)
+            preserve_durability_failure(durability_error)
         durable_status = _stat_directory_name_at(
             parent_descriptor, target.name, label="durable published analysis"
         )
