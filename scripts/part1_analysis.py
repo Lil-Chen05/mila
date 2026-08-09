@@ -72,6 +72,7 @@ ANALYSIS_FORMAT_VERSION = "part1-analysis-artifacts-v1"
 ANALYSIS_IDENTITY_VERSION = "part1-analysis-identity-v1"
 ANALYSIS_MANIFEST_HASH_VERSION = "part1-analysis-manifest-hash-v1"
 CSV_SERIALIZATION_VERSION = "part1-analysis-csv-v1"
+CSV_TYPE_CONTRACT_VERSION = "part1-analysis-csv-types-v1"
 PLOT_VERSION = "part1-analysis-plots-v1"
 BOOTSTRAP_SEED = 42
 PRODUCTION_BOOTSTRAP_REPLICATES = frozenset((1_000, 5_000))
@@ -265,6 +266,152 @@ TABLE_SPECS: dict[str, tuple[str, tuple[str, ...]]] = {
         WITHIN_DISTRIBUTION_COLUMNS,
     ),
 }
+NESTED_COLUMNS_BY_TABLE: dict[str, tuple[str, ...]] = {
+    "trajectory_features": ("checkpoint_calibration", "feature_missing_reasons"),
+}
+BOOLEAN_COLUMNS = frozenset(
+    {
+        "checkpoint_eligible",
+        "natural_correct",
+        "left_correct_answer",
+        "later_recovered_correct_answer",
+        "forced_endpoint_agrees_with_natural",
+        "interval_valid",
+        "is_main_checkpoint",
+        "upper_inclusive",
+    }
+)
+INTEGER_COLUMNS = frozenset(
+    {
+        "sample_index",
+        "run_id",
+        "answer_switch_count",
+        "negative_answer_switch_count",
+        "valid_transition_count",
+        "trajectory_count",
+        "switch_count_available",
+        "switch_count_unavailable",
+        "switch_count_sum",
+        "first_appearance_found",
+        "first_appearance_not_found",
+        "first_appearance_unavailable",
+        "left_correct_true",
+        "left_correct_false",
+        "left_correct_unavailable",
+        "later_recovery_true",
+        "later_recovery_false",
+        "later_recovery_not_applicable",
+        "later_recovery_unavailable",
+        "endpoint_agreement_true",
+        "endpoint_agreement_false",
+        "endpoint_agreement_unavailable",
+        "stabilization_computed",
+        "stabilization_unavailable",
+        "total_candidate_rows",
+        "target_missing_count",
+        "predictor_missing_count",
+        "sample_size",
+        "positive_count",
+        "negative_count",
+        "requested_replicates",
+        "valid_replicates",
+        "invalid_replicates",
+        "bin_index",
+        "count",
+        "qualifying_question_count",
+        "correct_run_count",
+        "incorrect_run_count",
+    }
+)
+FLOAT_COLUMNS = frozenset(
+    {
+        *FIXED_PRIMARY_AUROC_FEATURE_REGISTRY,
+        "first_natural_answer_appearance_fraction",
+        "stabilization_fraction",
+        "switch_count_mean",
+        "first_appearance_mean_fraction",
+        "stabilization_mean_fraction",
+        "point_estimate",
+        "valid_fraction",
+        "confidence_level",
+        "lower",
+        "upper",
+        "requested_fraction",
+        "bin_lower",
+        "bin_upper",
+        "mean_confidence",
+        "empirical_accuracy",
+        "absolute_gap",
+        "weighted_ece_contribution",
+        "mean_paired_difference",
+        "median_paired_difference",
+        "correct_run_mean",
+        "incorrect_run_mean",
+        "paired_difference",
+    }
+)
+
+
+def _column_contract(table_name: str, columns: Sequence[str]) -> dict[str, Any]:
+    nullable_by_table = {
+        "trajectory_features": {
+            "natural_answer",
+            "natural_correct",
+            *FIXED_PRIMARY_AUROC_FEATURE_REGISTRY,
+            "answer_switch_count",
+            "valid_transition_count",
+            "transition_evaluability_reason",
+            "first_natural_answer_appearance_fraction",
+            "first_natural_answer_appearance_reason",
+            "left_correct_answer",
+            "left_correct_answer_reason",
+            "later_recovered_correct_answer",
+            "later_recovered_correct_answer_reason",
+            "forced_endpoint_agrees_with_natural",
+            "forced_endpoint_agrees_with_natural_reason",
+            "stabilization_fraction",
+            "stabilization_reason",
+        },
+        "trajectory_events": {
+            "subject",
+            "switch_count_mean",
+            "first_appearance_mean_fraction",
+            "stabilization_mean_fraction",
+        },
+        "primary_auroc": {"subject", "point_estimate", "point_undefined_reason", "lower", "upper", "interval_reason", "warning"},
+        "secondary_checkpoint_auroc": {"subject", "point_estimate", "point_undefined_reason", "lower", "upper", "interval_reason", "warning"},
+        "calibration_metrics": {"subject", "point_estimate", "point_undefined_reason", "lower", "upper", "interval_reason", "warning", "requested_fraction", "is_main_checkpoint"},
+        "reliability_bins": {"subject", "requested_fraction", "is_main_checkpoint", "mean_confidence", "empirical_accuracy", "absolute_gap"},
+        "within_question_summary": {"mean_paired_difference", "median_paired_difference", "lower", "upper", "interval_reason", "warning"},
+        "within_question_distribution": set(),
+    }
+    nested = set(NESTED_COLUMNS_BY_TABLE.get(table_name, ()))
+    specs: list[dict[str, Any]] = []
+    for column in columns:
+        if column in nested:
+            value_type = "json_array" if column == "checkpoint_calibration" else "json_object"
+        elif column in BOOLEAN_COLUMNS:
+            value_type = "boolean"
+        elif column in INTEGER_COLUMNS:
+            value_type = "integer"
+        elif column in FLOAT_COLUMNS:
+            value_type = "finite_float"
+        else:
+            value_type = "string"
+        specs.append(
+            {
+                "name": column,
+                "type": value_type,
+                "nullable": column in nullable_by_table[table_name],
+            }
+        )
+    return {"version": CSV_TYPE_CONTRACT_VERSION, "columns": specs}
+
+
+TABLE_COLUMN_CONTRACTS = {
+    table_name: _column_contract(table_name, columns)
+    for table_name, (_filename, columns) in TABLE_SPECS.items()
+}
 PLOT_FILENAMES = (
     "primary_auroc.png",
     "checkpoint_ece.png",
@@ -432,6 +579,7 @@ def _analysis_identity_payload(
         "bootstrap_mode": bootstrap_mode,
         "analysis_format_version": ANALYSIS_FORMAT_VERSION,
         "csv_serialization_version": CSV_SERIALIZATION_VERSION,
+        "csv_type_contract_version": CSV_TYPE_CONTRACT_VERSION,
         "plot_version": PLOT_VERSION,
     }
 
@@ -984,6 +1132,7 @@ def validate_analysis_manifest(manifest: Mapping[str, Any]) -> None:
         "bootstrap_mode",
         "analysis_format_version",
         "csv_serialization_version",
+        "csv_type_contract_version",
         "plot_version",
         "paper_analysis_ready",
         "terminal_infrastructure_failure_count",
@@ -1000,6 +1149,7 @@ def validate_analysis_manifest(manifest: Mapping[str, Any]) -> None:
         or manifest["analysis_contract_version"] != "part1-analysis-v1"
         or manifest["analysis_format_version"] != ANALYSIS_FORMAT_VERSION
         or manifest["csv_serialization_version"] != CSV_SERIALIZATION_VERSION
+        or manifest["csv_type_contract_version"] != CSV_TYPE_CONTRACT_VERSION
         or manifest["plot_version"] != PLOT_VERSION
         or type(manifest["bootstrap_seed"]) is not int
         or manifest["bootstrap_seed"] != BOOTSTRAP_SEED
@@ -1051,6 +1201,7 @@ def validate_analysis_manifest(manifest: Mapping[str, Any]) -> None:
             "bootstrap_mode",
             "analysis_format_version",
             "csv_serialization_version",
+            "csv_type_contract_version",
             "plot_version",
         )
     }
@@ -1095,9 +1246,6 @@ def _write_stage(
 ) -> dict[str, Any]:
     _write_fsynced(stage / "analysis_summary.json", _plain_json_bytes(computation.summary))
     tables: dict[str, str] = {}
-    nested_columns_by_table = {
-        "trajectory_features": ["checkpoint_calibration", "feature_missing_reasons"]
-    }
     for table_name, (filename, columns) in TABLE_SPECS.items():
         rows = computation.tables[table_name]
         data = _csv_bytes(rows, columns)
@@ -1113,7 +1261,8 @@ def _write_stage(
             "table_byte_size": len(data),
             "row_count": len(rows),
             "ordered_columns": list(columns),
-            "nested_json_columns": nested_columns_by_table.get(table_name, []),
+            "nested_json_columns": list(NESTED_COLUMNS_BY_TABLE.get(table_name, ())),
+            "column_type_contract": TABLE_COLUMN_CONTRACTS[table_name],
             "source_provenance": _source_provenance(source),
             "analysis_id": computation.analysis_id,
             "analysis_contract_version": source.analysis_config[
@@ -1201,6 +1350,433 @@ def _json_object(data: bytes, *, label: str) -> dict[str, Any]:
     return value
 
 
+def _decode_csv_cell(cell: str, spec: Mapping[str, Any], *, location: str) -> Any:
+    if cell == "":
+        if spec["nullable"] is True:
+            return None
+        raise ValueError(f"analysis CSV has null in nonnullable cell: {location}")
+    value_type = spec["type"]
+    if value_type == "string":
+        return cell
+    if value_type == "boolean":
+        if cell not in {"true", "false"}:
+            raise ValueError(f"analysis CSV boolean cell is invalid: {location}")
+        return cell == "true"
+    if value_type == "integer":
+        if cell.startswith("+") or (cell.startswith("0") and cell != "0") or (
+            cell.startswith("-0") and cell != "0"
+        ):
+            raise ValueError(f"analysis CSV integer cell is noncanonical: {location}")
+        try:
+            value = int(cell)
+        except ValueError as exc:
+            raise ValueError(f"analysis CSV integer cell is invalid: {location}") from exc
+        if str(value) != cell:
+            raise ValueError(f"analysis CSV integer cell is noncanonical: {location}")
+        return value
+    if value_type == "finite_float":
+        try:
+            value = json.loads(cell)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"analysis CSV float cell is invalid: {location}") from exc
+        if type(value) is not float or not math.isfinite(value) or json.dumps(
+            value, allow_nan=False, separators=(",", ":")
+        ) != cell:
+            raise ValueError(f"analysis CSV float cell is noncanonical: {location}")
+        return value
+    try:
+        value = json.loads(cell)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"analysis nested JSON cell is invalid: {location}") from exc
+    expected_type = list if value_type == "json_array" else dict
+    if type(value) is not expected_type or _plain_json_bytes(value).decode("utf-8") != cell:
+        raise ValueError(f"analysis nested JSON cell has wrong type/bytes: {location}")
+    return value
+
+
+def _decode_csv_rows(
+    data: bytes, *, table_name: str, filename: str, columns: Sequence[str]
+) -> list[dict[str, Any]]:
+    if data.startswith(b"#"):
+        raise ValueError(f"analysis CSV contains a provenance comment: {filename}")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"analysis CSV is not UTF-8: {filename}") from exc
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    raw_rows = list(reader)
+    if list(reader.fieldnames or ()) != list(columns):
+        raise ValueError(f"analysis CSV columns differ: {filename}")
+    if data.count(b"\n") != len(raw_rows) + 1:
+        raise ValueError(f"analysis CSV framing differs: {filename}")
+    contract = TABLE_COLUMN_CONTRACTS[table_name]
+    specs = contract["columns"]
+    return [
+        {
+            column: _decode_csv_cell(
+                raw[column], specs[index], location=f"{filename}:{row_index}:{column}"
+            )
+            for index, column in enumerate(columns)
+        }
+        for row_index, raw in enumerate(raw_rows)
+    ]
+
+
+def _group_order(*, include_macro: bool) -> list[tuple[str, str | None]]:
+    output = [("pooled", None), *[("subject", subject) for subject in FIXED_SUBJECTS]]
+    if include_macro:
+        output.append(("macro", None))
+    return output
+
+
+def _require_exact_sequence(
+    observed: Sequence[Any], expected: Sequence[Any], *, label: str
+) -> None:
+    if not _same_json(list(observed), list(expected)):
+        raise ValueError(f"analysis {label} row order/cardinality/key contract differs")
+
+
+def _validate_interval_counts(row: Mapping[str, Any], *, label: str) -> None:
+    nonnegative = (
+        "total_candidate_rows",
+        "target_missing_count",
+        "predictor_missing_count",
+        "sample_size",
+        "positive_count",
+        "negative_count",
+        "requested_replicates",
+        "valid_replicates",
+        "invalid_replicates",
+    )
+    if any(row.get(field, 0) < 0 for field in nonnegative if field in row):
+        raise ValueError(f"analysis {label} contains a negative count")
+    if "positive_count" in row and row["positive_count"] + row["negative_count"] != row["sample_size"]:
+        raise ValueError(f"analysis {label} target counts do not sum to sample size")
+    if row["valid_replicates"] + row["invalid_replicates"] != row["requested_replicates"]:
+        raise ValueError(f"analysis {label} bootstrap counts do not sum")
+    expected_fraction = row["valid_replicates"] / row["requested_replicates"]
+    if not math.isclose(row["valid_fraction"], expected_fraction, rel_tol=0.0, abs_tol=1e-15):
+        raise ValueError(f"analysis {label} valid bootstrap fraction differs")
+    if row["confidence_level"] != 0.95 or row["percentile_method"] != "linear":
+        raise ValueError(f"analysis {label} interval method differs")
+    if "point_estimate_status" in row and row["point_estimate_status"] not in {
+        "defined",
+        "undefined",
+    }:
+        raise ValueError(f"analysis {label} point-estimate status enum differs")
+    if row.get("point_undefined_reason") not in {
+        None,
+        "incomplete_subject_macro",
+        "no_eligible_observations",
+        "single_target_class",
+    }:
+        raise ValueError(f"analysis {label} point undefined-reason enum differs")
+    if row.get("interval_reason") not in {
+        None,
+        "insufficient_valid_bootstrap_replicates",
+    } or row.get("warning") not in {
+        None,
+        "insufficient_valid_bootstrap_replicates",
+    }:
+        raise ValueError(f"analysis {label} interval status enum differs")
+    defined = row.get("point_estimate_status", "defined") == "defined"
+    if "point_estimate" in row and defined != (row["point_estimate"] is not None):
+        raise ValueError(f"analysis {label} point-estimate status differs")
+    if row["interval_valid"] is True:
+        if row["lower"] is None or row["upper"] is None or row["lower"] > row["upper"]:
+            raise ValueError(f"analysis {label} valid interval bounds differ")
+    elif row["lower"] is not None or row["upper"] is not None:
+        raise ValueError(f"analysis {label} invalid interval has bounds")
+
+
+def _validate_table_semantics(
+    tables: Mapping[str, Sequence[Mapping[str, Any]]],
+    manifest: Mapping[str, Any],
+) -> None:
+    groups = _group_order(include_macro=True)
+    primary = tables["primary_auroc"]
+    expected_primary = [
+        (feature, feature, grouping, subject)
+        for feature in FIXED_PRIMARY_AUROC_FEATURE_REGISTRY
+        for grouping, subject in groups
+    ]
+    _require_exact_sequence(
+        [(row["feature"], row["predictor"], row["grouping"], row["subject"]) for row in primary],
+        expected_primary,
+        label="primary AUROC",
+    )
+    for row in primary:
+        if row["analysis_label"] != "primary_auroc" or row["target"] != "natural_correct" or row["cohort_definition"] != "boolean_target_and_finite_predictor":
+            raise ValueError("analysis primary AUROC fixed scientific contract differs")
+        _validate_interval_counts(row, label="primary AUROC")
+
+    checkpoint_predictors = (
+        "checkpoint_normalized_confidence",
+        "checkpoint_maximum_ad_probability",
+    )
+    secondary = tables["secondary_checkpoint_auroc"]
+    expected_secondary = [
+        (predictor, predictor, fraction, fraction in MAIN_CHECKPOINT_FRACTIONS, grouping, subject)
+        for fraction in FIXED_CHECKPOINT_FRACTIONS
+        for predictor in checkpoint_predictors
+        for grouping, subject in groups
+    ]
+    _require_exact_sequence(
+        [(row["feature"], row["predictor"], row["requested_fraction"], row["is_main_checkpoint"], row["grouping"], row["subject"]) for row in secondary],
+        expected_secondary,
+        label="secondary checkpoint AUROC",
+    )
+    for row in secondary:
+        if row["analysis_label"] != "secondary_checkpoint_local_auroc" or row["target"] != "checkpoint_local_correct" or row["cohort_definition"] != "boolean_target_and_finite_predictor":
+            raise ValueError("analysis secondary AUROC fixed scientific contract differs")
+        _validate_interval_counts(row, label="secondary checkpoint AUROC")
+
+    calibration = tables["calibration_metrics"]
+    expected_calibration = [
+        ("natural_confidence", "natural_calibration", "natural_verbalized_confidence", "natural_verbalized_confidence", "natural_correct", None, None, grouping, subject)
+        for grouping, subject in groups
+    ] + [
+        (family, "checkpoint_calibration", predictor, predictor, "checkpoint_local_correct", fraction, fraction in MAIN_CHECKPOINT_FRACTIONS, grouping, subject)
+        for fraction in FIXED_CHECKPOINT_FRACTIONS
+        for family, predictor in zip(("checkpoint_confidence", "maximum_ad_probability"), checkpoint_predictors, strict=True)
+        for grouping, subject in groups
+    ]
+    _require_exact_sequence(
+        [(row["calibration_family"], row["analysis_label"], row["feature"], row["predictor"], row["target"], row["requested_fraction"], row["is_main_checkpoint"], row["grouping"], row["subject"]) for row in calibration],
+        expected_calibration,
+        label="calibration metrics",
+    )
+    for row in calibration:
+        if row["cohort_definition"] != "boolean_target_and_finite_predictor":
+            raise ValueError("analysis calibration cohort differs")
+        _validate_interval_counts(row, label="calibration")
+
+    reliability = tables["reliability_bins"]
+    reliability_groups = _group_order(include_macro=False)
+    families = [
+        ("natural_confidence", "natural_calibration", "natural_verbalized_confidence", "natural_verbalized_confidence", "natural_correct", None, None),
+        *[
+            (family, "checkpoint_calibration", predictor, predictor, "checkpoint_local_correct", fraction, fraction in MAIN_CHECKPOINT_FRACTIONS)
+            for fraction in FIXED_CHECKPOINT_FRACTIONS
+            for family, predictor in zip(("checkpoint_confidence", "maximum_ad_probability"), checkpoint_predictors, strict=True)
+        ],
+    ]
+    expected_reliability = [
+        (*family, grouping, subject, bin_index)
+        for family in families
+        for grouping, subject in reliability_groups
+        for bin_index in range(10)
+    ]
+    _require_exact_sequence(
+        [(row["calibration_family"], row["analysis_label"], row["feature"], row["predictor"], row["target"], row["requested_fraction"], row["is_main_checkpoint"], row["grouping"], row["subject"], row["bin_index"]) for row in reliability],
+        expected_reliability,
+        label="reliability bins",
+    )
+    for row in reliability:
+        index = row["bin_index"]
+        if row["cohort_definition"] != "boolean_target_and_finite_predictor" or row["count"] < 0 or row["bin_lower"] != index / 10 or row["bin_upper"] != (index + 1) / 10 or row["upper_inclusive"] is (index != 9):
+            raise ValueError("analysis reliability bin contract differs")
+        if row["count"] == 0:
+            if any(row[field] is not None for field in ("mean_confidence", "empirical_accuracy", "absolute_gap")) or row["weighted_ece_contribution"] != 0.0:
+                raise ValueError("analysis empty reliability bin contract differs")
+        else:
+            if any(row[field] is None or not 0.0 <= row[field] <= 1.0 for field in ("mean_confidence", "empirical_accuracy", "absolute_gap")):
+                raise ValueError("analysis nonempty reliability bin values differ")
+            if not math.isclose(row["absolute_gap"], abs(row["mean_confidence"] - row["empirical_accuracy"]), rel_tol=0.0, abs_tol=1e-15):
+                raise ValueError("analysis reliability absolute gap differs")
+    calibration_by_key = {
+        (
+            row["calibration_family"],
+            row["requested_fraction"],
+            row["grouping"],
+            row["subject"],
+        ): row
+        for row in calibration
+        if row["grouping"] != "macro"
+    }
+    for offset in range(0, len(reliability), 10):
+        bins = reliability[offset : offset + 10]
+        total = sum(row["count"] for row in bins)
+        for row in bins:
+            expected_contribution = (
+                0.0
+                if total == 0 or row["count"] == 0
+                else row["absolute_gap"] * row["count"] / total
+            )
+            if not math.isclose(
+                row["weighted_ece_contribution"],
+                expected_contribution,
+                rel_tol=0.0,
+                abs_tol=1e-15,
+            ):
+                raise ValueError("analysis reliability weighted contribution differs")
+        key = (
+            bins[0]["calibration_family"],
+            bins[0]["requested_fraction"],
+            bins[0]["grouping"],
+            bins[0]["subject"],
+        )
+        metric = calibration_by_key[key]["point_estimate"]
+        contribution_sum = sum(row["weighted_ece_contribution"] for row in bins)
+        if metric is None:
+            if contribution_sum != 0.0:
+                raise ValueError("analysis undefined calibration has nonzero reliability")
+        elif not math.isclose(
+            contribution_sum, metric, rel_tol=0.0, abs_tol=1e-15
+        ):
+            raise ValueError("analysis reliability bins do not sum to calibration ECE")
+
+    features = tables["trajectory_features"]
+    keys = [(row["sample_index"], row["run_id"], row["raw_record_id"]) for row in features]
+    if keys != sorted(keys) or len({(row["question_id"], row["run_id"]) for row in features}) != len(features):
+        raise ValueError("analysis trajectory key order or uniqueness differs")
+    allowed_enums = {
+        "natural_execution_outcome": {"complete", "terminal_infrastructure_failure"},
+        "stop_reason": {"eos", "max_new_tokens", "stopping_criterion", "error", "other"},
+        "reasoning_status": {"closed", "missing_close", "no_reasoning", "malformed"},
+        "answer_parse_status": {"parsed", "missing", "malformed", "out_of_domain"},
+        "confidence_parse_status": {"parsed", "missing", "malformed", "out_of_range"},
+        "transition_evaluability_status": {"evaluated", "unavailable"},
+        "first_natural_answer_appearance_status": {"found", "not_found", "unavailable"},
+        "left_correct_answer_status": {"evaluated", "unavailable"},
+        "later_recovered_correct_answer_status": {"evaluated", "not_applicable", "unavailable"},
+        "forced_endpoint_agrees_with_natural_status": {"evaluated", "unavailable"},
+        "stabilization_status": {"computed", "unavailable"},
+    }
+    for row in features:
+        if (
+            row["study_id"] != manifest["study_id"]
+            or row["model_run_id"] != manifest["model_run_id"]
+            or row["model_run_manifest_hash"]
+            != manifest["model_run_manifest_hash"]
+            or row["question_manifest_hash"] != manifest["question_manifest_hash"]
+            or row["subject"] not in FIXED_SUBJECTS
+            or row["natural_answer"] not in {None, "A", "B", "C", "D"}
+        ):
+            raise ValueError("analysis trajectory provenance/enum contract differs")
+        for field, allowed in allowed_enums.items():
+            if row[field] not in allowed:
+                raise ValueError(f"analysis trajectory enum differs: {field}")
+
+    events = tables["trajectory_events"]
+    _require_exact_sequence(
+        [(row["grouping"], row["subject"]) for row in events],
+        _group_order(include_macro=False),
+        label="trajectory event",
+    )
+    expected_event_counts = [
+        len(features),
+        *[
+            sum(row["subject"] == subject for row in features)
+            for subject in FIXED_SUBJECTS
+        ],
+    ]
+    if [row["trajectory_count"] for row in events] != expected_event_counts:
+        raise ValueError("analysis trajectory event counts differ from source trajectories")
+    for row in events:
+        total = row["trajectory_count"]
+        count_groups = (
+            ("switch_count_available", "switch_count_unavailable"),
+            ("first_appearance_found", "first_appearance_not_found", "first_appearance_unavailable"),
+            ("left_correct_true", "left_correct_false", "left_correct_unavailable"),
+            ("later_recovery_true", "later_recovery_false", "later_recovery_not_applicable", "later_recovery_unavailable"),
+            ("endpoint_agreement_true", "endpoint_agreement_false", "endpoint_agreement_unavailable"),
+            ("stabilization_computed", "stabilization_unavailable"),
+        )
+        if total < 0 or any(row[field] < 0 for group in count_groups for field in group) or any(sum(row[field] for field in group) != total for group in count_groups):
+            raise ValueError("analysis trajectory event count arithmetic differs")
+
+    within_summary = tables["within_question_summary"]
+    _require_exact_sequence(
+        [row["feature"] for row in within_summary],
+        list(FIXED_PRIMARY_AUROC_FEATURE_REGISTRY),
+        label="within-question summary",
+    )
+    for row in within_summary:
+        if row["analysis_label"] != "within_question_paired_difference" or row["target"] != "natural_correct" or row["cohort_definition"] != "mixed_boolean_correctness_and_finite_feature_on_both_sides" or row["qualifying_question_count"] < 0:
+            raise ValueError("analysis within-question summary contract differs")
+        _validate_interval_counts(row, label="within-question summary")
+    distribution = tables["within_question_distribution"]
+    distribution_keys = [(row["feature"], row["subject"], row["question_id"]) for row in distribution]
+    if len(set(distribution_keys)) != len(distribution_keys) or distribution_keys != sorted(distribution_keys, key=lambda key: (list(FIXED_PRIMARY_AUROC_FEATURE_REGISTRY).index(key[0]), key[1], key[2])):
+        raise ValueError("analysis within-question distribution key contract differs")
+    for row in distribution:
+        if row["analysis_label"] != "within_question_paired_difference" or row["study_id"] != manifest["study_id"] or row["model_run_id"] != manifest["model_run_id"] or row["target"] != "natural_correct" or row["feature"] not in FIXED_PRIMARY_AUROC_FEATURE_REGISTRY or row["subject"] not in FIXED_SUBJECTS or row["correct_run_count"] <= 0 or row["incorrect_run_count"] <= 0 or not math.isclose(row["paired_difference"], row["correct_run_mean"] - row["incorrect_run_mean"], rel_tol=0.0, abs_tol=1e-15):
+            raise ValueError("analysis within-question distribution contract differs")
+    distribution_counts = {
+        feature: sum(row["feature"] == feature for row in distribution)
+        for feature in FIXED_PRIMARY_AUROC_FEATURE_REGISTRY
+    }
+    if any(
+        row["qualifying_question_count"] != distribution_counts[row["feature"]]
+        for row in within_summary
+    ):
+        raise ValueError(
+            "analysis within-question summary count differs from distribution"
+        )
+
+
+SUMMARY_FIELDS = frozenset(
+    {
+        "schema_name", "schema_version", "analysis_id", "study_id", "study_manifest_hash",
+        "question_manifest_hash", "model_run_id", "model_run_manifest_hash", "merge_id",
+        "merge_manifest_hash", "coverage_report_id", "analysis_config_hash",
+        "analysis_contract_version", "bootstrap_seed", "bootstrap_replicates", "bootstrap_mode",
+        "analysis_format_version", "csv_serialization_version", "csv_type_contract_version",
+        "plot_version", "source_natural_row_count", "source_checkpoint_row_count",
+        "trajectory_row_count", "paper_analysis_ready", "terminal_infrastructure_failure_count",
+        "repetition_filter_applied", "successful_abnormal_output_policy", "evidence_scope",
+        "analysis_directory", "output_tables", "output_plots", "primary_main_rows",
+        "natural_calibration_main_rows", "checkpoint_calibration_predictor_families",
+        "checkpoint_calibration_all_fractions", "checkpoint_calibration_main_rows",
+        "all_checkpoint_fractions_table", "within_question_summaries",
+        "switching_stabilization_summaries", "plot_series",
+    }
+)
+
+
+def _validate_summary_semantics(
+    summary: Mapping[str, Any], manifest: Mapping[str, Any], tables: Mapping[str, Sequence[Mapping[str, Any]]]
+) -> None:
+    if set(summary) != SUMMARY_FIELDS or summary["schema_name"] != "part1_analysis_summary" or summary["schema_version"] != "1.0.0":
+        raise ValueError("analysis summary fields/schema differ")
+    if type(summary["source_natural_row_count"]) is not int or type(summary["source_checkpoint_row_count"]) is not int or type(summary["trajectory_row_count"]) is not int or min(summary["source_natural_row_count"], summary["source_checkpoint_row_count"], summary["trajectory_row_count"]) < 0:
+        raise ValueError("analysis summary source counts have wrong JSON types/values")
+    if summary["source_natural_row_count"] != len(tables["trajectory_features"]) or summary["trajectory_row_count"] != len(tables["trajectory_features"]):
+        raise ValueError("analysis summary trajectory/source counts differ")
+    if summary["paper_analysis_ready"] is not True or summary["terminal_infrastructure_failure_count"] != 0 or type(summary["terminal_infrastructure_failure_count"]) is not int or summary["repetition_filter_applied"] is not False or summary["successful_abnormal_output_policy"] != "preserved":
+        raise ValueError("analysis summary fixed readiness/policy contract differs")
+    expected_scope = "production" if manifest["bootstrap_replicates"] in PRODUCTION_BOOTSTRAP_REPLICATES else FIXTURE_EVIDENCE_LIMITS
+    if summary["evidence_scope"] != expected_scope:
+        raise ValueError("analysis summary evidence scope differs")
+    child = f"{manifest['bootstrap_mode']}-r{manifest['bootstrap_replicates']}"
+    output_root = f"results/part1/{manifest['model_run_id']}/analysis"
+    if summary["analysis_directory"] != f"{output_root}/{child}":
+        raise ValueError("analysis summary directory path differs")
+    expected_tables = {key: f"{output_root}/{child}/{filename}" for key, (filename, _columns) in TABLE_SPECS.items()}
+    expected_plots = [f"{output_root}/{child}/{name}" for name in PLOT_FILENAMES]
+    if summary["output_tables"] != expected_tables or summary["output_plots"] != expected_plots:
+        raise ValueError("analysis summary output paths differ")
+    primary_main = [dict(row) for row in tables["primary_auroc"] if row["grouping"] in {"pooled", "macro"}]
+    natural_main = [dict(row) for row in tables["calibration_metrics"] if row["calibration_family"] == "natural_confidence" and row["grouping"] in {"pooled", "macro"}]
+    checkpoint_main = [dict(row) for row in tables["calibration_metrics"] if row["requested_fraction"] in MAIN_CHECKPOINT_FRACTIONS and row["grouping"] in {"pooled", "macro"}]
+    required = (
+        (summary["primary_main_rows"], primary_main, "primary rows"),
+        (summary["natural_calibration_main_rows"], natural_main, "natural calibration rows"),
+        (summary["checkpoint_calibration_main_rows"], checkpoint_main, "checkpoint calibration rows"),
+        (summary["within_question_summaries"], list(tables["within_question_summary"]), "within-question rows"),
+        (summary["switching_stabilization_summaries"], list(tables["trajectory_events"]), "trajectory event rows"),
+    )
+    for observed, expected, label in required:
+        if not _same_json(observed, expected):
+            raise ValueError(f"analysis summary {label} differ from typed table")
+    if summary["checkpoint_calibration_predictor_families"] != ["checkpoint_confidence", "maximum_ad_probability"] or summary["checkpoint_calibration_all_fractions"] != list(FIXED_CHECKPOINT_FRACTIONS) or summary["all_checkpoint_fractions_table"] != TABLE_SPECS["calibration_metrics"][0]:
+        raise ValueError("analysis summary checkpoint calibration contract differs")
+    expected_series = _plot_series(tables)
+    if not _same_json(summary["plot_series"], expected_series):
+        raise ValueError("analysis summary plot series differ from typed tables")
+
+
 def _validate_analysis_directory_descriptor(
     directory_descriptor: int,
     *,
@@ -1221,7 +1797,18 @@ def _validate_analysis_directory_descriptor(
         raise ValueError("analysis directory differs from the expected manifest")
     for name, entry in manifest["artifacts"].items():
         data = _read_regular_at(directory_descriptor, name)
+        expected_kind = (
+            "summary"
+            if name == "analysis_summary.json"
+            else "table"
+            if name.endswith(".csv")
+            else "table_metadata"
+            if name.endswith(".metadata.json")
+            else "plot"
+        )
         if (
+            entry["kind"] != expected_kind
+            or
             entry["sha256"] != _sha256(data)
             or type(entry["byte_size"]) is not int
             or entry["byte_size"] != len(data)
@@ -1248,62 +1835,93 @@ def _validate_analysis_directory_descriptor(
         "bootstrap_seed",
         "bootstrap_replicates",
         "bootstrap_mode",
+        "analysis_contract_version",
+        "analysis_format_version",
+        "csv_serialization_version",
+        "csv_type_contract_version",
+        "plot_version",
     ):
         if not _same_json(summary.get(field), manifest.get(field)):
             raise ValueError(f"analysis summary/manifest provenance differs for {field}")
-    checkpoint_series = summary.get("plot_series", {}).get("checkpoint_ece")
-    if not isinstance(checkpoint_series, list) or len(checkpoint_series) != 22:
-        raise ValueError("checkpoint ECE plot series must contain both all-11 families")
-    if {
-        row.get("requested_fraction") for row in checkpoint_series
-    } != set(FIXED_CHECKPOINT_FRACTIONS) or {
-        row.get("requested_fraction")
-        for row in checkpoint_series
-        if row.get("is_main_checkpoint") is True
-    } != set(MAIN_CHECKPOINT_FRACTIONS):
-        raise ValueError("checkpoint ECE plot fractions or main markers differ")
+    decoded_tables: dict[str, list[dict[str, Any]]] = {}
     for table_name, (filename, columns) in TABLE_SPECS.items():
         data = _read_regular_at(directory_descriptor, filename)
-        if data.startswith(b"#"):
-            raise ValueError(f"analysis CSV contains a provenance comment: {filename}")
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError(f"analysis CSV is not UTF-8: {filename}") from exc
-        reader = csv.DictReader(io.StringIO(text, newline=""))
-        rows = list(reader)
-        if list(reader.fieldnames or ()) != list(columns):
-            raise ValueError(f"analysis CSV columns differ: {filename}")
-        if data.count(b"\n") != len(rows) + 1:
-            raise ValueError(f"analysis CSV framing differs: {filename}")
+        rows = _decode_csv_rows(
+            data, table_name=table_name, filename=filename, columns=columns
+        )
+        decoded_tables[table_name] = rows
         metadata_name = manifest["tables"][filename]
         metadata = _json_object(
             _read_regular_at(directory_descriptor, metadata_name),
             label=f"analysis table metadata {table_name}",
         )
+        expected_metadata_fields = {
+            "schema_name",
+            "schema_version",
+            "serialization_version",
+            "table_name",
+            "table_filename",
+            "table_sha256",
+            "table_byte_size",
+            "row_count",
+            "ordered_columns",
+            "nested_json_columns",
+            "column_type_contract",
+            "source_provenance",
+            "analysis_id",
+            "analysis_contract_version",
+            "analysis_config_hash",
+            "bootstrap_seed",
+            "bootstrap_replicates",
+            "bootstrap_mode",
+        }
+        expected_source = {
+            field: manifest[field]
+            for field in (
+                "study_id",
+                "study_manifest_hash",
+                "question_manifest_hash",
+                "model_run_id",
+                "model_run_manifest_hash",
+                "merge_id",
+                "merge_manifest_hash",
+                "coverage_report_id",
+            )
+        }
         if (
-            metadata.get("table_name") != table_name
+            set(metadata) != expected_metadata_fields
+            or metadata.get("schema_name") != "part1_analysis_table_metadata"
+            or metadata.get("schema_version") != "1.0.0"
+            or metadata.get("table_name") != table_name
             or metadata.get("table_filename") != filename
             or metadata.get("table_sha256") != _sha256(data)
+            or type(metadata.get("table_byte_size")) is not int
             or metadata.get("table_byte_size") != len(data)
+            or type(metadata.get("row_count")) is not int
             or metadata.get("row_count") != len(rows)
             or metadata.get("ordered_columns") != list(columns)
             or metadata.get("serialization_version") != CSV_SERIALIZATION_VERSION
+            or metadata.get("nested_json_columns")
+            != list(NESTED_COLUMNS_BY_TABLE.get(table_name, ()))
+            or not _same_json(
+                metadata.get("column_type_contract"),
+                TABLE_COLUMN_CONTRACTS[table_name],
+            )
+            or not _same_json(metadata.get("source_provenance"), expected_source)
             or metadata.get("analysis_id") != manifest["analysis_id"]
             or metadata.get("analysis_config_hash") != manifest["analysis_config_hash"]
+            or metadata.get("analysis_contract_version")
+            != manifest["analysis_contract_version"]
+            or type(metadata.get("bootstrap_seed")) is not int
+            or metadata.get("bootstrap_seed") != manifest["bootstrap_seed"]
+            or type(metadata.get("bootstrap_replicates")) is not int
+            or metadata.get("bootstrap_replicates")
+            != manifest["bootstrap_replicates"]
+            or metadata.get("bootstrap_mode") != manifest["bootstrap_mode"]
         ):
             raise ValueError(f"analysis table sidecar differs: {filename}")
-        nested = metadata.get("nested_json_columns")
-        if not isinstance(nested, list) or any(column not in columns for column in nested):
-            raise ValueError(f"analysis table nested JSON metadata differs: {filename}")
-        for row in rows:
-            for column in nested:
-                try:
-                    json.loads(row[column])
-                except json.JSONDecodeError as exc:
-                    raise ValueError(
-                        f"analysis nested JSON cell is invalid: {filename}:{column}"
-                    ) from exc
+    _validate_table_semantics(decoded_tables, manifest)
+    _validate_summary_semantics(summary, manifest, decoded_tables)
     for plot in PLOT_FILENAMES:
         data = _read_regular_at(directory_descriptor, plot)
         if not data.startswith(b"\x89PNG\r\n\x1a\n") or len(data) <= 100:
@@ -1349,6 +1967,70 @@ def validate_analysis_directory(
             os.close(descriptor)
     finally:
         os.close(parent_descriptor)
+
+
+def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _stat_directory_name_at(
+    parent_descriptor: int, name: str, *, label: str
+) -> os.stat_result:
+    try:
+        observed = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except OSError as exc:
+        raise PublicationStateIndeterminateError(
+            f"{label} pathname could not be rebound to its opened inode: {name}: {exc}"
+        ) from exc
+    if not stat.S_ISDIR(observed.st_mode):
+        raise PublicationStateIndeterminateError(
+            f"{label} pathname no longer names a directory inode: {name}"
+        )
+    return observed
+
+
+def _validate_stable_existing_at(
+    parent_descriptor: int,
+    name: str,
+    *,
+    expected_manifest: Mapping[str, Any],
+    expected_summary: Mapping[str, Any],
+    hook: Callable[[str], None],
+) -> dict[str, Any] | None:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ValueError(
+            f"existing analysis is symlinked, unreadable, or non-directory: {name}"
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        manifest = _validate_analysis_directory_descriptor(
+            descriptor,
+            expected_manifest=expected_manifest,
+            expected_summary=expected_summary,
+        )
+        hook("existing_final_validated")
+        observed = _stat_directory_name_at(
+            parent_descriptor, name, label="existing analysis"
+        )
+        if not _same_inode(opened, observed):
+            raise PublicationStateIndeterminateError(
+                "existing analysis pathname changed after descriptor validation; "
+                f"validated_inode=({opened.st_dev},{opened.st_ino}); "
+                f"observed_inode=({observed.st_dev},{observed.st_ino}); name={name}"
+            )
+        return manifest
+    finally:
+        os.close(descriptor)
 
 
 def _ensure_directory(path: Path) -> None:
@@ -1405,65 +2087,185 @@ def publish_analysis(
         | getattr(os, "O_NOFOLLOW", 0),
         dir_fd=parent_descriptor,
     )
+    original_stage = os.fstat(stage_descriptor)
     hook = fault_hook or (lambda _boundary: None)
     published = False
     renamed = False
+    retain_stage = False
+
+    def rollback_original(durability_error: BaseException) -> None:
+        nonlocal renamed, retain_stage
+        try:
+            final_status = _stat_directory_name_at(
+                parent_descriptor, target.name, label="analysis rollback final"
+            )
+        except PublicationStateIndeterminateError as identity_error:
+            retain_stage = True
+            raise PublicationStateIndeterminateError(
+                "analysis durability failed but the final pathname could not be "
+                f"verified for rollback: target={target}; error={durability_error}; "
+                f"identity={identity_error}"
+            ) from durability_error
+        if not _same_inode(original_stage, final_status):
+            retain_stage = True
+            raise PublicationStateIndeterminateError(
+                "analysis durability failed and rollback refused a substituted final "
+                f"inode: target={target}; expected=({original_stage.st_dev},"
+                f"{original_stage.st_ino}); observed=({final_status.st_dev},"
+                f"{final_status.st_ino}); error={durability_error}"
+            ) from durability_error
+        try:
+            _exclusive_rename_at(parent_descriptor, target.name, stage.name)
+        except BaseException as rollback_error:
+            retain_stage = True
+            raise PublicationStateIndeterminateError(
+                "analysis durability failed and exclusive rollback failed after "
+                f"verifying the original inode: target={target}; stage={stage}; "
+                f"error={durability_error}; rollback={rollback_error}"
+            ) from durability_error
+        renamed = False
+        hook("after_rollback_rename")
+        rollback_status = _stat_directory_name_at(
+            parent_descriptor, stage.name, label="analysis rollback stage"
+        )
+        if not _same_inode(original_stage, rollback_status):
+            retain_stage = True
+            raise PublicationStateIndeterminateError(
+                "analysis rollback pathname was substituted after rename; refusing "
+                f"cleanup: stage={stage}; expected=({original_stage.st_dev},"
+                f"{original_stage.st_ino}); observed=({rollback_status.st_dev},"
+                f"{rollback_status.st_ino})"
+            ) from durability_error
+        try:
+            _fsync_directory_descriptor(parent_descriptor)
+        except BaseException as rollback_fsync_error:
+            retain_stage = True
+            raise PublicationStateIndeterminateError(
+                "analysis rollback restored the original stage inode but parent "
+                f"durability is indeterminate: stage={stage}; "
+                f"rollback_fsync={rollback_fsync_error}"
+            ) from durability_error
+        raise PublicationDurabilityError(
+            f"analysis publication durability failed and was rolled back: {target}"
+        ) from durability_error
+
     try:
         hook("stage_created")
         manifest = _write_stage(stage, source, computation)
         hook("artifacts_written")
         _fsync_directory_descriptor(stage_descriptor)
         hook("stage_fsynced")
-        validate_analysis_directory(
-            stage,
+        _validate_analysis_directory_descriptor(
+            stage_descriptor,
             expected_manifest=manifest,
             expected_summary=computation.summary,
         )
         hook("reload_complete")
         hook("before_input_revalidation")
-        hook("before_exclusive_rename")
         source.revalidate_inputs()
-        if os.path.lexists(target):
-            existing = validate_analysis_directory(
-                target,
-                expected_manifest=manifest,
-                expected_summary=computation.summary,
-            )
+        existing = _validate_stable_existing_at(
+            parent_descriptor,
+            target.name,
+            expected_manifest=manifest,
+            expected_summary=computation.summary,
+            hook=hook,
+        )
+        if existing is not None:
             return target, existing
+        hook("before_exclusive_rename")
+        hook("before_stage_identity_check")
+        stage_status = _stat_directory_name_at(
+            parent_descriptor, stage.name, label="analysis stage"
+        )
+        if not _same_inode(original_stage, stage_status):
+            raise RuntimeError(
+                "analysis stage identity changed before publication; refusing rename"
+            )
+        hook("after_stage_identity_check")
         try:
             _exclusive_rename_at(parent_descriptor, stage.name, target.name)
         except FileExistsError:
             source.revalidate_inputs()
-            existing = validate_analysis_directory(
-                target,
+            existing = _validate_stable_existing_at(
+                parent_descriptor,
+                target.name,
                 expected_manifest=manifest,
                 expected_summary=computation.summary,
+                hook=hook,
             )
+            if existing is None:
+                raise PublicationStateIndeterminateError(
+                    "analysis rename reported a collision but no stable existing final "
+                    f"directory could be opened: {target}"
+                )
             return target, existing
         renamed = True
         try:
             hook("after_exclusive_rename")
+        except BaseException as durability_error:
+            rollback_original(durability_error)
+        final_status = _stat_directory_name_at(
+            parent_descriptor, target.name, label="published analysis"
+        )
+        if not _same_inode(original_stage, final_status):
+            retain_stage = True
+            raise PublicationStateIndeterminateError(
+                "published analysis pathname does not name the original validated stage "
+                f"inode: target={target}; expected=({original_stage.st_dev},"
+                f"{original_stage.st_ino}); observed=({final_status.st_dev},"
+                f"{final_status.st_ino})"
+            )
+        final_descriptor = os.open(
+            target.name,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_descriptor,
+        )
+        try:
+            if not _same_inode(original_stage, os.fstat(final_descriptor)):
+                retain_stage = True
+                raise PublicationStateIndeterminateError(
+                    "published analysis opened inode differs from the original stage"
+                )
+            _validate_analysis_directory_descriptor(
+                final_descriptor,
+                expected_manifest=manifest,
+                expected_summary=computation.summary,
+            )
+            hook("published_final_validated")
+            validated_status = _stat_directory_name_at(
+                parent_descriptor,
+                target.name,
+                label="validated published analysis",
+            )
+            if not _same_inode(original_stage, validated_status):
+                retain_stage = True
+                raise PublicationStateIndeterminateError(
+                    "published analysis pathname changed after final descriptor "
+                    "validation; it no longer names the original stage inode"
+                )
+        finally:
+            os.close(final_descriptor)
+        try:
             _fsync_directory_descriptor(parent_descriptor)
         except BaseException as durability_error:
-            try:
-                _exclusive_rename_at(parent_descriptor, target.name, stage.name)
-                renamed = False
-                _fsync_directory_descriptor(parent_descriptor)
-            except BaseException as rollback_error:
-                published = True
-                raise PublicationStateIndeterminateError(
-                    "analysis post-rename durability failed and rollback was not durable; "
-                    f"final path may remain at {target}: error={durability_error}; "
-                    f"rollback={rollback_error}"
-                ) from durability_error
-            raise PublicationDurabilityError(
-                f"analysis publication durability failed and was rolled back: {target}"
-            ) from durability_error
+            rollback_original(durability_error)
+        durable_status = _stat_directory_name_at(
+            parent_descriptor, target.name, label="durable published analysis"
+        )
+        if not _same_inode(original_stage, durable_status):
+            retain_stage = True
+            raise PublicationStateIndeterminateError(
+                "analysis final pathname changed before success could be returned; "
+                "it no longer names the original validated stage inode"
+            )
         published = True
         return target, manifest
     finally:
         try:
-            if not published and not renamed:
+            if not published and not renamed and not retain_stage:
                 _remove_own_stage(
                     stage,
                     root,
@@ -1514,10 +2316,12 @@ def load_production_analysis_source(
     """Strictly load canonical production manifests and lossless merged rows."""
 
     repository_root = Path(os.path.abspath(repository_root))
+    _require_no_symlink_components(repository_root)
     manifest_path = Path(model_run_manifest_path)
     if not manifest_path.is_absolute():
         manifest_path = repository_root / manifest_path
     manifest_path = Path(os.path.abspath(manifest_path))
+    _require_no_symlink_components(manifest_path)
     model, model_bytes = _load_regular_json(
         manifest_path, label="production model-run manifest"
     )
@@ -1550,6 +2354,7 @@ def load_production_analysis_source(
 
     config, config_bytes, config_path = _read_analysis_config(repository_root)
     merged_path = repository_root / model["output_paths"]["merged"]
+    _require_no_symlink_components(merged_path)
     merge = validate_merge_directory(merged_path)
     for field in (
         "study_id",
@@ -1566,6 +2371,7 @@ def load_production_analysis_source(
     if coverage_relative != expected_coverage_relative:
         raise ValueError("merge coverage report path is not canonical")
     coverage_path = repository_root / coverage_relative
+    _require_no_symlink_components(coverage_path)
     coverage, coverage_bytes = _load_regular_json(coverage_path, label="coverage report")
     if (
         _sha256(coverage_bytes) != merge["coverage_report"]["sha256"]
@@ -1583,6 +2389,14 @@ def load_production_analysis_source(
             "paper-final analysis requires paper_analysis_ready and zero terminal "
             "infrastructure failures"
         )
+    for snapshot_path in (
+        repository_root / "uv.lock",
+        *(
+            repository_root / source_file["relative_path"]
+            for source_file in coverage["source_files"]
+        ),
+    ):
+        _require_no_symlink_components(snapshot_path)
     rebuilt = build_coverage_report(
         repository_root=repository_root,
         model_run_manifest_path=manifest_path,
@@ -1592,11 +2406,20 @@ def load_production_analysis_source(
     if not _same_json(rebuilt, coverage):
         raise ValueError("coverage report differs from current immutable source/Git snapshot")
 
+    questions_path = repository_root / "manifests/part1/questions.jsonl"
+    question_manifest_path = repository_root / "manifests/part1/questions.manifest.json"
+    study_manifest_path = repository_root / "manifests/part1/study_manifest.json"
+    for tracked_path in (
+        questions_path,
+        question_manifest_path,
+        study_manifest_path,
+        repository_root / "uv.lock",
+    ):
+        _require_no_symlink_components(tracked_path)
     bundle = load_manifest_bundle(
-        questions_path=repository_root / "manifests/part1/questions.jsonl",
-        question_manifest_path=repository_root
-        / "manifests/part1/questions.manifest.json",
-        study_manifest_path=repository_root / "manifests/part1/study_manifest.json",
+        questions_path=questions_path,
+        question_manifest_path=question_manifest_path,
+        study_manifest_path=study_manifest_path,
     )
     validate_manifest_compatibility(bundle.study_manifest, model)
     if len(bundle.records) != 500 or [row["sample_index"] for row in bundle.records] != list(
@@ -1646,6 +2469,22 @@ def load_production_analysis_source(
     expected_clean = coverage["summary"]["clean_tracked_worktree"]
 
     def revalidate() -> None:
+        for immutable_path in (
+            repository_root,
+            manifest_path,
+            config_path,
+            merged_path,
+            coverage_path,
+            questions_path,
+            question_manifest_path,
+            study_manifest_path,
+            repository_root / "uv.lock",
+            *(
+                repository_root / source_file["relative_path"]
+                for source_file in coverage["source_files"]
+            ),
+        ):
+            _require_no_symlink_components(immutable_path)
         current_model, current_model_bytes = _load_regular_json(
             manifest_path, label="production model-run manifest"
         )

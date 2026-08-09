@@ -99,6 +99,46 @@ def _read_csv(path: Path) -> tuple[list[str], list[dict[str, str]], bytes]:
     return list(reader.fieldnames or ()), list(reader), data
 
 
+def _write_plain_json(path: Path, value: Any) -> None:
+    import part1_analysis as analysis
+
+    path.write_bytes(analysis._plain_json_bytes(value))
+
+
+def _rewrite_csv(
+    path: Path, mutate: Any
+) -> None:
+    columns, rows, _data = _read_csv(path)
+    mutate(rows)
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=columns, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    path.write_bytes(buffer.getvalue().encode("utf-8"))
+
+
+def _rehash_analysis_directory(output: Path, *, sync_table_sidecars: bool) -> None:
+    import part1_analysis as analysis
+
+    manifest_path = output / "analysis_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if sync_table_sidecars:
+        for table, sidecar in manifest["tables"].items():
+            table_bytes = (output / table).read_bytes()
+            metadata_path = output / sidecar
+            metadata = json.loads(metadata_path.read_text())
+            metadata["table_sha256"] = hashlib.sha256(table_bytes).hexdigest()
+            metadata["table_byte_size"] = len(table_bytes)
+            metadata["row_count"] = table_bytes.count(b"\n") - 1
+            _write_plain_json(metadata_path, metadata)
+    for name, entry in manifest["artifacts"].items():
+        data = (output / name).read_bytes()
+        entry["sha256"] = hashlib.sha256(data).hexdigest()
+        entry["byte_size"] = len(data)
+    manifest["analysis_manifest_hash"] = analysis._analysis_manifest_hash(manifest)
+    _write_plain_json(manifest_path, manifest)
+
+
 def _strict_loader_fixture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> dict[str, Any]:
@@ -493,6 +533,115 @@ def test_strict_production_loader_revalidation_detects_config_or_coverage_byte_c
         source.revalidate_inputs()
 
 
+@pytest.mark.parametrize(
+    "ancestor",
+    [
+        "repository_root",
+        "results",
+        "part1",
+        "run_root",
+        "merge",
+        "coverage",
+        "tracked_manifests",
+        "analysis_config",
+        "dependency_lock",
+        "coverage_source",
+    ],
+)
+def test_production_loader_explicitly_guards_every_symlinked_input_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ancestor: str
+) -> None:
+    fixture = _strict_loader_fixture(tmp_path, monkeypatch)
+    analysis = fixture["analysis"]
+    repository = fixture["repository"]
+    run_root = fixture["model_path"].parent
+    model_path = fixture["model_path"]
+
+    def replace_with_symlink(path: Path, label: str) -> None:
+        held = path.with_name(f"{path.name}-{label}-real")
+        path.rename(held)
+        path.symlink_to(held, target_is_directory=True)
+
+    def replace_file_with_symlink(path: Path, label: str) -> None:
+        held = path.with_name(f"{path.name}-{label}-real")
+        path.rename(held)
+        path.symlink_to(held)
+
+    if ancestor == "repository_root":
+        alias = tmp_path / "repository-alias"
+        alias.symlink_to(repository, target_is_directory=True)
+        repository = alias
+        model_path = alias / fixture["model_path"].relative_to(fixture["repository"])
+        guarded_input = repository
+    elif ancestor == "results":
+        replace_with_symlink(repository / "results", ancestor)
+        guarded_input = model_path
+    elif ancestor == "part1":
+        replace_with_symlink(repository / "results" / "part1", ancestor)
+        guarded_input = model_path
+    elif ancestor == "run_root":
+        replace_with_symlink(run_root, ancestor)
+        guarded_input = model_path
+    elif ancestor == "merge":
+        merge_path = repository / fixture["model"]["output_paths"]["merged"]
+        replace_with_symlink(merge_path, ancestor)
+        guarded_input = merge_path
+    elif ancestor == "coverage":
+        replace_with_symlink(fixture["coverage_path"].parent, ancestor)
+        guarded_input = fixture["coverage_path"]
+    elif ancestor == "tracked_manifests":
+        manifest_root = repository / "manifests" / "part1"
+        manifest_root.mkdir(parents=True)
+        replace_with_symlink(repository / "manifests", ancestor)
+        guarded_input = manifest_root / "questions.jsonl"
+    elif ancestor == "analysis_config":
+        config_path = repository / "configs" / "part1" / "analysis.json"
+        replace_with_symlink(repository / "configs", ancestor)
+        guarded_input = config_path
+    elif ancestor == "dependency_lock":
+        lock_path = repository / "uv.lock"
+        lock_path.write_text("fixture", encoding="utf-8")
+        replace_file_with_symlink(lock_path, ancestor)
+        guarded_input = lock_path
+    else:
+        source_path = repository / "tracked" / "source.txt"
+        source_path.parent.mkdir()
+        source_path.write_text("fixture", encoding="utf-8")
+        replace_with_symlink(source_path.parent, ancestor)
+        fixture["coverage"]["source_files"] = [
+            {"relative_path": "tracked/source.txt"}
+        ]
+        coverage_bytes = fixture["write_coverage"]()
+        fixture["merge"]["coverage_report"]["sha256"] = hashlib.sha256(
+            coverage_bytes
+        ).hexdigest()
+        fixture["merge"]["coverage_report"]["byte_size"] = len(coverage_bytes)
+        guarded_input = source_path
+
+    guarded: list[Path] = []
+    original_guard = analysis._require_no_symlink_components
+
+    def record_guard(path: Path) -> None:
+        guarded.append(Path(path))
+        original_guard(path)
+
+    monkeypatch.setattr(analysis, "_require_no_symlink_components", record_guard)
+    if ancestor in {"dependency_lock", "coverage_source"}:
+        original_build = analysis.build_coverage_report
+
+        def build_after_guard(**kwargs: Any):
+            assert guarded_input in guarded
+            return original_build(**kwargs)
+
+        monkeypatch.setattr(analysis, "build_coverage_report", build_after_guard)
+    with pytest.raises(ValueError, match="symlink"):
+        analysis.load_production_analysis_source(
+            repository_root=repository,
+            model_run_manifest_path=model_path,
+        )
+    assert guarded_input in guarded
+
+
 def test_one_trajectory_build_and_one_shared_plan_feed_every_fixed_analysis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -609,6 +758,316 @@ def test_deterministic_artifacts_sidecars_summary_and_plot_series(tmp_path: Path
     for plot in manifest["plots"]:
         payload = (output / plot).read_bytes()
         assert payload.startswith(b"\x89PNG\r\n\x1a\n") and len(payload) > 100
+
+
+@pytest.mark.parametrize(
+    ("case", "mutate"),
+    [
+        ("schema", lambda metadata: metadata.__setitem__("schema_name", "drift")),
+        (
+            "source_provenance",
+            lambda metadata: metadata["source_provenance"].__setitem__(
+                "merge_manifest_hash", "f" * 64
+            ),
+        ),
+        (
+            "analysis_contract",
+            lambda metadata: metadata.__setitem__(
+                "analysis_contract_version", "drift"
+            ),
+        ),
+        (
+            "bootstrap",
+            lambda metadata: metadata.__setitem__("bootstrap_seed", 42.0),
+        ),
+        (
+            "nested_columns",
+            lambda metadata: metadata.__setitem__("nested_json_columns", []),
+        ),
+    ],
+)
+def test_rehashed_sidecar_provenance_groups_are_exactly_validated(
+    tmp_path: Path, case: str, mutate: Any
+) -> None:
+    from part1_analysis import publish_analysis, validate_analysis_directory
+
+    source, _ = _fixture_source(tmp_path / case)
+    output, _ = publish_analysis(source, bootstrap_replicates=2)
+    metadata_path = output / "trajectory_features.metadata.json"
+    metadata = json.loads(metadata_path.read_text())
+    mutate(metadata)
+    _write_plain_json(metadata_path, metadata)
+    _rehash_analysis_directory(output, sync_table_sidecars=False)
+    with pytest.raises(ValueError):
+        validate_analysis_directory(output)
+
+
+def test_sidecars_bind_an_exact_versioned_column_type_contract(tmp_path: Path) -> None:
+    from part1_analysis import publish_analysis, validate_analysis_directory
+
+    source, _ = _fixture_source(tmp_path)
+    output, _ = publish_analysis(source, bootstrap_replicates=2)
+    metadata_path = output / "primary_auroc.metadata.json"
+    metadata = json.loads(metadata_path.read_text())
+    assert metadata["column_type_contract"]["version"].startswith(
+        "part1-analysis-csv-types-"
+    )
+    metadata["column_type_contract"]["columns"][0]["type"] = "integer"
+    _write_plain_json(metadata_path, metadata)
+    _rehash_analysis_directory(output, sync_table_sidecars=False)
+    with pytest.raises(ValueError, match="column|sidecar"):
+        validate_analysis_directory(output)
+
+
+def test_sidecar_numeric_json_types_and_metric_status_enums_are_exact(
+    tmp_path: Path,
+) -> None:
+    from part1_analysis import publish_analysis, validate_analysis_directory
+
+    source, _ = _fixture_source(tmp_path / "sidecar")
+    output, _ = publish_analysis(source, bootstrap_replicates=2)
+    metadata_path = output / "trajectory_features.metadata.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["table_byte_size"] = float(metadata["table_byte_size"])
+    _write_plain_json(metadata_path, metadata)
+    _rehash_analysis_directory(output, sync_table_sidecars=False)
+    with pytest.raises(ValueError, match="sidecar"):
+        validate_analysis_directory(output)
+
+    source, _ = _fixture_source(tmp_path / "enum")
+    output, _ = publish_analysis(source, bootstrap_replicates=2)
+    _rewrite_csv(
+        output / "secondary_checkpoint_auroc.csv",
+        lambda rows: rows[0].__setitem__("point_estimate_status", "unknown"),
+    )
+    _rehash_analysis_directory(output, sync_table_sidecars=True)
+    with pytest.raises(ValueError, match="status|enum"):
+        validate_analysis_directory(output)
+
+
+@pytest.mark.parametrize(
+    ("case", "filename", "mutate"),
+    [
+        (
+            "primary_target",
+            "primary_auroc.csv",
+            lambda rows: rows[0].__setitem__("target", "checkpoint_local_correct"),
+        ),
+        (
+            "interval_arithmetic",
+            "primary_auroc.csv",
+            lambda rows: rows[0].__setitem__("valid_replicates", "1"),
+        ),
+        (
+            "checkpoint_fraction_key",
+            "calibration_metrics.csv",
+            lambda rows: [
+                row.__setitem__("requested_fraction", "0.0")
+                for row in rows
+                if row["calibration_family"] == "checkpoint_confidence"
+                and row["requested_fraction"] == "0.1"
+            ],
+        ),
+        (
+            "negative_bin_count",
+            "reliability_bins.csv",
+            lambda rows: rows[0].__setitem__("count", "-1"),
+        ),
+        (
+            "duplicate_distribution_key",
+            "within_question_distribution.csv",
+            lambda rows: rows[1].__setitem__("question_id", rows[0]["question_id"]),
+        ),
+        (
+            "wrong_integer_type",
+            "trajectory_features.csv",
+            lambda rows: rows[0].__setitem__("sample_index", "1.5"),
+        ),
+        (
+            "trajectory_provenance",
+            "trajectory_features.csv",
+            lambda rows: rows[0].__setitem__("study_id", "f" * 64),
+        ),
+        (
+            "trajectory_subject",
+            "trajectory_features.csv",
+            lambda rows: rows[0].__setitem__("subject", "unknown_subject"),
+        ),
+        (
+            "natural_answer_enum",
+            "trajectory_features.csv",
+            lambda rows: rows[0].__setitem__("natural_answer", "Z"),
+        ),
+        (
+            "reliability_contribution",
+            "reliability_bins.csv",
+            lambda rows: next(
+                row for row in rows if int(row["count"]) > 0
+            ).__setitem__("weighted_ece_contribution", "0.123"),
+        ),
+        (
+            "within_qualifying_count",
+            "within_question_summary.csv",
+            lambda rows: rows[0].__setitem__("qualifying_question_count", "999"),
+        ),
+        (
+            "event_source_count",
+            "trajectory_events.csv",
+            lambda rows: [
+                rows[0].__setitem__(field, str(int(rows[0][field]) + 1))
+                for field in (
+                    "trajectory_count",
+                    "switch_count_unavailable",
+                    "first_appearance_unavailable",
+                    "left_correct_unavailable",
+                    "later_recovery_unavailable",
+                    "endpoint_agreement_unavailable",
+                    "stabilization_unavailable",
+                )
+            ],
+        ),
+    ],
+)
+def test_rehashed_scientific_csv_drift_is_rejected_semantically(
+    tmp_path: Path, case: str, filename: str, mutate: Any
+) -> None:
+    from part1_analysis import publish_analysis, validate_analysis_directory
+
+    source, _ = _fixture_source(tmp_path / case)
+    output, _ = publish_analysis(source, bootstrap_replicates=2)
+    _rewrite_csv(output / filename, mutate)
+    _rehash_analysis_directory(output, sync_table_sidecars=True)
+    with pytest.raises(ValueError):
+        validate_analysis_directory(output)
+
+
+@pytest.mark.parametrize(
+    ("case", "mutate"),
+    [
+        (
+            "primary_rows",
+            lambda summary: summary["primary_main_rows"][0].__setitem__(
+                "point_estimate", 0.123
+            ),
+        ),
+        (
+            "natural_rows",
+            lambda summary: summary["natural_calibration_main_rows"][0].__setitem__(
+                "point_estimate", 0.123
+            ),
+        ),
+        (
+            "checkpoint_rows",
+            lambda summary: summary["checkpoint_calibration_main_rows"][0].__setitem__(
+                "point_estimate", 0.123
+            ),
+        ),
+        (
+            "within_rows",
+            lambda summary: summary["within_question_summaries"][0].__setitem__(
+                "mean_paired_difference", 0.123
+            ),
+        ),
+        (
+            "event_rows",
+            lambda summary: summary["switching_stabilization_summaries"][0].__setitem__(
+                "trajectory_count", 999
+            ),
+        ),
+        (
+            "output_path",
+            lambda summary: summary["output_tables"].__setitem__(
+                "primary_auroc", "elsewhere.csv"
+            ),
+        ),
+        (
+            "policy",
+            lambda summary: summary.__setitem__("repetition_filter_applied", True),
+        ),
+        (
+            "count",
+            lambda summary: summary.__setitem__("trajectory_row_count", 999),
+        ),
+        (
+            "primary_plot",
+            lambda summary: summary["plot_series"]["primary_auroc"][0].__setitem__(
+                "point_estimate", 0.123
+            ),
+        ),
+        (
+            "checkpoint_family",
+            lambda summary: [
+                row.__setitem__("calibration_family", "checkpoint_confidence")
+                for row in summary["plot_series"]["checkpoint_ece"]
+                if row["calibration_family"] == "maximum_ad_probability"
+            ],
+        ),
+        (
+            "family_main_marker",
+            lambda summary: next(
+                row
+                for row in summary["plot_series"]["checkpoint_ece"]
+                if row["calibration_family"] == "checkpoint_confidence"
+                and row["requested_fraction"] == 0.0
+            ).__setitem__("is_main_checkpoint", False),
+        ),
+    ],
+)
+def test_rehashed_summary_and_plot_series_drift_is_cross_checked_to_tables(
+    tmp_path: Path, case: str, mutate: Any
+) -> None:
+    from part1_analysis import publish_analysis, validate_analysis_directory
+
+    source, _ = _fixture_source(tmp_path / case)
+    output, _ = publish_analysis(source, bootstrap_replicates=2)
+    summary_path = output / "analysis_summary.json"
+    summary = json.loads(summary_path.read_text())
+    mutate(summary)
+    _write_plain_json(summary_path, summary)
+    _rehash_analysis_directory(output, sync_table_sidecars=False)
+    with pytest.raises(ValueError):
+        validate_analysis_directory(output)
+
+
+@pytest.mark.parametrize("case", ["trajectory_event_count", "within_count"])
+def test_jointly_rehashed_summary_and_table_counts_still_bind_source_tables(
+    tmp_path: Path, case: str
+) -> None:
+    from part1_analysis import publish_analysis, validate_analysis_directory
+
+    source, _ = _fixture_source(tmp_path / case)
+    output, _ = publish_analysis(source, bootstrap_replicates=2)
+    summary_path = output / "analysis_summary.json"
+    summary = json.loads(summary_path.read_text())
+    if case == "trajectory_event_count":
+        fields = (
+            "trajectory_count",
+            "switch_count_unavailable",
+            "first_appearance_unavailable",
+            "left_correct_unavailable",
+            "later_recovery_unavailable",
+            "endpoint_agreement_unavailable",
+            "stabilization_unavailable",
+        )
+
+        def mutate(rows: list[dict[str, str]]) -> None:
+            for field in fields:
+                rows[0][field] = str(int(rows[0][field]) + 1)
+
+        _rewrite_csv(output / "trajectory_events.csv", mutate)
+        for field in fields:
+            summary["switching_stabilization_summaries"][0][field] += 1
+            summary["plot_series"]["switching_stabilization"][0][field] += 1
+    else:
+        _rewrite_csv(
+            output / "within_question_summary.csv",
+            lambda rows: rows[0].__setitem__("qualifying_question_count", "999"),
+        )
+        summary["within_question_summaries"][0]["qualifying_question_count"] = 999
+    _write_plain_json(summary_path, summary)
+    _rehash_analysis_directory(output, sync_table_sidecars=True)
+    with pytest.raises(ValueError, match="source|distribution|trajectory"):
+        validate_analysis_directory(output)
 
 
 def test_identity_is_relocation_invariant_and_sensitive_to_bootstrap_or_source(
@@ -745,6 +1204,173 @@ def test_stage_cleanup_quarantines_by_open_identity_and_restores_a_substitution(
     )
     assert (replacement / "replacement-marker").read_text() == "unrelated"
     assert not (analysis_root / "development-r2").exists()
+
+
+def _replace_directory_with_copy(path: Path, suffix: str) -> Path:
+    held = path.with_name(f"{path.name}.{suffix}")
+    path.rename(held)
+    shutil.copytree(held, path)
+    return held
+
+
+def test_stage_substitution_after_reload_is_rejected_before_rename(
+    tmp_path: Path,
+) -> None:
+    from part1_analysis import publish_analysis
+
+    source, _ = _fixture_source(tmp_path)
+    root = tmp_path / source.model_manifest["output_paths"]["analysis"]
+    held: Path | None = None
+
+    def substitute(boundary: str) -> None:
+        nonlocal held
+        if boundary == "before_stage_identity_check":
+            stage = next(root.glob(".development-r2.stage-*"))
+            held = _replace_directory_with_copy(stage, "original-held")
+
+    with pytest.raises(RuntimeError, match="identity|indeterminate"):
+        publish_analysis(source, bootstrap_replicates=2, fault_hook=substitute)
+    assert held is not None and held.is_dir()
+    replacement = next(path for path in root.glob(".development-r2.stage-*") if path != held)
+    assert replacement.is_dir()
+    assert not (root / "development-r2").exists()
+
+
+def test_stage_substitution_after_prerename_check_is_caught_postrename(
+    tmp_path: Path,
+) -> None:
+    from part1_analysis import PublicationStateIndeterminateError, publish_analysis
+
+    source, _ = _fixture_source(tmp_path)
+    root = tmp_path / source.model_manifest["output_paths"]["analysis"]
+    held: Path | None = None
+
+    def substitute(boundary: str) -> None:
+        nonlocal held
+        if boundary == "after_stage_identity_check":
+            stage = next(root.glob(".development-r2.stage-*"))
+            held = _replace_directory_with_copy(stage, "original-held")
+
+    with pytest.raises(PublicationStateIndeterminateError, match="original|inode"):
+        publish_analysis(source, bootstrap_replicates=2, fault_hook=substitute)
+    assert held is not None and held.is_dir()
+    assert (root / "development-r2").is_dir()
+    assert not [
+        path for path in root.glob(".development-r2.stage-*") if path != held
+    ]
+
+
+def test_final_substitution_after_rename_is_never_reported_as_success(
+    tmp_path: Path,
+) -> None:
+    from part1_analysis import PublicationStateIndeterminateError, publish_analysis
+
+    source, _ = _fixture_source(tmp_path)
+    root = tmp_path / source.model_manifest["output_paths"]["analysis"]
+    held: Path | None = None
+
+    def substitute(boundary: str) -> None:
+        nonlocal held
+        if boundary == "after_exclusive_rename":
+            held = _replace_directory_with_copy(
+                root / "development-r2", "original-held"
+            )
+
+    with pytest.raises(PublicationStateIndeterminateError, match="original|inode"):
+        publish_analysis(source, bootstrap_replicates=2, fault_hook=substitute)
+    assert held is not None and held.is_dir()
+    assert (root / "development-r2").is_dir()
+
+
+def test_final_substitution_after_descriptor_validation_is_rechecked_before_success(
+    tmp_path: Path,
+) -> None:
+    from part1_analysis import PublicationStateIndeterminateError, publish_analysis
+
+    source, _ = _fixture_source(tmp_path)
+    root = tmp_path / source.model_manifest["output_paths"]["analysis"]
+    held: Path | None = None
+
+    def substitute(boundary: str) -> None:
+        nonlocal held
+        if boundary == "published_final_validated":
+            held = _replace_directory_with_copy(
+                root / "development-r2", "validated-held"
+            )
+
+    with pytest.raises(PublicationStateIndeterminateError, match="original|inode"):
+        publish_analysis(source, bootstrap_replicates=2, fault_hook=substitute)
+    assert held is not None and held.is_dir()
+    assert (root / "development-r2").is_dir()
+
+
+def test_final_substitution_before_rollback_is_preserved_and_not_moved(
+    tmp_path: Path,
+) -> None:
+    from part1_analysis import PublicationStateIndeterminateError, publish_analysis
+
+    source, _ = _fixture_source(tmp_path)
+    root = tmp_path / source.model_manifest["output_paths"]["analysis"]
+    held: Path | None = None
+
+    def substitute_and_fail(boundary: str) -> None:
+        nonlocal held
+        if boundary == "after_exclusive_rename":
+            held = _replace_directory_with_copy(
+                root / "development-r2", "original-held"
+            )
+            raise OSError("force rollback path")
+
+    with pytest.raises(PublicationStateIndeterminateError, match="rollback|inode"):
+        publish_analysis(source, bootstrap_replicates=2, fault_hook=substitute_and_fail)
+    assert held is not None and held.is_dir()
+    assert (root / "development-r2").is_dir()
+    assert not list(root.glob(".development-r2.stage-*"))
+
+
+def test_rollback_name_substitution_is_preserved_and_indeterminate(
+    tmp_path: Path,
+) -> None:
+    from part1_analysis import PublicationStateIndeterminateError, publish_analysis
+
+    source, _ = _fixture_source(tmp_path)
+    root = tmp_path / source.model_manifest["output_paths"]["analysis"]
+    held: Path | None = None
+
+    def fail_then_substitute(boundary: str) -> None:
+        nonlocal held
+        if boundary == "after_exclusive_rename":
+            raise OSError("force rollback")
+        if boundary == "after_rollback_rename":
+            stage = next(root.glob(".development-r2.stage-*"))
+            held = _replace_directory_with_copy(stage, "original-held")
+
+    with pytest.raises(PublicationStateIndeterminateError, match="rollback|inode"):
+        publish_analysis(source, bootstrap_replicates=2, fault_hook=fail_then_substitute)
+    assert held is not None and held.is_dir()
+    replacement = next(path for path in root.glob(".development-r2.stage-*") if path != held)
+    assert replacement.is_dir()
+    assert not (root / "development-r2").exists()
+
+
+def test_identical_existing_final_must_still_name_the_validated_open_inode(
+    tmp_path: Path,
+) -> None:
+    from part1_analysis import PublicationStateIndeterminateError, publish_analysis
+
+    source, _ = _fixture_source(tmp_path)
+    target, _ = publish_analysis(source, bootstrap_replicates=2)
+    held: Path | None = None
+
+    def substitute(boundary: str) -> None:
+        nonlocal held
+        if boundary == "existing_final_validated":
+            held = _replace_directory_with_copy(target, "validated-held")
+
+    with pytest.raises(PublicationStateIndeterminateError, match="existing|inode"):
+        publish_analysis(source, bootstrap_replicates=2, fault_hook=substitute)
+    assert held is not None and held.is_dir()
+    assert target.is_dir()
 
 
 def test_two_publishers_converge_on_one_identical_final_directory(
