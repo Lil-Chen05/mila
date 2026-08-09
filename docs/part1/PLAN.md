@@ -8,12 +8,12 @@ procedures are in [RUNBOOK.md](RUNBOOK.md), and acceptance evidence is in
 [VALIDATION.md](VALIDATION.md). Scientific changes require explicit approval and
 a versioned manifest change.
 
-**Current phase: Phase 2 is complete.** CPU materialization and manifest
-validation, GPU preflight, Mila filesystem/scheduler checks, same-environment
-reproducibility, and both authorized bounded GPU smokes have passed independent
-post-job validation. Phase 3 remains unauthorized and deferred until Prompt 4.
-No production model-run manifest exists, and the full 500-question experiment
-remains forbidden.
+**Current phase: Phase 3 Task 8 is in progress.** CPU materialization and
+manifest validation, GPU preflight, Mila filesystem/scheduler checks,
+same-environment reproducibility, both Phase 2 bounded GPU smokes, and reviewed
+Phase 3 implementation Tasks 1–7 are complete. Final bounded Phase 3 smoke job
+`10324103` is running. No production model-run manifest exists, and the full
+500-question experiment has not been submitted.
 
 Historical root documentation, old 20q/200q code, results, and analyses remain
 pilot artifacts. They are not instructions or evidence for Part 1.
@@ -246,10 +246,20 @@ reproducibility, Smoke A, and Smoke B criteria are passed. The full
 
 ## Phase 3 — completion
 
-Phase 3 remains deferred. It owns analysis, full raw validation, atomic merge,
-SLURM launchers, production lifecycle checks, and final bounded smoke. The
-operational production model-run manifest may be created only after final
-tracked production code/manifests/docs are committed and the tracked worktree
-is clean except for intentional local exclusions. Its creation under the
-ignored production root must leave Git clean. The full experiment still
-requires separate authorization afterward.
+Phase 3 Tasks 1–7 are implemented, independently reviewed, and deployed to Mila
+at `a7e1135e85476f5fc43986949f467b10ba450623`. Task 8 is in progress. Its one
+authorized final bounded smoke was submitted as job `10324103` with
+`sbatch jobs/part1_phase3_smoke.sh`; the pause snapshot is `RUNNING` on
+`cn-l033`. It is limited to shard index 0 of 500: one fixed question, natural
+run IDs `0`–`9`, and at most 110 checkpoint probes. No other Phase 3 job and no
+production array was submitted.
+
+Resume Task 8 at post-smoke validation, not at submission. Require terminal
+`COMPLETED`/`0:0`, the terminal runner JSON, the exact 10-natural/110-checkpoint
+shape and policy-complete lifecycle evidence, compatible immutable provenance,
+and absence of a production root. Then complete the read-only Smoke A/B checks,
+synthetic end-to-end acceptance, all final documentation, full verification and
+independent review, and the final tracked commit. The operational production
+model-run manifest may be created only from that clean final tracked commit;
+its creation under the ignored production root must leave Git clean. The full
+500-question launch remains unrun.

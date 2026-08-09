@@ -1,5 +1,35 @@
 # Part 1 validation ledger and acceptance matrix
 
+## Phase 3 live gate
+
+Phase 3 Tasks 1–7 are implemented and independently reviewed at
+`a7e1135e85476f5fc43986949f467b10ba450623`. The final bounded generation smoke
+is not yet validated: job `10324103` was submitted on 2026-08-09 and was
+`RUNNING` on `cn-l033` at the pause snapshot. Its smoke model-run ID is
+`a23087c8c0897bbf9f075b3edaa28c75b5087cffbcd203e2fea4bf16093b6dcf`.
+Therefore Phase 3, production launch readiness, and final-paper readiness are
+all explicitly **not yet passed**.
+
+The submission gate itself passed on Mila:
+
+| Gate | Evidence |
+|---|---|
+| Exact deployed commit and clean tracked tree | **PASSED** — `a7e1135e85476f5fc43986949f467b10ba450623` |
+| Immutable manifest bundle | **PASSED** — 500 total, 100 per subject; question hash `dd379f48322d6eb07c309101361738a965be320b4124bb45bd44723b1abe474d`; study hash `859eecd5e0437a901555d5fd2d99692feccb5257df16de60bfe0fe648626142b` |
+| Preflight dependency compatibility | **PASSED** — current and recorded `uv.lock` SHA-256 both `9cab4a125cc2bbf880efcd25826c6e4cdf9964889c7c29742cd10e96bc98db36` |
+| Scheduler/collision/shell checks | **PASSED** — `MaxArraySize=1001`, no existing Phase 3 smoke roots, all relevant job scripts pass `bash -n` |
+| Focused no-model Mila tests | **PASSED** — 34 passed in 1148.24 seconds |
+| Final bounded Phase 3 smoke | **IN PROGRESS** — job `10324103`, pause state `RUNNING` on `cn-l033`; expected 10 natural and 110 checkpoint terminals |
+
+Continuation must first establish `COMPLETED`/`0:0` through `sacct`, inspect
+`logs/part1-phase3-smoke-10324103.out`, and run the manifest/dry-run/lifecycle
+and exact-shape checks in [RUNBOOK.md](RUNBOOK.md). Partial output is never
+acceptance evidence. If the job fails, preserve its artifacts and diagnose it;
+do not submit a replacement automatically. No production manifest or array may
+be created until the smoke, remaining Task 8 acceptance, final documentation,
+full verification, independent review, final commit, and clean-tree gate all
+pass.
+
 ## Evidence rules
 
 Phase 1 validation is pure, synthetic, and login-safe. It may exercise JSON,
@@ -321,9 +351,9 @@ full experiment remains forbidden.
 ## Phase 3 and production-manifest gate
 
 Analysis, bootstrap/calibration, complete raw validation, validate-before-
-publish merge, SLURM readiness hardening (including non-interactive `uv`
-availability), and end-to-end bounded smoke remain Phase 3 and are unauthorized
-until Prompt 4.
+publish merge, and SLURM readiness hardening are implemented and independently
+reviewed. The end-to-end bounded Phase 3 smoke is running as job `10324103` and
+has not yet supplied acceptance evidence.
 Only after final tracked production artifacts are committed and the tracked
 worktree is clean may the operational production model-run manifest be created
 under the ignored persistent production root. The manifest must record the

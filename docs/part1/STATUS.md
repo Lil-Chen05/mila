@@ -2,13 +2,36 @@
 
 ## Executive status
 
-**Phase 2 is complete on branch `codex/phase1-infrastructure`.** CPU
-materialization and manifest validation, single-L40S SmolLM3 preflight, the
-Mila persistent-filesystem and scheduler-liveness gates, same-environment GPU
-reproducibility, and both authorized bounded smokes have passed. Phase 3
-remains unauthorized and deferred until Prompt 4. No production model-run
-manifest or production root exists, and the full 500-question run remains
-forbidden.
+**Phase 3 implementation is complete through Tasks 1–7 on branch
+`codex/phase1-infrastructure`; the final bounded Phase 3 smoke is in progress.**
+The reviewed generation, validation, merge, trajectory, statistics, bootstrap,
+and analysis code is deployed on Mila at
+`a7e1135e85476f5fc43986949f467b10ba450623`. Job `10324103` was submitted at
+`2026-08-09T13:55:40-04:00` with `sbatch jobs/part1_phase3_smoke.sh`; the
+recorded pause state is `RUNNING` on `cn-l033` (started
+`2026-08-09T13:55:58-04:00`). Its generated smoke model-run ID is
+`a23087c8c0897bbf9f075b3edaa28c75b5087cffbcd203e2fea4bf16093b6dcf`.
+This is the only new job submitted in Phase 3. Do not submit a replacement or
+any production array while it is pending or running.
+
+Pre-submission gates passed on Mila: the tracked tree was clean at the exact
+commit above; `uv.lock` matched preflight SHA-256
+`9cab4a125cc2bbf880efcd25826c6e4cdf9964889c7c29742cd10e96bc98db36`;
+shell syntax and the no-collision checks passed; `MaxArraySize=1001`; manifest
+validation returned exactly 500 questions and the expected stable hashes; and
+the focused pure suite passed `34 passed in 1148.24s`. No model or dataset was
+loaded on the login node.
+
+The next action is to establish terminal accounting for job `10324103`, inspect
+`logs/part1-phase3-smoke-10324103.out`, and validate the finalized manifest and
+shard described in the continuation section of [RUNBOOK.md](RUNBOOK.md). Do
+not accept partial files as evidence. After the smoke passes, finish Phase 3
+Task 8: reuse the read-only Phase 3 validator on Smoke A/B, run the synthetic
+end-to-end acceptance, finalize all seven tracked documents and `AGENTS.md`,
+run full verification and independent review, commit a clean final tracked
+tree, and only then create the ignored production model-run manifest. No
+production model-run manifest or production root exists, and the full
+500-question array has not been submitted.
 
 Smoke A authoritative job `10284742` completed `0:0` in `01:26:28` on
 `cn-l018`; its terminal runner state was `complete`. Smoke B authoritative job
@@ -345,6 +368,7 @@ events must be policy-complete; a line count alone is not sufficient.
 That independent post-job validation passed, followed by authoritative Smoke B
 validation. The `10292499` launch-path failure remains diagnostic-only Phase 3
 SLURM-readiness hardening: non-interactive submission must expose `uv` on
-`PATH`. Phase 3 remains deferred and unauthorized until Prompt 4. The full
-500-question experiment is forbidden, and no production model-run manifest may
-be created.
+`PATH`. This paragraph is historical Phase 2 evidence; the current Phase 3
+checkpoint is recorded at the top of this file. The full 500-question
+experiment remains unrun, and no production model-run manifest may be created
+until every final Phase 3 gate passes.
