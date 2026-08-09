@@ -8,12 +8,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import copy
+import ctypes
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import secrets
 import shutil
 import stat
+import sys
 import tempfile
 from typing import Any, Callable, Mapping, Sequence
 
@@ -30,6 +35,7 @@ from part1_contract import (
 from part1_coverage import (
     EXPECTED_CHECKPOINT_COUNT,
     EXPECTED_NATURAL_COUNT,
+    _authoritative_source_inventory_defects,
     build_coverage_report,
     coverage_report_id,
     validate_coverage_report_semantics,
@@ -45,6 +51,12 @@ MERGE_MANIFEST_HASH_VERSION = "part1-merge-manifest-hash-v1"
 PARQUET_WRITER_VERSION = "part1-pyarrow-parquet-v1"
 RAW_SCHEMA_VERSION = "1.0.0"
 ROW_GROUP_SIZE = 1024
+LOSSLESS_RAW_ROW_FIELD = "raw_row_canonical_json"
+PROJECTION_CONVERSION_VERSION = "part1-json-arrow-projection-v1"
+LINUX_RENAME_NOREPLACE = 0x00000001
+MACOS_RENAME_EXCL = 0x00000004
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+CHECKPOINTS_PER_NATURAL = 11
 
 PARQUET_WRITER_SETTINGS: dict[str, Any] = {
     "version": "2.6",
@@ -190,10 +202,14 @@ AUDIT_FIELD_SPECS = (
     ("terminal_record_id", *_s(True)), ("operator_reason", *_s(True)),
 )
 
-TABLE_FIELD_SPECS = {
+RAW_FIELD_SPECS = {
     "natural_results": NATURAL_FIELD_SPECS,
     "checkpoint_results": CHECKPOINT_FIELD_SPECS,
     "audit_events": AUDIT_FIELD_SPECS,
+}
+TABLE_FIELD_SPECS = {
+    kind: (*fields, (LOSSLESS_RAW_ROW_FIELD, pa.string(), False))
+    for kind, fields in RAW_FIELD_SPECS.items()
 }
 TABLE_COLUMN_ORDER = {
     kind: tuple(field[0] for field in fields) for kind, fields in TABLE_FIELD_SPECS.items()
@@ -295,6 +311,8 @@ def _metadata(kind: str, provenance: Mapping[str, str], row_count: int) -> dict[
         ),
         "column_order": _canonical_object_json(list(TABLE_COLUMN_ORDER[kind])),
         "sort_order": _canonical_object_json(list(TABLE_SORT_ORDERS[kind])),
+        "lossless_raw_row_field": LOSSLESS_RAW_ROW_FIELD,
+        "projection_conversion_version": PROJECTION_CONVERSION_VERSION,
     }
     return {key.encode("utf-8"): value.encode("utf-8") for key, value in values.items()}
 
@@ -331,26 +349,73 @@ def build_merge_table(
     for field in schema:
         values = []
         for record in ordered:
-            value = record[field.name]
+            if field.name == LOSSLESS_RAW_ROW_FIELD:
+                value = _canonical_object_json(record)
+            else:
+                value = record[field.name]
             if field.name in encoded_fields and value is not None:
                 value = _canonical_object_json(value)
             values.append(value)
         arrays.append(pa.array(values, type=field.type, from_pandas=False))
     table = pa.Table.from_arrays(arrays, schema=schema)
-    if decode_merge_table(kind, table) != ordered:
+    if [_canonical_object_json(row) for row in decode_merge_table(kind, table)] != [
+        _canonical_object_json(row) for row in ordered
+    ]:
         raise ValueError(f"{kind} Arrow encoding is not lossless")
     return table
 
 
+def _project_raw_value(field: pa.Field, value: Any, *, encoded_object: bool) -> Any:
+    if value is None:
+        return None
+    if encoded_object:
+        return _canonical_object_json(value)
+    datatype = field.type
+    if pa.types.is_int64(datatype):
+        return int(value)
+    if pa.types.is_float64(datatype):
+        return float(value)
+    if pa.types.is_boolean(datatype) or pa.types.is_string(datatype):
+        return value
+    if pa.types.is_list(datatype):
+        element_field = datatype.value_field
+        return [
+            _project_raw_value(element_field, item, encoded_object=False)
+            for item in value
+        ]
+    raise ValueError(f"unsupported direct projection type: {datatype}")
+
+
 def decode_merge_table(kind: str, table: pa.Table) -> list[dict[str, Any]]:
     encoded_fields = frozenset(ENCODED_OBJECT_FIELDS[kind])
-    rows = table.to_pylist()
-    for row in rows:
-        for field in encoded_fields:
-            value = row[field]
-            if value is not None:
-                row[field] = json.loads(value)
-    return rows
+    if LOSSLESS_RAW_ROW_FIELD not in table.column_names:
+        raise ValueError(f"{kind} table has no lossless raw-row representation")
+    projected_rows = table.to_pylist()
+    raw_rows: list[dict[str, Any]] = []
+    schema_name = TABLE_SCHEMA_NAMES[kind]
+    for row_number, projected in enumerate(projected_rows):
+        raw_text = projected[LOSSLESS_RAW_ROW_FIELD]
+        try:
+            raw = json.loads(raw_text)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"{kind} row {row_number} raw JSON is invalid") from exc
+        if not isinstance(raw, dict):
+            raise ValueError(f"{kind} row {row_number} raw JSON is not an object")
+        validate_instance(schema_name, raw)
+        for field in table.schema:
+            if field.name == LOSSLESS_RAW_ROW_FIELD:
+                continue
+            expected = _project_raw_value(
+                field, raw[field.name], encoded_object=field.name in encoded_fields
+            )
+            if _canonical_object_json(projected[field.name]) != _canonical_object_json(
+                expected
+            ):
+                raise ValueError(
+                    f"{kind} row {row_number} projection differs for {field.name}"
+                )
+        raw_rows.append(raw)
+    return raw_rows
 
 
 def _fsync_file(path: Path) -> None:
@@ -364,6 +429,87 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _fsync_directory_descriptor(descriptor: int) -> None:
+    os.fsync(descriptor)
+
+
+class ExclusiveRenameUnavailable(RuntimeError):
+    """The host has no verified native exclusive directory-rename primitive."""
+
+
+class PublicationDurabilityError(RuntimeError):
+    """Publication crossed rename but was safely rolled back before success."""
+
+
+class PublicationStateIndeterminateError(RuntimeError):
+    """Storage failure left publication durability genuinely indeterminate."""
+
+
+def _exclusive_rename_at(
+    parent_descriptor: int, source_name: str, destination_name: str
+) -> None:
+    """Rename one sibling directory without replacement, anchored to parent FD."""
+
+    for label, name in (("source", source_name), ("destination", destination_name)):
+        if not name or Path(name).name != name or "/" in name:
+            raise ValueError(f"exclusive rename {label} must be one basename")
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform.startswith("linux"):
+        try:
+            function = library.renameat2
+        except AttributeError as exc:
+            raise ExclusiveRenameUnavailable(
+                "Linux renameat2(RENAME_NOREPLACE) is unavailable; failing closed"
+            ) from exc
+        function.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        function.restype = ctypes.c_int
+        result = function(
+            parent_descriptor,
+            os.fsencode(source_name),
+            parent_descriptor,
+            os.fsencode(destination_name),
+            LINUX_RENAME_NOREPLACE,
+        )
+    elif sys.platform == "darwin":
+        try:
+            function = library.renameatx_np
+        except AttributeError as exc:
+            raise ExclusiveRenameUnavailable(
+                "macOS renameatx_np(RENAME_EXCL) is unavailable; failing closed"
+            ) from exc
+        function.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        function.restype = ctypes.c_int
+        result = function(
+            parent_descriptor,
+            os.fsencode(source_name),
+            parent_descriptor,
+            os.fsencode(destination_name),
+            MACOS_RENAME_EXCL,
+        )
+    else:
+        raise ExclusiveRenameUnavailable(
+            f"no verified exclusive rename primitive for platform {sys.platform!r}"
+        )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise FileExistsError(error_number, os.strerror(error_number), destination_name)
+    raise OSError(error_number, os.strerror(error_number), destination_name)
 
 
 def _schema_sha256(schema: pa.Schema) -> str:
@@ -511,15 +657,17 @@ def validate_merge_manifest(manifest: Mapping[str, Any]) -> None:
         "parquet_writer_version"
     ] != PARQUET_WRITER_VERSION:
         raise ValueError("merge format/writer version differs")
-    if manifest["sort_orders"] != {
-        kind: list(order) for kind, order in TABLE_SORT_ORDERS.items()
-    } or manifest["parquet_writer_settings"] != PARQUET_WRITER_SETTINGS:
+    if canonical_json_bytes(manifest["sort_orders"]) != canonical_json_bytes(
+        {kind: list(order) for kind, order in TABLE_SORT_ORDERS.items()}
+    ) or canonical_json_bytes(manifest["parquet_writer_settings"]) != canonical_json_bytes(
+        PARQUET_WRITER_SETTINGS
+    ):
         raise ValueError("merge deterministic sort/writer settings differ")
     for key in (
         "study_id", "study_manifest_hash", "question_manifest_hash", "model_run_id",
         "model_run_manifest_hash", "coverage_report_id",
     ):
-        if not isinstance(manifest[key], str) or len(manifest[key]) != 64:
+        if not isinstance(manifest[key], str) or SHA256_PATTERN.fullmatch(manifest[key]) is None:
             raise ValueError(f"merge manifest {key} is not a SHA-256 identity")
     coverage = manifest["coverage_report"]
     if not isinstance(coverage, Mapping) or set(coverage) != {
@@ -532,11 +680,14 @@ def validate_merge_manifest(manifest: Mapping[str, Any]) -> None:
         or coverage_path.is_absolute()
         or ".." in coverage_path.parts
         or coverage_path.as_posix() != coverage["relative_path"]
+        or coverage["relative_path"]
+        != f"results/part1/{manifest['model_run_id']}/validation/coverage_report.json"
         or not isinstance(coverage["sha256"], str)
-        or len(coverage["sha256"]) != 64
+        or SHA256_PATTERN.fullmatch(coverage["sha256"]) is None
+        or coverage["sha256"] == _sha256(b"")
         or isinstance(coverage["byte_size"], bool)
         or not isinstance(coverage["byte_size"], int)
-        or coverage["byte_size"] < 0
+        or coverage["byte_size"] <= 0
     ):
         raise ValueError("merge manifest coverage report provenance is invalid")
     source_files = manifest["source_files"]
@@ -557,15 +708,43 @@ def validate_merge_manifest(manifest: Mapping[str, Any]) -> None:
             or parsed.as_posix() != relative_path
             or item["state"] not in {"regular_file", "absent"}
             or not isinstance(item["sha256"], str)
-            or len(item["sha256"]) != 64
+            or SHA256_PATTERN.fullmatch(item["sha256"]) is None
             or isinstance(item["byte_size"], bool)
             or not isinstance(item["byte_size"], int)
             or item["byte_size"] < 0
+            or not isinstance(item["kind"], str)
+            or not (item["shard_id"] is None or isinstance(item["shard_id"], str))
         ):
             raise ValueError("merge manifest source inventory entry is invalid")
+        if item["state"] == "absent":
+            if item["sha256"] != _sha256(b"") or item["byte_size"] != 0:
+                raise ValueError("absent merge source must have empty hash and zero bytes")
+        elif item["byte_size"] <= 0 or item["sha256"] == _sha256(b""):
+            raise ValueError("regular merge source must be nonempty")
         source_paths.append(relative_path)
     if source_paths != sorted(source_paths) or len(source_paths) != len(set(source_paths)):
         raise ValueError("merge manifest source inventory order or uniqueness differs")
+    dependency_sources = [
+        item for item in source_files if item["kind"] == "dependency_lock"
+    ]
+    if len(dependency_sources) != 1:
+        raise ValueError("merge source inventory requires one dependency lock")
+    inventory_defects = _authoritative_source_inventory_defects(
+        {
+            "model_run_id": manifest["model_run_id"],
+            "source_files": source_files,
+            "structurally_valid": True,
+            "summary": {
+                "dependency_lock_sha256": dependency_sources[0]["sha256"],
+                "observed": {"shards": 500},
+            },
+        }
+    )
+    if inventory_defects:
+        raise ValueError(
+            "merge source inventory violates the fixed contract: "
+            + "; ".join(inventory_defects[:5])
+        )
     outputs = manifest["outputs"]
     if not isinstance(outputs, Mapping) or set(outputs) != set(TABLE_FILENAMES):
         raise ValueError("merge manifest outputs differ from the three-table contract")
@@ -578,12 +757,13 @@ def validate_merge_manifest(manifest: Mapping[str, Any]) -> None:
         if (
             summary["relative_path"] != TABLE_FILENAMES[kind]
             or not isinstance(summary["sha256"], str)
-            or len(summary["sha256"]) != 64
+            or SHA256_PATTERN.fullmatch(summary["sha256"]) is None
+            or summary["sha256"] == _sha256(b"")
             or not isinstance(summary["schema_sha256"], str)
-            or len(summary["schema_sha256"]) != 64
+            or SHA256_PATTERN.fullmatch(summary["schema_sha256"]) is None
             or isinstance(summary["byte_size"], bool)
             or not isinstance(summary["byte_size"], int)
-            or summary["byte_size"] < 0
+            or summary["byte_size"] <= 0
             or isinstance(summary["row_count"], bool)
             or not isinstance(summary["row_count"], int)
             or summary["row_count"] < 0
@@ -594,6 +774,38 @@ def validate_merge_manifest(manifest: Mapping[str, Any]) -> None:
             )
         ):
             raise ValueError(f"merge manifest output summary is invalid for {kind}")
+        provenance = {
+            key: manifest[key]
+            for key in (
+                "study_id",
+                "study_manifest_hash",
+                "question_manifest_hash",
+                "model_run_id",
+                "model_run_manifest_hash",
+                "coverage_report_id",
+            )
+        }
+        expected_schema = _schema(kind, provenance, summary["row_count"])
+        expected_metadata = {
+            key.decode("utf-8"): value.decode("utf-8")
+            for key, value in expected_schema.metadata.items()
+        }
+        if (
+            summary["schema_sha256"] != _schema_sha256(expected_schema)
+            or dict(summary["embedded_metadata"]) != expected_metadata
+        ):
+            raise ValueError(
+                f"merge manifest output schema or embedded metadata differs for {kind}"
+            )
+    natural_row_count = outputs["natural_results"]["row_count"]
+    checkpoint_row_count = outputs["checkpoint_results"]["row_count"]
+    if natural_row_count != EXPECTED_NATURAL_COUNT:
+        raise ValueError("merge manifest natural row count differs from fixed workload")
+    if (
+        checkpoint_row_count > EXPECTED_CHECKPOINT_COUNT
+        or checkpoint_row_count % CHECKPOINTS_PER_NATURAL != 0
+    ):
+        raise ValueError("merge manifest checkpoint row count violates fixed workload")
     if manifest["merge_id"] != merge_id(manifest):
         raise ValueError("merge identity does not recompute")
     if manifest["merge_manifest_hash"] != merge_manifest_hash(manifest):
@@ -661,6 +873,90 @@ def require_source_snapshot(
         raise ValueError("source snapshot differs from coverage: " + "; ".join(errors[:5]))
 
 
+def _read_inventory_entry_at(
+    repository_descriptor: int,
+    entry: Mapping[str, Any],
+    *,
+    after_open: Callable[[], None] | None = None,
+) -> bytes | None:
+    """Read and hash one inventory entry through an ``O_NOFOLLOW`` fd walk.
+
+    The bytes are read from the same final descriptor that was type-checked, so
+    a concurrent path replacement cannot substitute bytes after validation.
+    """
+
+    relative_path = str(entry["relative_path"])
+    relative = Path(relative_path)
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or ".." in relative.parts
+        or relative.as_posix() != relative_path
+    ):
+        raise ValueError(f"source path is unsafe: {relative_path}")
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    file_flags = (
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+    current_descriptor = os.dup(repository_descriptor)
+    try:
+        for component in relative.parts[:-1]:
+            try:
+                next_descriptor = os.open(
+                    component, directory_flags, dir_fd=current_descriptor
+                )
+            except OSError as exc:
+                if entry["state"] == "absent" and exc.errno == errno.ENOENT:
+                    return None
+                raise ValueError(
+                    f"source path cannot be opened without following links: {relative_path}"
+                ) from exc
+            os.close(current_descriptor)
+            current_descriptor = next_descriptor
+        try:
+            file_descriptor = os.open(
+                relative.parts[-1], file_flags, dir_fd=current_descriptor
+            )
+        except OSError as exc:
+            if entry["state"] == "absent" and exc.errno == errno.ENOENT:
+                return None
+            raise ValueError(
+                f"source cannot be opened as a non-symlink file: {relative_path}"
+            ) from exc
+        try:
+            if entry["state"] == "absent":
+                raise ValueError(
+                    f"source changed: expected absent but observed present: {relative_path}"
+                )
+            file_status = os.fstat(file_descriptor)
+            if not stat.S_ISREG(file_status.st_mode):
+                raise ValueError(f"source changed type: {relative_path}")
+            if after_open is not None:
+                after_open()
+            chunks: list[bytes] = []
+            digest = hashlib.sha256()
+            byte_size = 0
+            while True:
+                chunk = os.read(file_descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                digest.update(chunk)
+                byte_size += len(chunk)
+            if byte_size != entry["byte_size"] or digest.hexdigest() != entry["sha256"]:
+                raise ValueError(f"source bytes changed: {relative_path}")
+            return b"".join(chunks)
+        finally:
+            os.close(file_descriptor)
+    finally:
+        os.close(current_descriptor)
+
+
 def _require_no_symlink_components(path: Path) -> None:
     absolute = Path(os.path.abspath(path))
     components = [absolute]
@@ -699,6 +995,13 @@ def _canonical_relative(repository_root: Path, path: Path, *, label: str) -> str
 
 
 def revalidate_merge_inputs(inputs: MergeInputs) -> None:
+    report_source_files = inputs.coverage_report.get("source_files")
+    if not isinstance(report_source_files, list) or canonical_json_bytes(
+        list(inputs.source_files)
+    ) != canonical_json_bytes(report_source_files):
+        raise ValueError(
+            "validated source_files must be exactly equal to coverage report source_files"
+        )
     require_mergeable_coverage(inputs.coverage_report)
     path = inputs.coverage_report_path
     _require_no_symlink_components(path)
@@ -806,49 +1109,104 @@ def load_validated_merge_inputs(
     checkpoint_ids: set[str] = set()
     event_ids: set[str] = set()
     raw_root = repository_root / expected_paths["raw_shards"]
-    for shard_index in range(500):
-        shard_id = f"shard-{shard_index:03d}"
-        store = Part1ShardStore(
-            raw_root / shard_id,
-            shard_id=shard_id,
-            study_id=model_manifest["study_id"],
-            model_run_id=model_manifest["model_run_id"],
-            model_run_manifest_hash=model_manifest["model_run_manifest_hash"],
-        )
-        inspection = store.inspect()
-        index = store.build_index()
-        if (
-            index.hierarchy_errors or index.lifecycle_errors
-            or index.missing_completion_record_ids or index.missing_started_attempt_ids
-            or index.inconsistent_completion_attempt_ids or index.orphaned_attempt_ids
-            or index.pending_recovery_event_ids or index.terminalization_required
-        ):
-            raise ValueError(f"{shard_id} lifecycle/hierarchy is incomplete")
-        question = question_by_index[shard_index]
-        for row in inspection.natural_results:
-            validate_instance("natural_terminal_result", row)
-            if row["sample_index"] != shard_index or row["question_id"] != question["question_id"]:
-                raise ValueError(f"natural row is assigned to the wrong shard: {shard_id}")
-            if row["raw_record_id"] in natural_ids:
-                raise ValueError("duplicate natural record ID across shards")
-            natural_ids.add(row["raw_record_id"])
-            natural.append(row)
-        for row in inspection.checkpoint_results:
-            validate_instance("checkpoint_terminal_result", row)
-            if row["sample_index"] != shard_index or row["question_id"] != question["question_id"]:
-                raise ValueError(f"checkpoint row is assigned to the wrong shard: {shard_id}")
-            if row["checkpoint_record_id"] in checkpoint_ids:
-                raise ValueError("duplicate checkpoint record ID across shards")
-            checkpoint_ids.add(row["checkpoint_record_id"])
-            checkpoints.append(row)
-        for row in inspection.audit_events:
-            validate_instance("audit_event", row)
-            if row["shard_id"] != shard_id:
-                raise ValueError(f"audit event is assigned to the wrong shard: {shard_id}")
-            if row["event_id"] in event_ids:
-                raise ValueError("duplicate audit event ID across shards")
-            event_ids.add(row["event_id"])
-            audit.append(row)
+    inventory_by_shard: dict[str, list[Mapping[str, Any]]] = {}
+    for entry in coverage_report["source_files"]:
+        if isinstance(entry.get("shard_id"), str):
+            inventory_by_shard.setdefault(entry["shard_id"], []).append(entry)
+    repository_descriptor = os.open(
+        repository_root,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        for shard_index in range(500):
+            shard_id = f"shard-{shard_index:03d}"
+            entries = inventory_by_shard.get(shard_id, [])
+            by_kind: dict[str, list[Mapping[str, Any]]] = {}
+            for entry in entries:
+                by_kind.setdefault(str(entry["kind"]), []).append(entry)
+            required_kinds = {
+                "shard_provenance",
+                "natural_results",
+                "checkpoint_results",
+                "audit_events",
+                "finalization_marker",
+            }
+            if any(len(by_kind.get(kind, ())) != 1 for kind in required_kinds):
+                raise ValueError(f"{shard_id} source snapshot is incomplete")
+            snapshot = {
+                kind: _read_inventory_entry_at(repository_descriptor, by_kind[kind][0])
+                for kind in required_kinds
+            }
+            recovery_snapshot: dict[str, bytes] = {}
+            for recovery_entry in by_kind.get("recovery_evidence", ()):
+                recovery_bytes = _read_inventory_entry_at(
+                    repository_descriptor, recovery_entry
+                )
+                if recovery_bytes is None:
+                    raise ValueError(f"{shard_id} recovery evidence became absent")
+                recovery_snapshot[str(recovery_entry["relative_path"])] = recovery_bytes
+            store = Part1ShardStore(
+                raw_root / shard_id,
+                shard_id=shard_id,
+                study_id=model_manifest["study_id"],
+                model_run_id=model_manifest["model_run_id"],
+                model_run_manifest_hash=model_manifest["model_run_manifest_hash"],
+            )
+            provenance_bytes = snapshot["shard_provenance"]
+            if provenance_bytes is None:
+                raise ValueError(f"{shard_id} provenance snapshot is absent")
+            inspection = store.inspect_from_snapshot(
+                provenance_header_bytes=provenance_bytes,
+                stream_bytes={
+                    "natural_results": snapshot["natural_results"],
+                    "checkpoint_results": snapshot["checkpoint_results"],
+                    "audit_events": snapshot["audit_events"],
+                },
+            )
+            recovery_events = store.recovery_journal_events_from_snapshot(
+                recovery_snapshot
+            )
+            index = store.build_index_from_snapshot(
+                inspection, recovery_journal_events=recovery_events
+            )
+            if (
+                index.hierarchy_errors or index.lifecycle_errors
+                or index.missing_completion_record_ids or index.missing_started_attempt_ids
+                or index.inconsistent_completion_attempt_ids or index.orphaned_attempt_ids
+                or index.pending_recovery_event_ids or index.terminalization_required
+            ):
+                raise ValueError(f"{shard_id} lifecycle/hierarchy is incomplete")
+            question = question_by_index[shard_index]
+            for row in inspection.natural_results:
+                validate_instance("natural_terminal_result", row)
+                if row["sample_index"] != shard_index or row["question_id"] != question["question_id"]:
+                    raise ValueError(f"natural row is assigned to the wrong shard: {shard_id}")
+                if row["raw_record_id"] in natural_ids:
+                    raise ValueError("duplicate natural record ID across shards")
+                natural_ids.add(row["raw_record_id"])
+                natural.append(row)
+            for row in inspection.checkpoint_results:
+                validate_instance("checkpoint_terminal_result", row)
+                if row["sample_index"] != shard_index or row["question_id"] != question["question_id"]:
+                    raise ValueError(f"checkpoint row is assigned to the wrong shard: {shard_id}")
+                if row["checkpoint_record_id"] in checkpoint_ids:
+                    raise ValueError("duplicate checkpoint record ID across shards")
+                checkpoint_ids.add(row["checkpoint_record_id"])
+                checkpoints.append(row)
+            for row in inspection.audit_events:
+                validate_instance("audit_event", row)
+                if row["shard_id"] != shard_id:
+                    raise ValueError(f"audit event is assigned to the wrong shard: {shard_id}")
+                if row["event_id"] in event_ids:
+                    raise ValueError("duplicate audit event ID across shards")
+                event_ids.add(row["event_id"])
+                audit.append(row)
+            del snapshot, recovery_snapshot, inspection, recovery_events
+    finally:
+        os.close(repository_descriptor)
 
     natural_partition = coverage_report["summary"]["natural_partition"]
     checkpoint_partition = coverage_report["summary"]["checkpoint_partition"]
@@ -928,26 +1286,45 @@ def _expected_manifest_bytes(manifest: Mapping[str, Any]) -> bytes:
     return _canonical_document(manifest)
 
 
-def validate_merge_directory(
-    directory: Path,
+def _read_regular_file_at(directory_descriptor: int, name: str) -> bytes:
+    if Path(name).name != name:
+        raise ValueError(f"unsafe merged output name: {name}")
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=directory_descriptor,
+    )
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"merged directory entry is nonregular: {name}")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _validate_merge_directory_descriptor(
+    directory_descriptor: int,
     *,
     expected_manifest: Mapping[str, Any] | None = None,
     expected_rows: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    """Strictly validate a staged or finalized four-file merge directory."""
-
-    directory = Path(directory)
-    _safe_existing_directory(directory, label="merged directory")
     expected_names = {*TABLE_FILENAMES.values(), "merge_manifest.json"}
-    entries = list(directory.iterdir())
-    if {entry.name for entry in entries} != expected_names or len(entries) != len(expected_names):
+    entries = os.listdir(directory_descriptor)
+    if set(entries) != expected_names or len(entries) != len(expected_names):
         raise ValueError("merged directory has missing or extra contents")
-    for entry in entries:
-        mode = entry.lstat().st_mode
-        if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-            raise ValueError(f"merged directory entry is symlinked or nonregular: {entry.name}")
-    manifest_path = directory / "merge_manifest.json"
-    manifest, manifest_bytes = _load_regular_json(manifest_path, label="merge manifest")
+    manifest_bytes = _read_regular_file_at(directory_descriptor, "merge_manifest.json")
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"merge manifest is invalid JSON: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise ValueError("merge manifest is not a JSON object")
     validate_merge_manifest(manifest)
     if manifest_bytes != _expected_manifest_bytes(manifest):
         raise ValueError("merge manifest bytes are not canonical deterministic JSON")
@@ -963,14 +1340,13 @@ def validate_merge_directory(
         )
     }
     for kind, filename in TABLE_FILENAMES.items():
-        path = directory / filename
-        data = path.read_bytes()
+        data = _read_regular_file_at(directory_descriptor, filename)
         summary = manifest["outputs"][kind]
         if summary["relative_path"] != filename or summary["sha256"] != _sha256(
             data
         ) or summary["byte_size"] != len(data):
             raise ValueError(f"{kind} output bytes differ from merge manifest")
-        table = pq.read_table(path)
+        table = pq.read_table(pa.BufferReader(data))
         expected_schema = _schema(kind, provenance, summary["row_count"])
         if table.schema != expected_schema or _schema_sha256(table.schema) != summary[
             "schema_sha256"
@@ -991,25 +1367,120 @@ def validate_merge_directory(
         if expected_rows is not None:
             expected = [copy.deepcopy(dict(row)) for row in expected_rows[kind]]
             expected.sort(key=lambda row: _sort_key(kind, row))
-            if decoded != expected:
+            if [_canonical_object_json(row) for row in decoded] != [
+                _canonical_object_json(row) for row in expected
+            ]:
                 raise ValueError(f"{kind} Parquet recovery is not lossless")
     return manifest
 
 
-def _remove_own_stage(stage: Path, parent: Path, prefix: str) -> None:
+def validate_merge_directory_at(
+    parent_descriptor: int,
+    directory_name: str,
+    *,
+    expected_manifest: Mapping[str, Any] | None = None,
+    expected_rows: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Validate a child directory through an already anchored parent fd."""
+
+    if Path(directory_name).name != directory_name:
+        raise ValueError(f"unsafe merged directory name: {directory_name}")
+    try:
+        directory_descriptor = os.open(
+            directory_name,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_descriptor,
+        )
+    except OSError as exc:
+        raise ValueError(
+            f"merged directory is missing, symlinked, or non-directory: {directory_name}"
+        ) from exc
+    try:
+        return _validate_merge_directory_descriptor(
+            directory_descriptor,
+            expected_manifest=expected_manifest,
+            expected_rows=expected_rows,
+        )
+    finally:
+        os.close(directory_descriptor)
+
+
+def validate_merge_directory(
+    directory: Path,
+    *,
+    expected_manifest: Mapping[str, Any] | None = None,
+    expected_rows: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Strictly validate a staged or finalized four-file merge directory."""
+
+    directory = Path(os.path.abspath(directory))
+    parent_descriptor = os.open(
+        directory.parent,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        return validate_merge_directory_at(
+            parent_descriptor,
+            directory.name,
+            expected_manifest=expected_manifest,
+            expected_rows=expected_rows,
+        )
+    finally:
+        os.close(parent_descriptor)
+
+
+def _remove_own_stage(
+    stage: Path,
+    parent: Path,
+    prefix: str,
+    *,
+    parent_descriptor: int,
+    stage_descriptor: int,
+    fault_hook: Callable[[str], None],
+) -> None:
     if stage.parent != parent or not stage.name.startswith(prefix):
         raise RuntimeError("refusing to clean a directory not owned by this merge invocation")
-    if os.path.lexists(stage):
-        if stage.is_symlink():
-            raise RuntimeError("merge staging directory was replaced by a symlink")
-        shutil.rmtree(stage)
+    expected = os.fstat(stage_descriptor)
+    try:
+        observed = os.stat(stage.name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if (
+        not stat.S_ISDIR(observed.st_mode)
+        or (observed.st_dev, observed.st_ino) != (expected.st_dev, expected.st_ino)
+    ):
+        raise RuntimeError("merge staging directory identity was replaced; refusing cleanup")
+    fault_hook("before_stage_cleanup_identity_move")
+    cleanup_name = f".{stage.name}.cleanup-{secrets.token_hex(16)}"
+    _exclusive_rename_at(parent_descriptor, stage.name, cleanup_name)
+    moved = os.stat(cleanup_name, dir_fd=parent_descriptor, follow_symlinks=False)
+    if (moved.st_dev, moved.st_ino) != (expected.st_dev, expected.st_ino):
+        try:
+            _exclusive_rename_at(parent_descriptor, cleanup_name, stage.name)
+            _fsync_directory_descriptor(parent_descriptor)
+        except BaseException as restore_error:
+            raise PublicationStateIndeterminateError(
+                "stage cleanup identity changed during quarantine and safe restore failed: "
+                f"stage={stage}; quarantine={cleanup_name}; error={restore_error}"
+            ) from restore_error
+        raise RuntimeError("stage identity changed during cleanup; replacement was restored")
+    cleanup_path = parent / cleanup_name
+    shutil.rmtree(cleanup_path)
+    _fsync_directory_descriptor(parent_descriptor)
 
 
 def publish_merge(
     inputs: MergeInputs,
     *,
     fault_hook: Callable[[str], None] | None = None,
-) -> Path:
+    return_manifest: bool = False,
+) -> Path | tuple[Path, dict[str, Any]]:
     """Stage, reload, verify, and atomically publish one no-overwrite merge."""
 
     revalidate_merge_inputs(inputs)
@@ -1019,8 +1490,41 @@ def publish_merge(
         raise ValueError("production merged output path is not canonical")
     target = inputs.repository_root / target_relative
     _ensure_safe_directory(target.parent)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    parent_descriptor = os.open(target.parent, directory_flags)
     prefix = f".{target.name}.stage-"
-    stage = Path(tempfile.mkdtemp(prefix=prefix, dir=target.parent))
+    try:
+        stage = Path(tempfile.mkdtemp(prefix=prefix, dir=target.parent))
+    except BaseException:
+        os.close(parent_descriptor)
+        raise
+    try:
+        initial_stage_status = os.stat(
+            stage.name, dir_fd=parent_descriptor, follow_symlinks=False
+        )
+    except BaseException as identity_error:
+        os.close(parent_descriptor)
+        raise PublicationStateIndeterminateError(
+            f"stage={stage}; identity could not be established after creation, "
+            "so cleanup was refused and the parent descriptor was closed"
+        ) from identity_error
+    try:
+        stage_descriptor = os.open(stage.name, directory_flags, dir_fd=parent_descriptor)
+    except BaseException:
+        try:
+            current = os.stat(
+                stage.name, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+            if (current.st_dev, current.st_ino) == (
+                initial_stage_status.st_dev,
+                initial_stage_status.st_ino,
+            ):
+                os.rmdir(stage.name, dir_fd=parent_descriptor)
+                _fsync_directory_descriptor(parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
+        raise
     rows = {
         "natural_results": inputs.natural_records,
         "checkpoint_results": inputs.checkpoint_records,
@@ -1028,6 +1532,7 @@ def publish_merge(
     }
     hook = fault_hook or (lambda _boundary: None)
     published = False
+    retain_stage = False
     try:
         hook("stage_created")
         provenance = _provenance(inputs)
@@ -1057,27 +1562,77 @@ def publish_merge(
             os.fsync(handle.fileno())
         hook("manifest_written")
         _fsync_directory(stage)
-        validate_merge_directory(stage, expected_manifest=manifest, expected_rows=rows)
+        validate_merge_directory_at(
+            parent_descriptor, stage.name, expected_manifest=manifest, expected_rows=rows
+        )
         hook("reload_complete")
         hook("before_rename")
         revalidate_merge_inputs(inputs)
         if os.path.lexists(target):
-            validate_merge_directory(target, expected_manifest=manifest, expected_rows=rows)
-            return target
+            validate_merge_directory_at(
+                parent_descriptor,
+                target.name,
+                expected_manifest=manifest,
+                expected_rows=rows,
+            )
+            return (target, manifest) if return_manifest else target
+        hook("before_exclusive_rename")
+        revalidate_merge_inputs(inputs)
         try:
-            os.rename(stage, target)
-            published = True
-        except OSError:
+            _exclusive_rename_at(parent_descriptor, stage.name, target.name)
+        except FileExistsError:
             if not os.path.lexists(target):
                 raise
             revalidate_merge_inputs(inputs)
-            validate_merge_directory(target, expected_manifest=manifest, expected_rows=rows)
-            return target
-        _fsync_directory(target.parent)
-        return target
+            validate_merge_directory_at(
+                parent_descriptor,
+                target.name,
+                expected_manifest=manifest,
+                expected_rows=rows,
+            )
+            return (target, manifest) if return_manifest else target
+        try:
+            _fsync_directory_descriptor(parent_descriptor)
+        except OSError as fsync_error:
+            try:
+                _exclusive_rename_at(parent_descriptor, target.name, stage.name)
+            except BaseException as rollback_error:
+                published = True
+                raise PublicationStateIndeterminateError(
+                    "post-rename parent fsync failed and exclusive rollback failed; "
+                    f"final path may remain at {target}: fsync={fsync_error}; "
+                    f"rollback={rollback_error}"
+                ) from fsync_error
+            try:
+                _fsync_directory_descriptor(parent_descriptor)
+            except OSError as rollback_fsync_error:
+                retain_stage = True
+                raise PublicationStateIndeterminateError(
+                    "publication was renamed back from the final path but rollback "
+                    f"durability is indeterminate; final path={target}; stage={stage}; "
+                    f"fsync={rollback_fsync_error}"
+                ) from fsync_error
+            raise PublicationDurabilityError(
+                f"post-rename parent fsync failed; publication at {target} was rolled back"
+            ) from fsync_error
+        published = True
+        return (target, manifest) if return_manifest else target
     finally:
-        if not published:
-            _remove_own_stage(stage, target.parent, prefix)
+        try:
+            if not published and not retain_stage:
+                _remove_own_stage(
+                    stage,
+                    target.parent,
+                    prefix,
+                    parent_descriptor=parent_descriptor,
+                    stage_descriptor=stage_descriptor,
+                    fault_hook=hook,
+                )
+        finally:
+            try:
+                os.close(stage_descriptor)
+            finally:
+                os.close(parent_descriptor)
 
 
 def merge_part1_results(
@@ -1091,6 +1646,7 @@ def merge_part1_results(
         model_run_manifest_path=model_run_manifest_path,
         coverage_report_path=coverage_report_path,
     )
-    target = publish_merge(inputs)
-    manifest, _bytes = _load_regular_json(target / "merge_manifest.json", label="merge manifest")
-    return target, manifest
+    result = publish_merge(inputs, return_manifest=True)
+    if not isinstance(result, tuple):
+        raise RuntimeError("manifest-returning publication returned no manifest")
+    return result

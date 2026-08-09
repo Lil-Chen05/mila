@@ -284,9 +284,14 @@ class Part1ShardStore:
 
     def _assert_provenance_header(self) -> dict[str, Any]:
         try:
-            value = json.loads(self.provenance_header_path.read_text(encoding="utf-8"))
+            data = self.provenance_header_path.read_bytes()
         except FileNotFoundError as exc:
             raise InvalidRecordError("shard provenance header is missing") from exc
+        return self._assert_provenance_header_bytes(data)
+
+    def _assert_provenance_header_bytes(self, data: bytes) -> dict[str, Any]:
+        try:
+            value = json.loads(data.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise InvalidRecordError(f"shard provenance header is corrupt: {exc}") from exc
         if value != self._expected_provenance_header():
@@ -309,6 +314,13 @@ class Part1ShardStore:
         if not path.exists():
             return _ParsedStream((), None, None, False)
         data = path.read_bytes()
+        return self._parse_stream_bytes(stream_name, data, label=str(path))
+
+    def _parse_stream_bytes(
+        self, stream_name: str, data: bytes, *, label: str
+    ) -> _ParsedStream:
+        if stream_name not in self.stream_paths:
+            raise ValueError(f"unknown Part 1 shard stream: {stream_name}")
         if not data:
             return _ParsedStream((), None, None, False)
         physical_lines = data.splitlines(keepends=True)
@@ -326,17 +338,17 @@ class Part1ShardStore:
                 if final:
                     return _ParsedStream(tuple(records), physical_line, offset, False)
                 raise MalformedMiddleError(
-                    f"malformed JSON in middle of {path} at physical line {index + 1}"
+                    f"malformed JSON in middle of {label} at physical line {index + 1}"
                 ) from exc
             if not isinstance(record, dict):
                 raise InvalidRecordError(
-                    f"complete record in {path} line {index + 1} is not a JSON object"
+                    f"complete record in {label} line {index + 1} is not a JSON object"
                 )
             try:
                 validate_instance(schema_name, record)
             except ValueError as exc:
                 raise InvalidRecordError(
-                    f"schema-invalid complete record in {path} line {index + 1}: {exc}"
+                    f"schema-invalid complete record in {label} line {index + 1}: {exc}"
                 ) from exc
             records.append(record)
             if final and not terminated:
@@ -347,6 +359,31 @@ class Part1ShardStore:
     def inspect(self) -> StreamInspection:
         self._assert_provenance_header()
         parsed = {name: self._parse_stream(name) for name in STREAM_FILES}
+        return self._inspection_from_parsed(parsed)
+
+    def inspect_from_snapshot(
+        self,
+        *,
+        provenance_header_bytes: bytes,
+        stream_bytes: Mapping[str, bytes | None],
+    ) -> StreamInspection:
+        """Inspect only caller-provided, previously validated shard bytes."""
+
+        self._assert_provenance_header_bytes(provenance_header_bytes)
+        if set(stream_bytes) != set(STREAM_FILES):
+            raise ValueError("snapshot must name exactly the three shard streams")
+        parsed = {
+            name: self._parse_stream_bytes(
+                name, data or b"", label=f"snapshot:{self.shard_id}/{STREAM_FILES[name]}"
+            )
+            for name, data in stream_bytes.items()
+        }
+        return self._inspection_from_parsed(parsed)
+
+    @staticmethod
+    def _inspection_from_parsed(
+        parsed: Mapping[str, _ParsedStream],
+    ) -> StreamInspection:
         return StreamInspection(
             natural_results=parsed["natural_results"].records,
             checkpoint_results=parsed["checkpoint_results"].records,
@@ -480,25 +517,51 @@ class Part1ShardStore:
 
     def _load_recovery_journal_event(self, path: Path) -> dict[str, Any]:
         try:
-            event = json.loads(path.read_text(encoding="utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            data = path.read_bytes()
+        except OSError as exc:
             raise InvalidRecordError(f"invalid recovery journal {path}: {exc}") from exc
+        return self._load_recovery_journal_event_bytes(data, filename=path.name)
+
+    def _load_recovery_journal_event_bytes(
+        self, data: bytes, *, filename: str
+    ) -> dict[str, Any]:
+        try:
+            event = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise InvalidRecordError(f"invalid recovery journal {filename}: {exc}") from exc
         if not isinstance(event, dict):
-            raise InvalidRecordError(f"recovery journal {path} is not a JSON object")
+            raise InvalidRecordError(f"recovery journal {filename} is not a JSON object")
         try:
             validate_instance("audit_event", event)
             self._assert_provenance(event)
             self._verify_event_identity(event)
         except (KeyError, ValueError) as exc:
-            raise InvalidRecordError(f"invalid recovery journal {path}: {exc}") from exc
+            raise InvalidRecordError(f"invalid recovery journal {filename}: {exc}") from exc
         if (
             event["event_type"] != "trailing_line_recovered"
             or event["event_scope"] != "shard"
             or event["shard_id"] != self.shard_id
-            or path.name != f"{event['event_id']}.json"
+            or filename != f"{event['event_id']}.json"
         ):
-            raise InvalidRecordError(f"recovery journal {path} has incompatible identity")
+            raise InvalidRecordError(
+                f"recovery journal {filename} has incompatible identity"
+            )
         return event
+
+    def recovery_journal_events_from_snapshot(
+        self, entries: Mapping[str, bytes]
+    ) -> tuple[dict[str, Any], ...]:
+        """Validate recovery evidence without reopening its source paths."""
+
+        filenames = [Path(name).name for name in entries]
+        if len(filenames) != len(set(filenames)):
+            raise InvalidRecordError("duplicate recovery journal filename in snapshot")
+        return tuple(
+            self._load_recovery_journal_event_bytes(
+                entries[name], filename=Path(name).name
+            )
+            for name in sorted(entries)
+        )
 
     def _load_recovery_journal_events(self) -> tuple[dict[str, Any], ...]:
         if not self.recovery_journal_directory.exists():
@@ -1144,7 +1207,21 @@ class Part1ShardStore:
             raise InjectedCrash(fault_at)
 
     def build_index(self) -> ShardIndex:
-        inspection = self.inspect()
+        """Build an index from a fresh, path-based shard inspection."""
+
+        return self.build_index_from_snapshot(
+            self.inspect(),
+            recovery_journal_events=self._load_recovery_journal_events(),
+        )
+
+    def build_index_from_snapshot(
+        self,
+        inspection: StreamInspection,
+        *,
+        recovery_journal_events: tuple[dict[str, Any], ...],
+    ) -> ShardIndex:
+        """Build an index without reopening any shard stream or journal path."""
+
         if inspection.trailing_tails or inspection.unterminated_streams:
             raise StreamTailError("active shard contains an unrecovered trailing line")
 
@@ -1409,10 +1486,11 @@ class Part1ShardStore:
             ]
             if not closures or closures[-1].get("retry_decision") == "exhausted":
                 terminalization_required[logical_key] = "interrupted_process"
-        journal_events = self._load_recovery_journal_events()
         audit_event_ids = {event["event_id"] for event in inspection.audit_events}
         pending_recovery_event_ids = frozenset(
-            event["event_id"] for event in journal_events if event["event_id"] not in audit_event_ids
+            event["event_id"]
+            for event in recovery_journal_events
+            if event["event_id"] not in audit_event_ids
         )
         return ShardIndex(
             study_id=self.study_id,

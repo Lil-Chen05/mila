@@ -12,6 +12,7 @@ from part1_store import (
     DuplicateTerminalResultError,
     FinalizedShardError,
     InjectedCrash,
+    InvalidRecordError,
     MalformedMiddleError,
     Part1ShardStore,
     Part1StoreError,
@@ -41,6 +42,49 @@ def store(tmp_path: Path) -> Part1ShardStore:
     )
     shard.initialize_provenance_header()
     return shard
+
+
+def test_build_index_from_validated_snapshot_never_reopens_store_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shard = store(tmp_path)
+    result = natural_result()
+    shard.append_audit_event(attempt_event(result, "attempt_started", 0))
+    shard.commit_terminal_result(
+        result, attempt_event(result, "attempt_completed", 1)
+    )
+    inspection = shard.inspect()
+    expected = shard.build_index()
+    monkeypatch.setattr(
+        shard,
+        "inspect",
+        lambda: (_ for _ in ()).throw(AssertionError("stream path reopened")),
+    )
+    monkeypatch.setattr(
+        shard,
+        "_load_recovery_journal_events",
+        lambda: (_ for _ in ()).throw(AssertionError("journal path reopened")),
+    )
+
+    observed = shard.build_index_from_snapshot(
+        inspection, recovery_journal_events=()
+    )
+    assert observed.natural_terminal_by_key == expected.natural_terminal_by_key
+    assert observed.checkpoint_terminal_by_key == expected.checkpoint_terminal_by_key
+    assert observed.pending_recovery_event_ids == frozenset()
+
+
+def test_recovery_snapshot_rejects_duplicate_effective_journal_names(
+    tmp_path: Path,
+) -> None:
+    shard = store(tmp_path)
+    with pytest.raises(InvalidRecordError, match="duplicate recovery journal filename"):
+        shard.recovery_journal_events_from_snapshot(
+            {
+                "recovery_journal/first/event.json": b"{}",
+                "recovery_journal/second/event.json": b"{}",
+            }
+        )
 
 
 def _write_synthetic_raw_terminal(shard: Part1ShardStore, result: dict) -> None:

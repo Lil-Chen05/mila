@@ -7,7 +7,10 @@ import json
 from pathlib import Path
 import sys
 
-from part1_merge import load_validated_merge_inputs, publish_merge
+from part1_merge import (
+    load_validated_merge_inputs,
+    publish_merge,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -30,8 +33,10 @@ def main(argv: list[str] | None = None) -> int:
             model_run_manifest_path=args.model_run_manifest,
             coverage_report_path=args.coverage_report,
         )
-        target = publish_merge(inputs)
-        manifest = json.loads((target / "merge_manifest.json").read_text(encoding="utf-8"))
+        publication = publish_merge(inputs, return_manifest=True)
+        if not isinstance(publication, tuple):
+            raise RuntimeError("manifest-returning publication returned no manifest")
+        target, manifest = publication
     except Exception as exc:
         print(
             json.dumps(

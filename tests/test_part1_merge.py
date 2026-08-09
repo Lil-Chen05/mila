@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import pyarrow.parquet as pq
+import pyarrow as pa
 
 
 def _rows(tmp_path: Path):
@@ -131,6 +132,48 @@ def test_explicit_schema_handles_empty_checkpoint_and_null_object_list_values(
     assert all(metadata[key] == value for key, value in provenance.items())
 
 
+def test_lossless_raw_row_preserves_json_numeric_types_and_checks_projections(
+    tmp_path: Path,
+) -> None:
+    from part1_merge import build_merge_table, decode_merge_table
+
+    fixture, inspection = _rows(tmp_path)
+    provenance = _provenance(fixture)
+    natural = copy.deepcopy(inspection.natural_results[0])
+    natural["generated_token_count"] = 3.0
+    natural["prompt_token_ids"] = [1.0, 2]
+    natural["generated_token_ids"] = [1, 2.0, 3]
+    natural["per_token_entropy_nats"] = [1, 2.0, 3]
+    natural["raw_parsed_confidence"] = 0
+    natural["normalized_confidence"] = 0
+
+    table = build_merge_table("natural_results", [natural], provenance=provenance)
+    assert "raw_row_canonical_json" in table.column_names
+    raw = json.loads(table["raw_row_canonical_json"][0].as_py())
+    assert type(raw["generated_token_count"]) is float
+    assert [type(value) for value in raw["prompt_token_ids"]] == [float, int]
+    assert [type(value) for value in raw["per_token_entropy_nats"]] == [int, float, int]
+    assert type(raw["normalized_confidence"]) is int
+    assert type(table["generated_token_count"][0].as_py()) is int
+    assert type(table["normalized_confidence"][0].as_py()) is float
+    recovered = decode_merge_table("natural_results", table)
+    assert json.dumps(recovered[0], sort_keys=True, separators=(",", ":")) == json.dumps(
+        natural, sort_keys=True, separators=(",", ":")
+    )
+    metadata = {key.decode(): value.decode() for key, value in table.schema.metadata.items()}
+    assert metadata["lossless_raw_row_field"] == "raw_row_canonical_json"
+    assert metadata["projection_conversion_version"] == "part1-json-arrow-projection-v1"
+
+    column_index = table.column_names.index("generated_token_count")
+    corrupted = table.set_column(
+        column_index,
+        table.schema.field(column_index),
+        pa.array([999], type=pa.int64()),
+    )
+    with __import__("pytest").raises(ValueError, match="projection"):
+        decode_merge_table("natural_results", corrupted)
+
+
 def test_parquet_writer_is_byte_deterministic_with_pinned_metadata(tmp_path: Path) -> None:
     from part1_merge import write_parquet_tables
 
@@ -219,6 +262,9 @@ def test_merge_id_and_complete_hash_bind_content_but_exclude_locations() -> None
 
 def test_merge_manifest_is_strictly_self_validating_below_the_top_level() -> None:
     from part1_merge import (
+        TABLE_FILENAMES,
+        _schema,
+        _schema_sha256,
         build_merge_manifest,
         merge_id,
         merge_manifest_hash,
@@ -233,30 +279,77 @@ def test_merge_manifest_is_strictly_self_validating_below_the_top_level() -> Non
         "model_run_manifest_hash": "5" * 64,
         "coverage_report_id": "6" * 64,
     }
-    source_files = [
-        {
-            "relative_path": "source",
-            "shard_id": None,
-            "kind": "dependency_lock",
+    def regular(relative_path: str, kind: str, shard_id: str | None) -> dict:
+        payload = relative_path.encode()
+        return {
+            "relative_path": relative_path,
+            "shard_id": shard_id,
+            "kind": kind,
             "state": "regular_file",
-            "sha256": "7" * 64,
-            "byte_size": 1,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "byte_size": len(payload),
         }
+
+    global_paths = {
+        "questions": "manifests/part1/questions.jsonl",
+        "question_manifest": "manifests/part1/questions.manifest.json",
+        "study_manifest": "manifests/part1/study_manifest.json",
+        "model_run_manifest": f"results/part1/{provenance['model_run_id']}/model_run_manifest.json",
+        "dependency_lock": "uv.lock",
+    }
+    source_files = [
+        regular(relative_path, kind, None)
+        for kind, relative_path in global_paths.items()
     ]
+    core_names = {
+        "shard_provenance": ".shard-provenance.json",
+        "natural_results": "natural_results.jsonl",
+        "checkpoint_results": "checkpoint_results.jsonl",
+        "audit_events": "audit_events.jsonl",
+        "finalization_marker": ".finalized",
+    }
+    for shard_index in range(500):
+        shard_id = f"shard-{shard_index:03d}"
+        prefix = f"results/part1/{provenance['model_run_id']}/raw_shards/{shard_id}"
+        for kind, filename in core_names.items():
+            relative_path = f"{prefix}/{filename}"
+            if kind == "checkpoint_results":
+                source_files.append(
+                    {
+                        "relative_path": relative_path,
+                        "shard_id": shard_id,
+                        "kind": kind,
+                        "state": "absent",
+                        "sha256": hashlib.sha256(b"").hexdigest(),
+                        "byte_size": 0,
+                    }
+                )
+            else:
+                source_files.append(regular(relative_path, kind, shard_id))
+    source_files.sort(key=lambda item: item["relative_path"])
     outputs = {
         kind: {
-            "relative_path": f"{kind}.parquet",
+            "relative_path": TABLE_FILENAMES[kind],
             "sha256": "8" * 64,
             "byte_size": 1,
-            "row_count": 0,
-            "schema_sha256": "9" * 64,
-            "embedded_metadata": {},
+            "row_count": 5000 if kind == "natural_results" else 0,
+            "schema_sha256": _schema_sha256(
+                _schema(kind, provenance, 5000 if kind == "natural_results" else 0)
+            ),
+            "embedded_metadata": {
+                key.decode(): value.decode()
+                for key, value in _schema(
+                    kind, provenance, 5000 if kind == "natural_results" else 0
+                ).metadata.items()
+            },
         }
         for kind in ("natural_results", "checkpoint_results", "audit_events")
     }
     manifest = build_merge_manifest(
         provenance=provenance,
-        coverage_report_path="coverage_report.json",
+        coverage_report_path=(
+            f"results/part1/{provenance['model_run_id']}/validation/coverage_report.json"
+        ),
         coverage_report_sha256="a" * 64,
         coverage_report_byte_size=1,
         source_files=source_files,
@@ -264,16 +357,124 @@ def test_merge_manifest_is_strictly_self_validating_below_the_top_level() -> Non
     )
     validate_merge_manifest(manifest)
 
+    def rehash(value: dict) -> dict:
+        value["merge_id"] = merge_id(value)
+        value["merge_manifest_hash"] = merge_manifest_hash(value)
+        return value
+
+    mutations = []
     malformed = copy.deepcopy(manifest)
     malformed["coverage_report"]["uncontracted"] = True
-    malformed["merge_id"] = merge_id(malformed)
-    malformed["merge_manifest_hash"] = merge_manifest_hash(malformed)
-    with __import__("pytest").raises(ValueError, match="coverage report"):
-        validate_merge_manifest(malformed)
-
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    malformed["study_manifest_hash"] = "A" * 64
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    malformed["coverage_report"]["sha256"] = "g" * 64
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    malformed["source_files"][0]["shard_id"] = {"not": "a shard"}
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    malformed["source_files"][0]["kind"] = ["questions"]
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    malformed["source_files"][0]["relative_path"] = "wrong/global"
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    malformed["source_files"] = [
+        item for item in malformed["source_files"] if item["kind"] != "questions"
+    ]
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    duplicated_global = copy.deepcopy(
+        next(item for item in malformed["source_files"] if item["kind"] == "questions")
+    )
+    malformed["source_files"].append(duplicated_global)
+    malformed["source_files"].sort(key=lambda item: item["relative_path"])
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    malformed["source_files"] = [
+        item for item in malformed["source_files"] if item["shard_id"] != "shard-499"
+    ]
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    malformed["source_files"] = [
+        item
+        for item in malformed["source_files"]
+        if not (
+            item["shard_id"] == "shard-000" and item["kind"] == "audit_events"
+        )
+    ]
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    extra_path = (
+        f"results/part1/{provenance['model_run_id']}/raw_shards/"
+        "shard-500/natural_results.jsonl"
+    )
+    malformed["source_files"].append(
+        regular(extra_path, "natural_results", "shard-500")
+    )
+    malformed["source_files"].sort(key=lambda item: item["relative_path"])
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    absent = next(item for item in malformed["source_files"] if item["state"] == "absent")
+    absent["sha256"] = "7" * 64
+    absent["byte_size"] = 1
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    malformed["source_files"].append(
+        regular(
+            f"results/part1/{provenance['model_run_id']}/raw_shards/shard-000/not-canonical",
+            "recovery_evidence",
+            "shard-000",
+        )
+    )
+    malformed["source_files"].sort(key=lambda item: item["relative_path"])
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    malformed["outputs"]["natural_results"]["embedded_metadata"]["extra"] = "field"
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    del malformed["outputs"]["natural_results"]["embedded_metadata"][
+        "lossless_raw_row_field"
+    ]
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    malformed["outputs"]["natural_results"]["embedded_metadata"][
+        "projection_conversion_version"
+    ] = "changed"
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    malformed["outputs"]["natural_results"]["schema_sha256"] = "9" * 64
+    mutations.append(malformed)
     malformed = copy.deepcopy(manifest)
     malformed["outputs"]["natural_results"]["byte_size"] = -1
-    malformed["merge_id"] = merge_id(malformed)
-    malformed["merge_manifest_hash"] = merge_manifest_hash(malformed)
-    with __import__("pytest").raises(ValueError, match="output"):
-        validate_merge_manifest(malformed)
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    malformed["parquet_writer_settings"]["row_group_size"] = 1024.0
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    malformed["outputs"]["natural_results"]["row_count"] = 4999
+    malformed["outputs"]["natural_results"]["schema_sha256"] = _schema_sha256(
+        _schema("natural_results", provenance, 4999)
+    )
+    malformed["outputs"]["natural_results"]["embedded_metadata"] = {
+        key.decode(): value.decode()
+        for key, value in _schema("natural_results", provenance, 4999).metadata.items()
+    }
+    mutations.append(malformed)
+    malformed = copy.deepcopy(manifest)
+    malformed["outputs"]["checkpoint_results"]["row_count"] = 10
+    malformed["outputs"]["checkpoint_results"]["schema_sha256"] = _schema_sha256(
+        _schema("checkpoint_results", provenance, 10)
+    )
+    malformed["outputs"]["checkpoint_results"]["embedded_metadata"] = {
+        key.decode(): value.decode()
+        for key, value in _schema("checkpoint_results", provenance, 10).metadata.items()
+    }
+    mutations.append(malformed)
+
+    for malformed in mutations:
+        with __import__("pytest").raises(ValueError):
+            validate_merge_manifest(rehash(malformed))
