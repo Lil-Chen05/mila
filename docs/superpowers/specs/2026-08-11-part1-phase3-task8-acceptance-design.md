@@ -60,6 +60,15 @@ The validator must:
 - exit nonzero on any incompatibility or incomplete condition while leaving all
   inputs byte-identical.
 
+`stable_source_hashes` is an ordered list by POSIX relative path. It includes
+the shard provenance header, natural/checkpoint/audit JSONL streams,
+finalization marker, and any retained recovery/quarantine evidence present in
+the validated shard. Every entry records SHA-256 over exact bytes and byte
+size. Zero-mutation tests fingerprint the complete input tree before and after,
+including path, file type, exact regular-file hash/size, and symlink target, and
+require identical fingerprints with no new entry such as a report, lock, or
+sidecar.
+
 The implementation returns a deterministic JSON-safe report but does not reuse
 the production `part1_validation_report` schema, whose fixed totals and
 artifact kind intentionally describe production coverage only.
@@ -70,7 +79,12 @@ Add one CPU-only integration test that creates a temporary, fully canonical
 production repository fixture. It uses all 500 fixed question identities, ten
 natural runs per question, all eleven checkpoint identities per successful
 natural run, both `natural_correct` classes in every subject, and finalized
-schema-valid raw shards.
+schema-valid raw shards. Every registered primary feature has the valid status
+and finite, nonconstant synthetic values needed to emit real pooled and
+per-subject rows. Natural confidence, checkpoint confidence, and maximum A–D
+probability are populated at all eleven requested fractions. At least one
+question contains two deliberately identical valid trajectories and answers
+under distinct canonical run IDs while retaining both correctness classes.
 
 The fixture writer may bypass durability syscalls only inside the temporary
 test fixture, but it must write the same JSONL records, provenance headers, and
@@ -88,15 +102,20 @@ The connected flow is:
    bootstrap replicate count suitable for an acceptance test; and
 5. reload final outputs and assert the Task 8 statistical contracts.
 
-The connected flow asserts all five subjects and both target classes, primary
-AUROC target `natural_correct`, natural/checkpoint ECE target pairing, sidecar
-provenance, and absence of automatic repetition exclusion. The same acceptance
-file also runs small hand-computable oracle subcases for bootstrap draw
-multiplicity, macro invalidity, within-question paired differences, switch
-adjacency, and stabilization/null behavior. Those oracle subcases exercise the
-same public statistical and trajectory functions used by the connected
-analysis flow without pretending that one class-balanced production-shaped
-fixture can simultaneously represent a deliberately invalid macro replicate.
+The connected flow asserts all five subjects and both target classes; every
+required pooled and per-subject primary AUROC row exists and targets
+`natural_correct`; natural-confidence, checkpoint-confidence, and maximum-A–D
+calibration rows exist with the prescribed targets at all eleven fractions;
+0.0, 0.5, and 1.0 carry the main marker; sidecar provenance is complete; and
+every canonical run is retained. The deliberately repeated trajectories must
+contribute with full multiplicity to cohort counts and output rows. The same
+acceptance file also runs small hand-computable oracle subcases for bootstrap
+draw multiplicity, macro invalidity, within-question paired differences,
+switch adjacency, and stabilization/null behavior. Those oracle subcases
+exercise the same public statistical and trajectory functions used by the
+connected analysis flow without pretending that one class-balanced
+production-shaped fixture can simultaneously represent a deliberately invalid
+macro replicate.
 
 ## Failure handling and performance
 
@@ -104,8 +123,21 @@ The smoke validator fails closed and never repairs, deletes, or publishes into
 the smoke root. The synthetic acceptance uses a temporary directory and may
 use compact fixture-construction helpers, but it retains the nominal production
 logical shape so the strict production validator is not weakened for tests.
-The acceptance command is kept separate from fast focused unit suites and its
-runtime and temporary storage are reported explicitly.
+
+Register the dedicated pytest marker `part1_full_acceptance` and run it with:
+
+```bash
+UV_CACHE_DIR=/private/tmp/mila-uv-cache uv run pytest -q \
+  -m part1_full_acceptance tests/test_part1_end_to_end_acceptance.py --tb=short
+```
+
+The test reports elapsed seconds and total temporary-tree bytes. Its
+conservative Task 8 envelope is 30 minutes and 8 GiB of temporary storage on
+the local verification host. Exceeding either envelope blocks sign-off and
+requires fixture/performance diagnosis; it is never silently skipped. The
+marker keeps the full-shape acceptance explicit and separate from fast focused
+unit suites, while the final Phase 3 verification command invokes it
+deliberately.
 
 ## Test-driven implementation
 
