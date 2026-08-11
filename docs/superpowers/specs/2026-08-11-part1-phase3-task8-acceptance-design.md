@@ -98,8 +98,8 @@ The connected flow is:
 2. merge exactly the source files named by that report and atomically publish
    Parquet outputs plus the merge manifest;
 3. load those published artifacts through the production analysis loader;
-4. atomically publish analysis outputs with a small deterministic positive
-   bootstrap replicate count suitable for an acceptance test; and
+4. atomically publish analysis outputs with the production-supported 1,000
+   development bootstrap replicates; and
 5. reload final outputs and assert the Task 8 statistical contracts.
 
 The connected flow asserts all five subjects and both target classes; every
