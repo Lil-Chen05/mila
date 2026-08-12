@@ -32,7 +32,7 @@ def test_launch_plan_reports_exact_unrun_workload_and_storage(tmp_path: Path) ->
     assert plan["resources"] == {
         "gpu": "l40s:1",
         "wall_time": "12:00:00",
-        "initial_concurrency": 1,
+        "initial_concurrency": 16,
     }
     assert plan["storage_estimates"]["expected_2048_tokens"] == (
         estimate_part1_storage(expected_generated_tokens=2048)
@@ -41,7 +41,9 @@ def test_launch_plan_reports_exact_unrun_workload_and_storage(tmp_path: Path) ->
         estimate_part1_storage(expected_generated_tokens=8192)
     )
     assert plan["submission_command"] == (
-        "sbatch --array=0-499%1 jobs/part1_generate_array.sh"
+        "sbatch --export=ALL,MODEL_RUN_ID="
+        f"{fixture['manifest']['model_run_id']} "
+        "--array=0-499%16 jobs/part1_generate_array.sh"
     )
 
 
@@ -90,11 +92,49 @@ def test_part1_jobs_have_exact_resources_uv_resolution_and_future_clis() -> None
     assert '${SLURM_ARRAY_TASK_ID:?' in jobs["part1_generate_array.sh"]
     assert "sbatch --array" not in jobs["part1_generate_array.sh"]
     assert "--shard-index 0" in jobs["part1_phase3_smoke.sh"]
-    for name, cli in (
-        ("part1_validate.sh", "scripts/validate_part1_results.py"),
-        ("part1_merge.sh", "scripts/merge_part1_results.py"),
-        ("part1_analyze.sh", "scripts/analyze_part1.py"),
+    for name, cli, wall_time in (
+        ("part1_validate.sh", "scripts/validate_part1_results.py", "4:00:00"),
+        ("part1_merge.sh", "scripts/merge_part1_results.py", "4:00:00"),
+        ("part1_analyze.sh", "scripts/analyze_part1.py", "8:00:00"),
     ):
         assert "#SBATCH --gpus-per-task" not in jobs[name]
         assert "#SBATCH --cpus-per-task=4" in jobs[name]
+        assert f"#SBATCH --time={wall_time}" in jobs[name]
         assert cli in jobs[name]
+
+
+def test_full_acceptance_job_is_cpu_only_and_runs_the_explicit_marker() -> None:
+    root = Path(__file__).resolve().parents[1]
+    content = (root / "jobs/part1_full_acceptance.sh").read_text(encoding="utf-8")
+
+    assert "#SBATCH --gpus-per-task" not in content
+    assert "#SBATCH --cpus-per-task=4" in content
+    assert "#SBATCH --mem=32G" in content
+    assert "#SBATCH --time=12:00:00" in content
+    assert "#SBATCH --output=logs/part1-full-acceptance-%j.out" in content
+    assert 'srun "$UV_BIN" run pytest' in content
+    assert "-m part1_full_acceptance" in content
+    assert "tests/test_part1_end_to_end_acceptance.py" in content
+
+
+def test_production_gate_is_cpu_only_and_submits_only_after_manifest_creation() -> None:
+    root = Path(__file__).resolve().parents[1]
+    content = (root / "jobs/part1_production_gate.sh").read_text(encoding="utf-8")
+
+    assert "#SBATCH --gpus-per-task" not in content
+    assert "#SBATCH --cpus-per-task=1" in content
+    assert "#SBATCH --mem=4G" in content
+    assert "#SBATCH --time=00:30:00" in content
+    assert '${ACCEPTANCE_JOB_ID:?' in content
+    assert '${BOOTSTRAP_RECEIPT:?' in content
+    assert '${SLURM_JOB_ID:?' in content
+    assert content.count("scripts/validate_part1_smoke_results.py") == 1
+    assert "for SCOPE in smoke_a smoke_b phase3_smoke" in content
+    smoke_position = content.index("scripts/validate_part1_smoke_results.py")
+    create_position = content.index("scripts/create_part1_model_run_manifest.py")
+    plan_position = content.index("scripts/part1_launch_plan.py")
+    submit_position = content.index("scripts/submit_part1_production_chain.py")
+    assert smoke_position < create_position < plan_position < submit_position
+    assert '--acceptance-job-id "$ACCEPTANCE_JOB_ID"' in content
+    assert '--gate-job-id "$SLURM_JOB_ID"' in content
+    assert '--bootstrap-receipt "$BOOTSTRAP_RECEIPT"' in content

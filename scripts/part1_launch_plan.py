@@ -16,7 +16,11 @@ from run_part1_shard import _require_clean_recorded_commit, _sha256_regular_file
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-SUBMISSION_COMMAND = "sbatch --array=0-499%1 jobs/part1_generate_array.sh"
+INITIAL_CONCURRENCY = 16
+SUBMISSION_COMMAND_TEMPLATE = (
+    "sbatch --export=ALL,MODEL_RUN_ID={model_run_id} "
+    f"--array=0-499%{INITIAL_CONCURRENCY} jobs/part1_generate_array.sh"
+)
 
 
 def build_launch_plan(
@@ -61,7 +65,7 @@ def build_launch_plan(
         "resources": {
             "gpu": "l40s:1",
             "wall_time": "12:00:00",
-            "initial_concurrency": 1,
+            "initial_concurrency": INITIAL_CONCURRENCY,
         },
         "storage_estimates": {
             "expected_2048_tokens": estimate_part1_storage(
@@ -69,7 +73,9 @@ def build_launch_plan(
             ),
             "cap_8192_tokens": estimate_part1_storage(expected_generated_tokens=8192),
         },
-        "submission_command": SUBMISSION_COMMAND,
+        "submission_command": SUBMISSION_COMMAND_TEMPLATE.format(
+            model_run_id=model_manifest["model_run_id"]
+        ),
     }
 
 
@@ -106,4 +112,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -3,16 +3,17 @@
 ## Executive status
 
 **Phase 3 implementation is complete through Tasks 1–7 on branch
-`codex/phase1-infrastructure`; the final bounded Phase 3 smoke is in progress.**
-The reviewed generation, validation, merge, trajectory, statistics, bootstrap,
-and analysis code is deployed on Mila at
-`a7e1135e85476f5fc43986949f467b10ba450623`. Job `10324103` was submitted at
-`2026-08-09T13:55:40-04:00` with `sbatch jobs/part1_phase3_smoke.sh`; the
-recorded pause state is `RUNNING` on `cn-l033` (started
-`2026-08-09T13:55:58-04:00`). Its generated smoke model-run ID is
+`codex/phase1-infrastructure`; Task 8 remains in progress after the successful
+final bounded Phase 3 smoke.** The reviewed generation, validation, merge,
+trajectory, statistics, bootstrap, and analysis code was deployed on Mila at
+`a7e1135e85476f5fc43986949f467b10ba450623`. Job `10324103` completed `0:0` in
+`01:27:13`. Its generated smoke model-run ID is
 `a23087c8c0897bbf9f075b3edaa28c75b5087cffbcd203e2fea4bf16093b6dcf`.
-This is the only new job submitted in Phase 3. Do not submit a replacement or
-any production array while it is pending or running.
+The stable shard contains exactly 10 natural results, 110 checkpoint results,
+and 240 audit events, and direct integrity validation passed. The hardened CLI
+validator is implemented, independently approved, and passed 57 focused plus
+291 regression tests. Its Mila Smoke A/B/Phase 3 execution remains pending, so
+Phase 3 acceptance and production readiness have not passed.
 
 Pre-submission gates passed on Mila: the tracked tree was clean at the exact
 commit above; `uv.lock` matched preflight SHA-256
@@ -22,16 +23,31 @@ validation returned exactly 500 questions and the expected stable hashes; and
 the focused pure suite passed `34 passed in 1148.24s`. No model or dataset was
 loaded on the login node.
 
-The next action is to establish terminal accounting for job `10324103`, inspect
-`logs/part1-phase3-smoke-10324103.out`, and validate the finalized manifest and
-shard described in the continuation section of [RUNBOOK.md](RUNBOOK.md). Do
-not accept partial files as evidence. After the smoke passes, finish Phase 3
-Task 8: reuse the read-only Phase 3 validator on Smoke A/B, run the synthetic
-end-to-end acceptance, finalize all seven tracked documents and `AGENTS.md`,
-run full verification and independent review, commit a clean final tracked
-tree, and only then create the ignored production model-run manifest. No
-production model-run manifest or production root exists, and the full
-500-question array has not been submitted.
+The first optimized local production-shaped acceptance built all 500 shards but
+failed coverage after `02:20:19` because synthetic natural rows carried a
+content-derived prompt hash rather than the model-run manifest prompt hash. No
+merge or analysis ran. The fixture-only correction passes a real one-shard scan
+of 10 natural and 110 checkpoint rows with zero defects, five focused tests,
+and 300 pipeline regressions. The corrected complete acceptance remains
+unverified and is prepared as CPU-only `jobs/part1_full_acceptance.sh` with a
+12-hour ceiling. The conditional `afterok` production gate in [RUNBOOK.md](RUNBOOK.md)
+creates the production manifest and submits the `%16` chain only after that
+acceptance passes. No production model-run manifest or production root exists,
+and the full array has not been submitted.
+
+The commit containing this checkpoint is the final tracked production
+candidate; its exact SHA is captured by the unattended bootstrap receipt and,
+only after acceptance passes, by the production model-run manifest. The fresh
+launch-critical local suite passed 257 tests in `570.14s`; the independent
+orchestration review approved with no findings. The unrelated untracked
+`METHODS_EXPERIMENTAL_DESIGN.md` remains user-owned and excluded.
+
+On 2026-08-11 the user explicitly authorized the post-readiness full production
+run with target array `0-499%16` and a four-day deadline. The scientific design
+is unchanged at exactly 500 questions × 10 natural runs × 11 requested
+checkpoints per successful natural run. Authorization does not waive or satisfy
+the remaining gates and is not a claim that a production manifest exists, that
+readiness passed, or that launch occurred.
 
 Smoke A authoritative job `10284742` completed `0:0` in `01:26:28` on
 `cn-l018`; its terminal runner state was `complete`. Smoke B authoritative job

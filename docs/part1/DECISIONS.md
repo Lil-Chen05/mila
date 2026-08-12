@@ -13,6 +13,26 @@ The 20-question and 200-question code, documentation, results, and analyses are
 historical pilots. Their greedy one-run design and cohort rules do not define
 Part 1.
 
+## Production authorization and unchanged protocol
+
+On 2026-08-11, the user explicitly authorized the full production run after all
+readiness gates pass, with target array concurrency `%16` and a four-day
+deadline. This is operational authorization only: it does not establish
+hardened CLI-validator acceptance, production-manifest creation, readiness, or
+launch, and it does not waive final verification, independent review, the
+final-commit/clean-tree gate, or immutable provenance.
+
+The authorization changes no scientific decision. Production remains exactly
+the fixed 500-question manifest, 10 stochastic natural runs per model-question
+pair, and 11 requested checkpoints per successful natural run. Seeds, model and
+tokenizer revisions, requested generation settings, metrics, schemas, analysis,
+retry behavior, and all stable identity/hash payloads remain unchanged.
+
+The measured local full-shape coverage attempt took `02:20:19` before a
+synthetic-only prompt-hash mismatch was reported. CPU wall-time allocations are
+therefore operationally sized at 4 hours for validation, 4 hours for merge, and
+8 hours for final analysis. This changes no scientific or identity payload.
+
 ## Objective, model scope, and targets
 
 Part 1 asks whether uncertainty measured throughout a reasoning trajectory

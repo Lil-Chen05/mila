@@ -131,13 +131,21 @@ UV_CACHE_DIR=/private/tmp/mila-uv-cache uv run pytest -q \
   -m part1_full_acceptance tests/test_part1_end_to_end_acceptance.py --tb=short
 ```
 
-The test reports elapsed seconds and total temporary-tree bytes. Its
-conservative Task 8 envelope is 30 minutes and 8 GiB of temporary storage on
-the local verification host. Exceeding either envelope blocks sign-off and
-requires fixture/performance diagnosis; it is never silently skipped. The
-marker keeps the full-shape acceptance explicit and separate from fast focused
-unit suites, while the final Phase 3 verification command invokes it
-deliberately.
+The test reports total and per-phase elapsed seconds plus total temporary-tree
+bytes. The original conservative Task 8 envelope was 30 minutes and 8 GiB on
+the local verification host. On 2026-08-11 the user explicitly approved
+exceeding the local 30-minute target because production validation, merge, and
+analysis run in CPU SLURM jobs rather than on the local host. Local runtime over
+30 minutes is therefore diagnostic, not by itself a sign-off blocker. The 8
+GiB storage bound remains. Sign-off still requires a passing full-shape test
+and phase timings compatible with the configured Mila CPU allocations. After a
+production-shaped local coverage pass required 2:20:19 before exposing a
+synthetic prompt-hash mismatch, the operational allocations were increased to
+four hours for validation, four hours for merge, and eight hours for analysis.
+Avoidable fixture-construction overhead is still diagnosed and optimized; no
+production reader or strict gate is weakened. The marker keeps the full-shape
+acceptance explicit and separate from fast focused unit suites, while the final
+Phase 3 verification command invokes it deliberately.
 
 ## Test-driven implementation
 

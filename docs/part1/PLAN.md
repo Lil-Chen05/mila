@@ -12,8 +12,14 @@ a versioned manifest change.
 manifest validation, GPU preflight, Mila filesystem/scheduler checks,
 same-environment reproducibility, both Phase 2 bounded GPU smokes, and reviewed
 Phase 3 implementation Tasks 1–7 are complete. Final bounded Phase 3 smoke job
-`10324103` is running. No production model-run manifest exists, and the full
-500-question experiment has not been submitted.
+`10324103` completed `0:0` in `01:27:13`; its stable shard contains exactly 10
+natural results, 110 checkpoint results, and 240 audit events, and direct
+integrity validation passed. The hardened CLI validator is implemented,
+independently approved, and locally regression-tested; its retained-smoke Mila
+execution is pending. The corrected full-shape synthetic acceptance is prepared
+as a CPU-only Mila job after a fixture-only prompt-hash defect stopped the first
+local attempt at coverage. No production model-run manifest exists, production
+readiness has not been established, and the full experiment is unsubmitted.
 
 Historical root documentation, old 20q/200q code, results, and analyses remain
 pilot artifacts. They are not instructions or evidence for Part 1.
@@ -35,9 +41,11 @@ The phases remain strictly ordered:
 3. Phase 3 implements analysis, full validation and merge, SLURM readiness, and
    the post-commit production model-run-manifest lifecycle.
 
-The full 500-question experiment, later models, the later
-answerable-versus-unanswerable study, and unapproved primary features remain out
-of scope.
+Later models, the later answerable-versus-unanswerable study, and unapproved
+primary features remain out of scope. On 2026-08-11 the user explicitly
+authorized the unchanged full production run after readiness: the target array
+is `0-499%16`, with a four-day deadline. This authorization does not bypass the
+ordered Phase 3 acceptance, review, clean-tree, manifest, or readiness gates.
 
 ## Phase 1 — foundations, completed
 
@@ -135,7 +143,7 @@ The repository-level implementation gate is satisfied, subject to the
 operational Phase 2 checks below. Phase 1 does not claim Mila filesystem or
 cluster validation and is not production-execution authorization.
 
-## Phase 2 — fixed data and generation (in progress)
+## Phase 2 — fixed data and generation (completed)
 
 ### Implemented preparation
 
@@ -242,24 +250,40 @@ tail/recovery, lock, or takeover issues.
 
 The dataset, study-manifest, preflight, filesystem, scheduler,
 reproducibility, Smoke A, and Smoke B criteria are passed. The full
-500-question experiment remains forbidden.
+500-question experiment remained forbidden at the Phase 2 gate. The later
+2026-08-11 authorization applies only after every remaining Phase 3 gate
+passes.
 
 ## Phase 3 — completion
 
 Phase 3 Tasks 1–7 are implemented, independently reviewed, and deployed to Mila
 at `a7e1135e85476f5fc43986949f467b10ba450623`. Task 8 is in progress. Its one
-authorized final bounded smoke was submitted as job `10324103` with
-`sbatch jobs/part1_phase3_smoke.sh`; the pause snapshot is `RUNNING` on
-`cn-l033`. It is limited to shard index 0 of 500: one fixed question, natural
-run IDs `0`–`9`, and at most 110 checkpoint probes. No other Phase 3 job and no
-production array was submitted.
+authorized final bounded smoke, job `10324103`, completed `0:0` in `01:27:13`.
+The terminal artifacts contain exactly 10 natural results, 110 checkpoint
+results, and 240 audit events; direct shape, provenance, hierarchy, and
+lifecycle integrity validation passed. This is bounded non-production evidence,
+not production readiness. Hardened CLI-validator acceptance remains pending,
+and no production array has been submitted.
 
-Resume Task 8 at post-smoke validation, not at submission. Require terminal
-`COMPLETED`/`0:0`, the terminal runner JSON, the exact 10-natural/110-checkpoint
-shape and policy-complete lifecycle evidence, compatible immutable provenance,
-and absence of a production root. Then complete the read-only Smoke A/B checks,
-synthetic end-to-end acceptance, all final documentation, full verification and
-independent review, and the final tracked commit. The operational production
-model-run manifest may be created only from that clean final tracked commit;
-its creation under the ignored production root must leave Git clean. The full
-500-question launch remains unrun.
+Task 8 uses this fail-closed order:
+
+1. complete and verify the hardened CLI validator, then obtain its acceptance
+   result for the bounded Phase 3 smoke and the required read-only Smoke A/B
+   coverage;
+2. complete the synthetic end-to-end acceptance and reconcile its evidence with
+   the tracked validation ledger;
+3. finalize the six Part 1 documents plus `AGENTS.md`, run full verification,
+   and complete independent review;
+4. create the final tracked commit, deploy it to Mila, and require a clean
+   tracked worktree;
+5. submit the CPU-only full acceptance and an `afterok` production gate;
+6. only after acceptance succeeds, the gate revalidates all retained smokes,
+   creates the immutable operational production manifest from that exact
+   commit, validates the `0-499%16` launch plan, and submits generation;
+7. validation runs after the array terminates, while merge and final analysis
+   remain `afterok`-gated; every returned job ID is durably recorded; and
+8. operate the authorized chain to the four-day deadline without advancing the
+   tracked Mila checkout.
+
+No step above is presently evidence that hardened CLI acceptance, production
+manifest creation, readiness, or launch has passed.

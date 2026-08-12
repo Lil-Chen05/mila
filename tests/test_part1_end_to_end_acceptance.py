@@ -28,9 +28,9 @@ from part1_contract import (
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 FIXED_TIMESTAMP = "2026-08-11T00:00:00Z"
 MAX_ACCEPTANCE_BYTES = 8 * 1024**3
-MAX_COVERAGE_SECONDS = 2 * 60 * 60
-MAX_MERGE_SECONDS = 2 * 60 * 60
-MAX_ANALYSIS_SECONDS = 4 * 60 * 60
+MAX_COVERAGE_SECONDS = 4 * 60 * 60
+MAX_MERGE_SECONDS = 4 * 60 * 60
+MAX_ANALYSIS_SECONDS = 8 * 60 * 60
 
 
 def _json_bytes(value: Mapping[str, Any], *, newline: bool = False) -> bytes:

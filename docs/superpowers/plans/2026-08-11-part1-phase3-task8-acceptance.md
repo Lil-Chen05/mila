@@ -210,8 +210,12 @@ Matplotlib, existing Part 1 manifest/store/coverage/merge/analysis modules.
     -m part1_full_acceptance tests/test_part1_end_to_end_acceptance.py --tb=short -s
   ```
 
-  Require pass, measured runtime at most 30 minutes, and measured temporary
-  bytes at most 8 GiB. Exceeding either is a Task 8 blocker, not a skip.
+  Require a pass and measured temporary bytes at most 8 GiB. Record total and
+  per-phase runtime. The user-approved 2026-08-11 amendment makes the original
+  30-minute local target diagnostic rather than blocking; require validation,
+  merge, and analysis phase timings compatible with their amended Mila CPU
+  wall times of four, four, and eight hours respectively. Do not weaken production
+  readers or strict gates to meet a local timing target.
 
 - [ ] **Step 5: Run focused oracle and pipeline regressions, then commit.**
 

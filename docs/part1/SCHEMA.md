@@ -19,7 +19,18 @@ resolved the immutable MMLU revision to
 the real model/tokenizer revision to
 `a07cc9a04f16550a088caea529712d1d335b0ac1`. Non-production model-run
 instances exist only under the ignored smoke root. No production model-run
-instance exists; Phase 3 owns its post-commit lifecycle.
+instance exists; Phase 3 owns its post-commit lifecycle. Bounded Phase 3 smoke
+job `10324103` completed `0:0` in `01:27:13` with exactly 10 natural terminal
+records, 110 checkpoint terminal records, and 240 audit events, and direct
+integrity validation passed. That non-production evidence does not create or
+validate a production instance; hardened CLI-validator acceptance remains
+pending.
+
+The user's explicit 2026-08-11 post-readiness production authorization, target
+array concurrency `%16`, and four-day deadline are operational controls, not
+schema or identity inputs. They do not alter the fixed 500-question × 10-run ×
+11-checkpoint protocol, any manifest payload, or any stable hash. No production
+manifest, readiness result, or launch is implied by recording them here.
 
 Historical 20q/200q JSON is legacy and incompatible. It must not be upgraded by
 silently filling missing provenance.
@@ -261,7 +272,26 @@ base seed; environment versions; Git provenance; and production/smoke status.
 Production requires a final 40-hex Git commit and null smoke provenance. Smoke
 requires null final-production commit and non-null smoke provenance. Output
 paths and mutable progress stay outside the immutable manifest. The schema is
-implemented, but no production instance exists.
+implemented, but no production instance exists. The 2026-08-11 authorization
+permits creation only after hardened CLI acceptance, final verification and
+independent review, a final tracked commit, and a clean worktree; authorization
+itself is not manifest evidence.
+
+`results/part1/<model-run-id>/submission_receipt.json` is mutable operational
+evidence outside the immutable model-run identity. Version
+`part1-submission-receipt-v1` records the acceptance, production-gate,
+generation, validation, merge, and analysis job IDs; `%16`; 5,000 final
+bootstrap replicates; final commit; and submission status. It is atomically
+replaced after each returned job ID. Any existing complete or partial receipt
+blocks automatic resubmission and requires operator review.
+
+Before a model-run ID exists,
+`results/part1-submission/<final-commit>/bootstrap_receipt.json` exclusively
+claims unattended submission for that commit. It records the CPU acceptance
+job, production-gate job, exact `afterok` dependency, unrelated untracked paths,
+and any in-flight `sbatch` arguments/job name. The gate accepts only this
+canonical regular file and requires its commit and job IDs to match the running
+gate and eventual production manifest.
 
 Compatibility also checks an independent fixed requested-model oracle:
 `HuggingFaceTB/SmolLM3-3B` for model and tokenizer, base seed 42,

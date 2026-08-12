@@ -51,8 +51,10 @@ features without explicit approval.
   verified implementation. The root agent coordinates shared-file changes.
 - Avoid unrelated refactors. Treat pre-existing unrelated and untracked files as
   user-owned: do not modify, delete, ignore, or commit them without direction.
-- Never launch the full 500-question experiment during this sequence. Run only
-  bounded smoke jobs explicitly authorized by Prompt 3 or Prompt 4.
+- The final bounded Phase 3 smoke has completed, but its hardened CLI-validator
+  acceptance is still pending. Do not create the production model-run manifest,
+  claim production readiness, or launch production before every remaining gate
+  in `docs/part1/RUNBOOK.md` passes.
 
 ## THREE IMPLEMENTATION PHASES
 1. **Phase 1 — foundations:** schemas, canonical serialization and identities,
@@ -66,6 +68,23 @@ features without explicit approval.
    model-run-manifest lifecycle, SLURM readiness, documentation, and final
    bounded smoke tests. Create the operational production model-run manifest
    only after the final production commit from a clean tracked worktree.
+
+## CURRENT PRODUCTION AUTHORIZATION
+- On 2026-08-11, the user explicitly authorized the full production run after
+  readiness is established. This authorization does not waive any validation,
+  review, clean-tree, provenance, or manifest gate.
+- The approved production array target is `0-499%16`, with a four-day deadline.
+  The scientific protocol is unchanged: 500 fixed questions, 10 stochastic
+  natural runs per question, and 11 requested checkpoints per successful
+  natural run.
+- Authorization is not evidence of readiness or launch. Until the hardened
+  CLI validator, final verification/review/commit, production-manifest, and
+  launch-readiness gates pass in order, the production manifest and array must
+  remain absent.
+- The unattended path queues only CPU full acceptance and its `afterok`
+  production gate initially. The gate must validate all retained smokes and the
+  clean final commit before it may create the production manifest or submit the
+  `%16` array. Partial submission receipts block automatic resubmission.
 
 Use two immutable provenance levels: a tracked, model-independent study
 manifest and one operational model-run manifest per model revision and adapter.

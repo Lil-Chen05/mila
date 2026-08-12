@@ -1,72 +1,128 @@
 # Part 1 runbook
 
-## Current Phase 3 continuation checkpoint (2026-08-09)
+## Current Phase 3 continuation checkpoint (2026-08-11)
 
 The reviewed Phase 3 tree is deployed on Mila at
 `a7e1135e85476f5fc43986949f467b10ba450623`. All submission preflights passed,
 including the current preflight/`uv.lock` match, immutable manifest validation,
 shell syntax, clean tracked state, `MaxArraySize=1001`, no existing Phase 3
-smoke root, and 34 focused pure tests. Exactly one job was submitted:
+smoke root, and 34 focused pure tests. Exactly one bounded Phase 3 job was
+submitted, and it is now terminal:
 
 ```text
 job:            10324103
 submitted:      2026-08-09T13:55:40-04:00
-pause state:    RUNNING on cn-l033 (started 2026-08-09T13:55:58-04:00)
+submission:     sbatch jobs/part1_phase3_smoke.sh
+started:        2026-08-09T13:55:58-04:00 on cn-l033
+accounting:     COMPLETED, exit 0:0, elapsed 01:27:13
 log:            logs/part1-phase3-smoke-10324103.out
 model manifest: results/part1-smoke/model-runs/phase3_smoke/model_run_manifest.json
 model-run ID:   a23087c8c0897bbf9f075b3edaa28c75b5087cffbcd203e2fea4bf16093b6dcf
 shard:          results/part1-smoke/phase3_smoke/a23087c8c0897bbf9f075b3edaa28c75b5087cffbcd203e2fea4bf16093b6dcf/raw_shards/shard-000
+stable counts:  10 natural, 110 checkpoint, 240 audit
 ```
 
-Reconnect and check terminal state; do not resubmit while any live row exists:
+Direct post-job integrity validation passed: the terminal runner state and
+stable counts were checked; natural run IDs are `0`–`9`; all 11 requested
+checkpoint identities exist for every successful natural run; immutable
+manifest/provenance, schema, hierarchy, lifecycle, and policy-complete audit
+checks passed; and no production root was created. Abnormal successful output
+remains data. Hardened CLI-validator acceptance is a separate remaining gate
+and has **not** passed merely because these direct checks passed.
+
+Continue Phase 3 Task 8 in this exact order:
+
+1. finish and verify the hardened CLI validator;
+2. run its acceptance path against the bounded Phase 3 smoke and the required
+   read-only Smoke A/B coverage, retaining machine-readable evidence;
+3. complete synthetic end-to-end acceptance and reconcile the validation
+   ledger;
+4. finalize the six Part 1 documents plus `AGENTS.md`, run full verification,
+   and complete independent review;
+5. create the final tracked commit and confirm the tracked worktree is clean;
+6. run `uv run python scripts/create_part1_model_run_manifest.py` so the
+   immutable production model-run manifest records that exact commit under the
+   ignored production root, then confirm Git remains clean;
+7. run the production launch-readiness and launch-plan checks for all 500 shard
+   indices using the unchanged 500-question × 10-run × 11-checkpoint protocol
+   and approved concurrency `%16`; and
+8. only after every prior step passes, use the user's explicit 2026-08-11
+   authorization to submit production and operate to the four-day deadline.
+
+For unattended execution, use the reviewed bootstrap launcher from the final
+clean deployed commit. It exclusively claims a bootstrap receipt before any
+`sbatch`, then submits only the CPU acceptance and its exact `afterok` gate:
 
 ```bash
-ssh mila
-cd /home/mila/c/chenje/my-project
-squeue --jobs=10324103 --noheader --format=%i,%T,%M,%R
-sacct -j 10324103 \
-  --format=JobIDRaw,State,ExitCode,Elapsed,NodeList \
-  --noheader --parsable2
-tail -n 100 logs/part1-phase3-smoke-10324103.out
+uv run python scripts/submit_part1_unattended.py
 ```
 
-An empty `squeue` row is not success; require terminal `sacct` evidence. After
-`COMPLETED`/`0:0`, confirm the recorded ID and run the checks below:
+The acceptance job is CPU-only with a 12-hour ceiling. The gate cannot run if
+acceptance fails. Do not submit either job script directly. The bootstrap
+receipt under `results/part1-submission/<final-commit>/bootstrap_receipt.json`
+records both job IDs, the exact `afterok` relationship, the command arguments,
+and any in-flight stage for crash reconciliation. Once released, the gate
+validates that receipt, the tracked manifests, and all
+three retained smokes with the hardened read-only validator, creates the
+production model-run manifest from the same clean commit, validates the `%16`
+launch plan, submits generation plus dependent validation/merge/final analysis,
+and atomically records all six job IDs under
+`results/part1/<model-run-id>/submission_receipt.json`. An existing or partial
+receipt blocks automatic resubmission. It is safe to disconnect only after the
+launcher prints `status=submitted`; confirm its two job IDs with `squeue`.
+
+The launch-plan report prints the exact self-contained production command with
+the immutable model-run ID embedded. Its shape, which remains unrun until step
+8, is:
 
 ```bash
-$HOME/.local/bin/uv run python -c \
-  'import json; print(json.load(open("results/part1-smoke/model-runs/phase3_smoke/model_run_manifest.json"))["model_run_id"])'
-$HOME/.local/bin/uv run python scripts/validate_part1_manifests.py
-$HOME/.local/bin/uv run python scripts/part1_dry_run.py \
-  --mode smoke \
-  --persistent-root results/part1-smoke \
-  --study-manifest manifests/part1/study_manifest.json \
-  --model-run-manifest results/part1-smoke/model-runs/phase3_smoke/model_run_manifest.json \
-  --shard-root results/part1-smoke/phase3_smoke/a23087c8c0897bbf9f075b3edaa28c75b5087cffbcd203e2fea4bf16093b6dcf/raw_shards/shard-000
-wc -l \
-  results/part1-smoke/phase3_smoke/a23087c8c0897bbf9f075b3edaa28c75b5087cffbcd203e2fea4bf16093b6dcf/raw_shards/shard-000/natural_results.jsonl \
-  results/part1-smoke/phase3_smoke/a23087c8c0897bbf9f075b3edaa28c75b5087cffbcd203e2fea4bf16093b6dcf/raw_shards/shard-000/checkpoint_results.jsonl \
-  results/part1-smoke/phase3_smoke/a23087c8c0897bbf9f075b3edaa28c75b5087cffbcd203e2fea4bf16093b6dcf/raw_shards/shard-000/audit_events.jsonl
+sbatch --export=ALL,MODEL_RUN_ID=<model-run-id> \
+  --array=0-499%16 jobs/part1_generate_array.sh
 ```
 
-Acceptance requires stable counts of 10 natural terminals, 110 checkpoint
-terminals, and policy-complete audit evidence; natural run IDs `0`–`9`; all 11
-requested checkpoint identities for each successful natural run; terminal
-runner state `complete`; valid manifest/provenance/lifecycle checks; and no
-`results/part1/<model-run-id>` production root. Abnormal successful output is
-data and is not itself a smoke failure. Do not infer success from partial
-counts while the job is live.
-
-After this smoke passes, continue Phase 3 Task 8 with the read-only Smoke A/B
-coverage checks and synthetic end-to-end acceptance, finalize every Part 1
-document plus `AGENTS.md`, run the full suite and independent review, and commit
-the clean final tracked tree. Only then run
-`uv run python scripts/create_part1_model_run_manifest.py`. The production
-launch command that must remain unrun at this checkpoint is:
+Do not execute the literal placeholder. After manifest and launch-plan
+validation, copy the exact `submission_command` from the machine-readable
+launch-plan report. For an unattended production chain, set `MODEL_RUN_ID` to
+that same 64-hex identity and retain every returned job ID:
 
 ```bash
-sbatch --array=0-499%1 jobs/part1_generate_array.sh
+GENERATION_JOB_ID=$(sbatch --parsable \
+  --export=ALL,MODEL_RUN_ID="$MODEL_RUN_ID" \
+  --array=0-499%16 jobs/part1_generate_array.sh)
+VALIDATION_JOB_ID=$(sbatch --parsable \
+  --dependency=afterany:"$GENERATION_JOB_ID" \
+  --export=ALL,MODEL_RUN_ID="$MODEL_RUN_ID" \
+  jobs/part1_validate.sh)
+MERGE_JOB_ID=$(sbatch --parsable \
+  --dependency=afterok:"$VALIDATION_JOB_ID" \
+  --export=ALL,MODEL_RUN_ID="$MODEL_RUN_ID" \
+  jobs/part1_merge.sh)
+ANALYSIS_JOB_ID=$(sbatch --parsable \
+  --dependency=afterok:"$MERGE_JOB_ID" \
+  --export=ALL,MODEL_RUN_ID="$MODEL_RUN_ID",BOOTSTRAP_REPLICATES=5000 \
+  jobs/part1_analyze.sh)
 ```
+
+`afterany` ensures validation publishes a diagnostic coverage report even when
+an array task fails. The `afterok` dependencies prevent merge or analysis from
+running on failed validation or merge output. Safe resume uses the same
+self-contained `%16` array command only after the prior array is terminal; the
+append-only store skips terminal keys and resumes incomplete work.
+
+Once the production manifest binds the final tracked commit, do not commit,
+pull, checkout another revision, or otherwise advance the Mila worktree while
+the production array or its dependent jobs are active. The runner enforces the
+recorded commit. Retain the production model-run ID, submitted job IDs, and live
+state in the ignored production result tree and the operator handoff; do not
+create a later tracked documentation commit that makes the active checkout
+incompatible with the manifest.
+
+The production CPU allocations are 4 hours for validation, 4 hours for merge,
+and 8 hours for final analysis. These supersede the earlier 2/2/4-hour draft
+after the production-shaped local coverage attempt required `02:20:19`.
+
+This authorization does not establish hardened CLI acceptance, create the
+production manifest, pass launch readiness, or prove that submission occurred.
 
 ## Status and safety boundary
 
@@ -76,14 +132,18 @@ on `cn-l018`; authoritative Smoke B job `10292530` completed `0:0` in
 `00:25:14` on `cn-l072`. Both non-production smokes reached terminal runner
 state `complete` and passed manifest, dry-run, and lifecycle validation with 0
 errors and 0 warnings. Phase 3 Tasks 1–7 are implemented and reviewed; Task 8
-is paused while bounded smoke job `10324103` runs. No production
-root/model-run manifest exists and the full 500-question job remains unrun.
+continues after bounded smoke job `10324103` completed `0:0` in `01:27:13` with
+the exact 10 natural/110 checkpoint/240 audit shape and passing direct integrity
+validation. Hardened CLI-validator acceptance is still pending. No production
+root/model-run manifest exists, launch readiness has not passed, and the full
+500-question job remains unrun.
 
 Never load a model, tokenizer, or Hugging Face dataset on a login node. Dataset
 materialization runs in a CPU SLURM job. Model/tokenizer preflight and generation
-run in a GPU SLURM job. This four-prompt sequence never launches the full
-500-question experiment. This runbook records the eventual production command
-for operator readiness, but explicitly marks it unrun until every gate passes.
+run in a GPU SLURM job. The user explicitly authorized the post-readiness full
+run on 2026-08-11, with target concurrency `%16` and a four-day deadline. This
+runbook records that eventual command but marks it unrun until every ordered
+gate passes. The authorization changes none of the 500 × 10 × 11 protocol.
 
 Scientific settings are in [DECISIONS.md](DECISIONS.md), exact record contracts
 in [SCHEMA.md](SCHEMA.md), phase gates in [PLAN.md](PLAN.md), current state in
@@ -601,13 +661,21 @@ does not make drifted science compatible.
    filesystem/scheduler checks, corrected reproducibility, Smoke A, and Smoke
    B are complete.
 2. Analysis, complete raw validation, validate-before-publish merge, and SLURM
-   launch readiness are implemented and independently reviewed at `a7e1135`.
-3. Bounded Phase 3 smoke job `10324103` is running. Validate it after terminal
-   accounting; do not resubmit it automatically.
-4. Run the remaining read-only Smoke A/B and synthetic end-to-end acceptance,
-   then finalize documentation, full verification, and independent review.
-5. Final tracked production artifacts are committed; the tracked worktree must
-   be clean.
-6. Only then is the operational production model-run manifest generated under
-   `results/part1/<model_run_id>/`, after which Git must remain clean.
-7. Stop. The full production array remains unrun at this checkpoint.
+   launch-readiness machinery are implemented and independently reviewed at
+   `a7e1135`; operational launch readiness has not passed.
+3. Bounded Phase 3 smoke job `10324103` completed `0:0` in `01:27:13`; its
+   exact 10 natural/110 checkpoint/240 audit shape and direct integrity checks
+   passed.
+4. Complete hardened CLI-validator acceptance on the Phase 3 smoke and required
+   read-only Smoke A/B coverage, then complete synthetic end-to-end acceptance.
+5. Finalize the six Part 1 documents plus `AGENTS.md`, run full verification and
+   independent review, create the final tracked commit, and require a clean
+   tracked worktree.
+6. Generate the operational production model-run manifest under
+   `results/part1/<model_run_id>/` from that exact commit, after which Git must
+   remain clean.
+7. Pass production launch-readiness/launch-plan validation for `0-499%16` under
+   the unchanged 500 × 10 × 11 protocol.
+8. Only then use the explicit 2026-08-11 authorization to launch and operate to
+   the four-day deadline. The production manifest, readiness result, and launch
+   remain absent at this checkpoint.
