@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from test_part1_smoke_coverage import fingerprint_tree, smoke_fixture
 
 
@@ -34,4 +36,48 @@ def test_cli_reports_failure_to_stderr_and_returns_two(tmp_path: Path, capsys) -
     assert captured.out == ""
     report = json.loads(captured.err)
     assert report["status"] == "failed"
+    assert report["mutation_performed"] is False
+
+
+@pytest.mark.parametrize("argv", [[], ["--unknown-option"]])
+def test_cli_normalizes_argument_errors_to_json_stderr(argv: list[str], capsys) -> None:
+    from validate_part1_smoke_results import main
+
+    result = main(argv)
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    report = json.loads(captured.err)
+    assert report["status"] == "failed"
+    assert report["error_type"] == "ArgumentError"
+    assert report["mutation_performed"] is False
+
+
+def test_cli_normalizes_incomplete_report_to_json_stderr(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    import validate_part1_smoke_results
+
+    monkeypatch.setattr(
+        validate_part1_smoke_results,
+        "build_smoke_coverage_report",
+        lambda **_kwargs: {
+            "is_valid": True,
+            "structurally_valid": True,
+            "coverage_complete": False,
+            "paper_analysis_ready": False,
+            "mutation_performed": False,
+        },
+    )
+    result = validate_part1_smoke_results.main(
+        ["--model-run-manifest", "manifest.json", "--shard-root", "shard"]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    report = json.loads(captured.err)
+    assert report["status"] == "failed"
+    assert report["error_type"] == "IncompleteReportError"
     assert report["mutation_performed"] is False
