@@ -1,5 +1,16 @@
 # Part 1 validation ledger and acceptance matrix
 
+## Full-shape timeout and approved recovery
+
+Final candidate `96822f88c0a38bac4a35f29e90caf601831e7f50` passed Mila
+manifest, shell, clean-tree, and unattended-submission preflight. CPU
+full-shape job `10347033` completed fixture creation and strict coverage, then
+timed out during merge after `12:00:20`. Gate `10347034` was cancelled by exact
+`afterok:10347033`; no production manifest or GPU array was created. The user
+explicitly waived repeating this synthetic scale rehearsal. A one-hour focused
+regression job excluding `part1_full_acceptance` replaces it as the pre-launch
+readiness dependency; real post-generation validation remains mandatory.
+
 ## Phase 3 post-smoke gate
 
 Phase 3 Tasks 1–7 are implemented and independently reviewed at
@@ -24,20 +35,21 @@ The submission gate itself passed on Mila:
 | Focused no-model Mila tests | **PASSED** — 34 passed in 1148.24 seconds |
 | Final bounded Phase 3 smoke direct integrity | **PASSED** — job `10324103`, `COMPLETED`/`0:0`, `01:27:13`; terminal runner and exact 10 natural/110 checkpoint/240 audit shape directly validated |
 | Hardened CLI-validator acceptance | **PENDING** — must accept the bounded Phase 3 smoke and required read-only Smoke A/B coverage with retained machine-readable evidence |
-| Full-shape synthetic acceptance | **PENDING AFTER FIX** — the optimized local run failed coverage after `02:20:19` because synthetic naturals used the wrong prompt hash; the fixture-only correction passes a real 10-natural/110-checkpoint shard scan plus five focused and 300 pipeline regression tests, but the corrected 500-shard flow has not run |
+| Full-shape synthetic acceptance | **WAIVED AFTER SCALE EVIDENCE** — corrected job `10347033` completed full strict coverage with no reported defect, then timed out during merge at 12 hours; it will not be repeated under the four-day deadline |
+| Focused recovery readiness, local | **PASSED** — `797 passed, 1 deselected in 943.13s`; the deselected test is exactly `part1_full_acceptance` |
 | Final launch-critical local suite | **PASSED** — 257 tests in `570.14s`, excluding only the explicit full-shape marker prepared for CPU SLURM |
-| Unattended submission review | **PASSED** — exact `afterok` bootstrap, exclusive receipts, race/crash reconciliation, `%16` dependencies, and 4h/4h/8h CPU resources independently approved with no findings |
+| Unattended submission review | **PASSED BEFORE RECOVERY** — exact `afterok` bootstrap, exclusive receipts, race/crash reconciliation, and `%16` dependencies were independently approved; focused-readiness recovery requires fresh tests and review before submission |
 
 Continuation starts with the hardened CLI-validator acceptance sequence in
 [RUNBOOK.md](RUNBOOK.md), not with another smoke submission. No production
-manifest or array may be created until hardened CLI acceptance, synthetic
-end-to-end acceptance, final documentation, full verification, independent
-review, final commit, and the clean-tree gate all pass.
+manifest or array may be created until focused readiness, hardened retained-smoke
+validation, final documentation, full verification, independent review, final
+commit, and the clean-tree gate all pass.
 
-The corrected full-shape flow is prepared as a CPU-only Mila job with a 12-hour
-ceiling. Measured coverage runtime raised the production CPU wall times to four
-hours for validation, four hours for merge, and eight hours for analysis;
-these are operational resource changes only.
+The full-shape flow is retained but no longer resubmitted. Measured runtime
+raised the post-generation CPU ceilings to 12 hours for validation, 24 hours
+for merge, and 36 hours for final analysis; these are operational resource
+changes only and do not alter any metric or scientific contract.
 
 The user explicitly authorized the post-readiness full production run on
 2026-08-11, with target array `0-499%16` and a four-day deadline. The protocol
@@ -81,7 +93,8 @@ The catalog at `tests/fixtures/part1_synthetic/catalog.json` provides
 schema-valid synthetic raw-input families for the implemented Phase 3 AUROC,
 bootstrap, macro-aggregation, within-question, switching, and stabilization
 paths. Its evidence is synthetic and does not establish real-model results or
-replace the still-pending hardened CLI and end-to-end acceptance gates.
+replace the still-pending hardened CLI and focused-readiness gates. Full-shape
+synthetic acceptance is waived after job `10347033` supplied scale evidence.
 
 | Gate | Current evidence |
 |---|---|
@@ -372,11 +385,11 @@ Analysis, bootstrap/calibration, complete raw validation, validate-before-
 publish merge, and SLURM readiness hardening are implemented and independently
 reviewed. End-to-end bounded Phase 3 smoke job `10324103` completed `0:0` in
 `01:27:13`; its exact 10 natural/110 checkpoint/240 audit shape and direct
-integrity validation passed. Hardened CLI-validator acceptance and synthetic
-end-to-end acceptance remain pending, so Phase 3 acceptance and production
-readiness have not passed.
+integrity validation passed. Hardened CLI-validator execution and focused
+readiness remain pending; the duplicate synthetic full-shape rehearsal is
+explicitly waived. Phase 3 production readiness has not yet passed.
 
-Only after those acceptance gates, final documentation, full verification,
+Only after the focused-readiness and retained-smoke gates, final documentation, full verification,
 independent review, the final tracked commit, and a clean worktree may the
 operational production model-run manifest be created under the ignored
 persistent production root. The manifest must record the final commit and its

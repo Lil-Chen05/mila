@@ -110,7 +110,9 @@ def submit_production_chain(
         raise RuntimeError("submission bootstrap receipt is not a regular file")
     bootstrap = _load_json(bootstrap_receipt_path)
     if (
-        bootstrap.get("status") != "submitted"
+        bootstrap.get("schema_version") != "part1-submission-bootstrap-v2"
+        or bootstrap.get("acceptance_mode") != "focused_readiness_v1"
+        or bootstrap.get("status") != "submitted"
         or bootstrap.get("jobs", {}).get("acceptance") != acceptance_job_id
         or bootstrap.get("jobs", {}).get("production_gate") != gate_job_id
         or bootstrap.get("gate_dependency") != f"afterok:{acceptance_job_id}"
@@ -155,6 +157,7 @@ def submit_production_chain(
         "final_production_git_commit": model_manifest["final_production_git_commit"],
         "array": "0-499%16",
         "bootstrap_replicates": 5_000,
+        "acceptance_mode": "focused_readiness_v1",
         "jobs": {
             "acceptance": acceptance_job_id,
             "production_gate": gate_job_id,

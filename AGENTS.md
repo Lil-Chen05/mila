@@ -1,5 +1,14 @@
 # AGENTS.md — Working Agreement for This Project
 
+## PRODUCTION RECOVERY — READ HANDOFF FIRST
+
+Full-shape acceptance job `10347033` timed out after 12 hours and its exact
+`afterok` gate `10347034` was cancelled without launching production. The user
+explicitly waived another full-shape rehearsal. Production must use the focused
+readiness bootstrap documented in root `HANDOFF.md`; do not bypass its gate or
+submit individual production jobs manually. Once the recovery chain is active,
+do not commit, pull, or switch the Mila checkout away from its recorded commit.
+
 ## What this project is
 This repository contains Part 1 of an uncertainty-trajectory research experiment
 on the Mila SLURM cluster. It studies whether uncertainty measured throughout a
@@ -81,10 +90,11 @@ features without explicit approval.
   CLI validator, final verification/review/commit, production-manifest, and
   launch-readiness gates pass in order, the production manifest and array must
   remain absent.
-- The unattended path queues only CPU full acceptance and its `afterok`
-  production gate initially. The gate must validate all retained smokes and the
-  clean final commit before it may create the production manifest or submit the
-  `%16` array. Partial submission receipts block automatic resubmission.
+- The unattended path queues only the CPU focused-readiness suite with
+  `acceptance_mode=focused_readiness_v1` and its exact `afterok` production
+  gate initially. The gate must validate all retained smokes and the clean
+  final commit before it may create the production manifest or submit the `%16`
+  array. Partial submission receipts block automatic resubmission.
 
 Use two immutable provenance levels: a tracked, model-independent study
 manifest and one operational model-run manifest per model revision and adapter.

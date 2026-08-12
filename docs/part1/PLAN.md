@@ -2,6 +2,13 @@
 
 ## Authority and current phase
 
+The first unattended chain ended safely: full-shape acceptance `10347033`
+timed out after 12 hours during merge, exact-`afterok` gate `10347034` was
+cancelled, and no production job was submitted. The full-shape rehearsal is
+explicitly waived rather than repeated. Recovery uses the focused-readiness
+bootstrap in root `HANDOFF.md`; its receipt and exact deployed commit become
+authoritative when submitted.
+
 This plan implements the fixed Part 1 contract in [DECISIONS.md](DECISIONS.md).
 The executable data contract is summarized in [SCHEMA.md](SCHEMA.md), operator
 procedures are in [RUNBOOK.md](RUNBOOK.md), and acceptance evidence is in
@@ -16,10 +23,12 @@ Phase 3 implementation Tasks 1–7 are complete. Final bounded Phase 3 smoke job
 natural results, 110 checkpoint results, and 240 audit events, and direct
 integrity validation passed. The hardened CLI validator is implemented,
 independently approved, and locally regression-tested; its retained-smoke Mila
-execution is pending. The corrected full-shape synthetic acceptance is prepared
-as a CPU-only Mila job after a fixture-only prompt-hash defect stopped the first
-local attempt at coverage. No production model-run manifest exists, production
-readiness has not been established, and the full experiment is unsubmitted.
+execution is pending. The corrected full-shape synthetic acceptance completed
+strict coverage on Mila but timed out during merge. The timeout exposed
+conservative resource limits, not a scientific or schema defect. The user
+waived a repeat in favor of a short focused-readiness job. No production
+model-run manifest exists, production readiness has not been established, and
+the full experiment is unsubmitted.
 
 Historical root documentation, old 20q/200q code, results, and analyses remain
 pilot artifacts. They are not instructions or evidence for Part 1.
@@ -270,14 +279,15 @@ Task 8 uses this fail-closed order:
 1. complete and verify the hardened CLI validator, then obtain its acceptance
    result for the bounded Phase 3 smoke and the required read-only Smoke A/B
    coverage;
-2. complete the synthetic end-to-end acceptance and reconcile its evidence with
-   the tracked validation ledger;
+2. retain timed-out job `10347033` as scale evidence and do not repeat the
+   full-shape rehearsal;
 3. finalize the six Part 1 documents plus `AGENTS.md`, run full verification,
    and complete independent review;
 4. create the final tracked commit, deploy it to Mila, and require a clean
    tracked worktree;
-5. submit the CPU-only full acceptance and an `afterok` production gate;
-6. only after acceptance succeeds, the gate revalidates all retained smokes,
+5. submit the one-hour CPU-only focused-readiness suite and an exact `afterok`
+   production gate;
+6. only after focused readiness succeeds, the gate revalidates all retained smokes,
    creates the immutable operational production manifest from that exact
    commit, validates the `0-499%16` launch plan, and submits generation;
 7. validation runs after the array terminates, while merge and final analysis

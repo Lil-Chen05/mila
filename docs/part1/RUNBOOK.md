@@ -1,5 +1,13 @@
 # Part 1 runbook
 
+## Production recovery checkpoint
+
+Full-shape acceptance `10347033` timed out after `12:00:20` during merge and
+gate `10347034` was cancelled by its unsatisfied `afterok` dependency. No
+production manifest or GPU job was created. Do not resubmit either historical
+job. Use only the focused-readiness bootstrap below and treat its receipts as
+the operational source of truth.
+
 ## Current Phase 3 continuation checkpoint (2026-08-11)
 
 The reviewed Phase 3 tree is deployed on Mila at
@@ -35,8 +43,8 @@ Continue Phase 3 Task 8 in this exact order:
 1. finish and verify the hardened CLI validator;
 2. run its acceptance path against the bounded Phase 3 smoke and the required
    read-only Smoke A/B coverage, retaining machine-readable evidence;
-3. complete synthetic end-to-end acceptance and reconcile the validation
-   ledger;
+3. retain full-shape timeout `10347033` as historical scale evidence; do not
+   repeat it;
 4. finalize the six Part 1 documents plus `AGENTS.md`, run full verification,
    and complete independent review;
 5. create the final tracked commit and confirm the tracked worktree is clean;
@@ -51,14 +59,16 @@ Continue Phase 3 Task 8 in this exact order:
 
 For unattended execution, use the reviewed bootstrap launcher from the final
 clean deployed commit. It exclusively claims a bootstrap receipt before any
-`sbatch`, then submits only the CPU acceptance and its exact `afterok` gate:
+`sbatch`, then submits only the CPU focused-readiness suite and its exact
+`afterok` gate:
 
 ```bash
 uv run python scripts/submit_part1_unattended.py
 ```
 
-The acceptance job is CPU-only with a 12-hour ceiling. The gate cannot run if
-acceptance fails. Do not submit either job script directly. The bootstrap
+The readiness job is CPU-only with a one-hour ceiling and runs the regression
+suite with `-m "not part1_full_acceptance"`; it loads no model or dataset. The
+gate cannot run if readiness fails. Do not submit either job script directly. The bootstrap
 receipt under `results/part1-submission/<final-commit>/bootstrap_receipt.json`
 records both job IDs, the exact `afterok` relationship, the command arguments,
 and any in-flight stage for crash reconciliation. Once released, the gate
@@ -117,9 +127,11 @@ state in the ignored production result tree and the operator handoff; do not
 create a later tracked documentation commit that makes the active checkout
 incompatible with the manifest.
 
-The production CPU allocations are 4 hours for validation, 4 hours for merge,
-and 8 hours for final analysis. These supersede the earlier 2/2/4-hour draft
-after the production-shaped local coverage attempt required `02:20:19`.
+The post-generation CPU ceilings are 12 hours for validation, 24 hours for
+merge, and 36 hours for final 5,000-bootstrap analysis. These are
+kill-prevention ceilings, not expected runtimes. Validation of real outputs,
+canonical merge, and final analysis remain mandatory; the waived work is only
+the duplicate pre-launch synthetic rehearsal.
 
 This authorization does not establish hardened CLI acceptance, create the
 production manifest, pass launch readiness, or prove that submission occurred.
@@ -666,8 +678,9 @@ does not make drifted science compatible.
 3. Bounded Phase 3 smoke job `10324103` completed `0:0` in `01:27:13`; its
    exact 10 natural/110 checkpoint/240 audit shape and direct integrity checks
    passed.
-4. Complete hardened CLI-validator acceptance on the Phase 3 smoke and required
-   read-only Smoke A/B coverage, then complete synthetic end-to-end acceptance.
+4. Run focused readiness, then let the gate complete hardened CLI validation on
+   Phase 3 smoke plus read-only Smoke A/B coverage. Do not repeat full-shape
+   synthetic acceptance.
 5. Finalize the six Part 1 documents plus `AGENTS.md`, run full verification and
    independent review, create the final tracked commit, and require a clean
    tracked worktree.

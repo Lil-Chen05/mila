@@ -30,6 +30,8 @@ def test_bootstrap_submits_gate_with_exact_afterok_and_records_both_ids(
     )
 
     relative_receipt = f"results/part1-submission/{commit}/bootstrap_receipt.json"
+    assert receipt["schema_version"] == "part1-submission-bootstrap-v2"
+    assert receipt["acceptance_mode"] == "focused_readiness_v1"
     assert receipt["status"] == "submitted"
     assert receipt["jobs"] == {"acceptance": "4101", "production_gate": "4102"}
     assert receipt["gate_dependency"] == "afterok:4101"
@@ -38,9 +40,9 @@ def test_bootstrap_submits_gate_with_exact_afterok_and_records_both_ids(
         [
             "sbatch",
             "--parsable",
-            f"--job-name=part1-full-acceptance-{commit[:12]}",
-            f"--comment=part1:{commit}:full_acceptance",
-            "jobs/part1_full_acceptance.sh",
+            f"--job-name=part1-launch-readiness-{commit[:12]}",
+            f"--comment=part1:{commit}:focused_readiness",
+            "jobs/part1_launch_readiness.sh",
         ],
         [
             "sbatch",
@@ -97,6 +99,8 @@ def test_gate_rejects_incompatible_bootstrap_receipt(tmp_path: Path) -> None:
     bootstrap.write_text(
         json.dumps(
             {
+                "schema_version": "part1-submission-bootstrap-v2",
+                "acceptance_mode": "focused_readiness_v1",
                 "status": "submitted",
                 "gate_dependency": "afterok:9999",
                 "final_production_git_commit": commit,

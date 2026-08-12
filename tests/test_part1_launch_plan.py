@@ -93,9 +93,9 @@ def test_part1_jobs_have_exact_resources_uv_resolution_and_future_clis() -> None
     assert "sbatch --array" not in jobs["part1_generate_array.sh"]
     assert "--shard-index 0" in jobs["part1_phase3_smoke.sh"]
     for name, cli, wall_time in (
-        ("part1_validate.sh", "scripts/validate_part1_results.py", "4:00:00"),
-        ("part1_merge.sh", "scripts/merge_part1_results.py", "4:00:00"),
-        ("part1_analyze.sh", "scripts/analyze_part1.py", "8:00:00"),
+        ("part1_validate.sh", "scripts/validate_part1_results.py", "12:00:00"),
+        ("part1_merge.sh", "scripts/merge_part1_results.py", "1-00:00:00"),
+        ("part1_analyze.sh", "scripts/analyze_part1.py", "1-12:00:00"),
     ):
         assert "#SBATCH --gpus-per-task" not in jobs[name]
         assert "#SBATCH --cpus-per-task=4" in jobs[name]
@@ -103,18 +103,17 @@ def test_part1_jobs_have_exact_resources_uv_resolution_and_future_clis() -> None
         assert cli in jobs[name]
 
 
-def test_full_acceptance_job_is_cpu_only_and_runs_the_explicit_marker() -> None:
+def test_launch_readiness_job_is_cpu_only_and_excludes_full_shape_marker() -> None:
     root = Path(__file__).resolve().parents[1]
-    content = (root / "jobs/part1_full_acceptance.sh").read_text(encoding="utf-8")
+    content = (root / "jobs/part1_launch_readiness.sh").read_text(encoding="utf-8")
 
     assert "#SBATCH --gpus-per-task" not in content
     assert "#SBATCH --cpus-per-task=4" in content
     assert "#SBATCH --mem=32G" in content
-    assert "#SBATCH --time=12:00:00" in content
-    assert "#SBATCH --output=logs/part1-full-acceptance-%j.out" in content
+    assert "#SBATCH --time=1:00:00" in content
+    assert "#SBATCH --output=logs/part1-launch-readiness-%j.out" in content
     assert 'srun "$UV_BIN" run pytest' in content
-    assert "-m part1_full_acceptance" in content
-    assert "tests/test_part1_end_to_end_acceptance.py" in content
+    assert '-m "not part1_full_acceptance"' in content
 
 
 def test_production_gate_is_cpu_only_and_submits_only_after_manifest_creation() -> None:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Submit CPU acceptance and its fail-closed afterok production gate."""
+"""Submit focused CPU readiness and its fail-closed afterok production gate."""
 
 from __future__ import annotations
 
@@ -44,7 +44,8 @@ def submit_unattended(
     )
     receipt_path = receipt_parent / receipt_relative.name
     receipt: dict[str, Any] = {
-        "schema_version": "part1-submission-bootstrap-v1",
+        "schema_version": "part1-submission-bootstrap-v2",
+        "acceptance_mode": "focused_readiness_v1",
         "status": "submitting",
         "submitted_at": submitted_at or datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "final_production_git_commit": commit,
@@ -60,9 +61,9 @@ def submit_unattended(
             [
                 "sbatch",
                 "--parsable",
-                f"--job-name=part1-full-acceptance-{commit[:12]}",
-                f"--comment=part1:{commit}:full_acceptance",
-                "jobs/part1_full_acceptance.sh",
+                f"--job-name=part1-launch-readiness-{commit[:12]}",
+                f"--comment=part1:{commit}:focused_readiness",
+                "jobs/part1_launch_readiness.sh",
             ],
         ),
         ("production_gate", None),

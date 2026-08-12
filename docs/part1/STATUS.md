@@ -2,6 +2,17 @@
 
 ## Executive status
 
+**Recovery snapshot:** full-shape acceptance job `10347033` reached `TIMEOUT`
+after `12:00:20` on 2026-08-12. It wrote the fixture in `58.304s` and completed
+strict coverage in `18135.654s`, then timed out during merge. Its fail-closed
+gate `10347034` was cancelled because `afterok:10347033` was unsatisfied. No
+production model-run manifest, production receipt, or GPU array was created.
+Historical operational evidence remains under
+`results/part1-submission/96822f88c0a38bac4a35f29e90caf601831e7f50/`.
+The user explicitly waived another full-shape synthetic rehearsal. Recovery
+uses a one-hour CPU-only focused regression job followed by the existing exact
+`afterok` production gate. See root `HANDOFF.md` for continuation.
+
 **Phase 3 implementation is complete through Tasks 1–7 on branch
 `codex/phase1-infrastructure`; Task 8 remains in progress after the successful
 final bounded Phase 3 smoke.** The reviewed generation, validation, merge,
@@ -28,16 +39,20 @@ failed coverage after `02:20:19` because synthetic natural rows carried a
 content-derived prompt hash rather than the model-run manifest prompt hash. No
 merge or analysis ran. The fixture-only correction passes a real one-shard scan
 of 10 natural and 110 checkpoint rows with zero defects, five focused tests,
-and 300 pipeline regressions. The corrected complete acceptance remains
-unverified and is prepared as CPU-only `jobs/part1_full_acceptance.sh` with a
-12-hour ceiling. The conditional `afterok` production gate in [RUNBOOK.md](RUNBOOK.md)
-creates the production manifest and submits the `%16` chain only after that
-acceptance passes. No production model-run manifest or production root exists,
-and the full array has not been submitted.
+and 300 pipeline regressions. Corrected job `10347033` subsequently completed
+strict coverage but timed out during merge after 12 hours. This established the
+real scale cost without revealing a schema or integrity defect. It is retained
+as historical evidence and is no longer a launch gate. The replacement
+`jobs/part1_launch_readiness.sh` runs focused regressions while explicitly
+excluding the full-shape marker; the conditional gate submits the `%16` chain
+only after readiness passes. The exact local readiness command passed 797 tests
+with one full-shape test deselected in `943.13s`. No production model-run
+manifest or production root exists, and the full array has not yet been
+submitted.
 
 The commit containing this checkpoint is the final tracked production
 candidate; its exact SHA is captured by the unattended bootstrap receipt and,
-only after acceptance passes, by the production model-run manifest. The fresh
+only after focused readiness passes, by the production model-run manifest. The fresh
 launch-critical local suite passed 257 tests in `570.14s`; the independent
 orchestration review approved with no findings. The unrelated untracked
 `METHODS_EXPERIMENTAL_DESIGN.md` remains user-owned and excluded.

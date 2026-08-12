@@ -24,6 +24,8 @@ def _bootstrap(tmp_path: Path) -> Path:
     path.write_text(
         json.dumps(
             {
+                "schema_version": "part1-submission-bootstrap-v2",
+                "acceptance_mode": "focused_readiness_v1",
                 "status": "submitted",
                 "gate_dependency": "afterok:1001",
                 "final_production_git_commit": "b" * 40,
@@ -34,6 +36,29 @@ def _bootstrap(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def test_submission_chain_rejects_legacy_full_shape_bootstrap(
+    tmp_path: Path,
+) -> None:
+    from submit_part1_production_chain import submit_production_chain
+
+    manifest = _manifest()
+    bootstrap = _bootstrap(tmp_path)
+    payload = json.loads(bootstrap.read_text(encoding="utf-8"))
+    payload["schema_version"] = "part1-submission-bootstrap-v1"
+    payload.pop("acceptance_mode")
+    bootstrap.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="bootstrap receipt is incompatible"):
+        submit_production_chain(
+            model_manifest=manifest,
+            repository_root=tmp_path,
+            run_command=lambda *_args, **_kwargs: pytest.fail("sbatch must not run"),
+            acceptance_job_id="1001",
+            gate_job_id="1002",
+            bootstrap_receipt_path=bootstrap,
+        )
 
 
 def test_submission_chain_records_exact_jobs_and_dependencies(
@@ -72,6 +97,7 @@ def test_submission_chain_records_exact_jobs_and_dependencies(
     )
 
     assert receipt["status"] == "submitted"
+    assert receipt["acceptance_mode"] == "focused_readiness_v1"
     assert receipt["jobs"] == {
         "acceptance": "1001",
         "production_gate": "1002",
