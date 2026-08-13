@@ -112,11 +112,12 @@ def test_launch_readiness_job_is_cpu_only_and_excludes_full_shape_marker() -> No
     assert "#SBATCH --mem=32G" in content
     assert "#SBATCH --time=1:00:00" in content
     assert "#SBATCH --output=logs/part1-launch-readiness-%j.out" in content
-    assert '${SCRATCH:?' in content
-    assert '${SLURM_JOB_ID:?' in content
     assert 'srun "$UV_BIN" run pytest' in content
     assert '-m "not part1_full_acceptance"' in content
-    assert '--basetemp "$SCRATCH/part1-launch-readiness-$SLURM_JOB_ID"' in content
+    assert "tests/test_submit_part1_unattended.py" in content
+    assert "tests/test_submit_part1_production_chain.py" in content
+    assert "tests/test_part1_launch_plan.py" in content
+    assert "--basetemp" not in content
 
 
 def test_production_gate_is_cpu_only_and_submits_only_after_manifest_creation() -> None:

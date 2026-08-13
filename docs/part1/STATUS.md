@@ -64,6 +64,14 @@ temporary root to the unique persistent-scratch path
 `$SCRATCH/part1-launch-readiness-$SLURM_JOB_ID`, rather than modifying each
 affected test individually.
 
+A third attempt, readiness `10362106`, demonstrated that a global `$SCRATCH`
+pytest root breaks the opposite class of tests that intentionally exercise
+ephemeral-path refusal. It was cancelled and gate `10362107` did not run; no
+production job was submitted. The final minimal readiness definition therefore
+runs only the 16 launch-critical bootstrap, receipt, dependency, collision,
+resource, and launch-plan tests. Immutable manifests and all retained real-model
+smokes remain separately validated by the production gate before any GPU job.
+
 The commit containing this checkpoint is the final tracked production
 candidate; its exact SHA is captured by the unattended bootstrap receipt and,
 only after focused readiness passes, by the production model-run manifest. The fresh

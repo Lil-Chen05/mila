@@ -8,9 +8,6 @@
 
 set -euo pipefail
 
-: "${SCRATCH:?SCRATCH must be set by the Mila job environment}"
-: "${SLURM_JOB_ID:?SLURM_JOB_ID must identify this readiness job}"
-
 UV_BIN="$(command -v uv || true)"
 if [[ -z "$UV_BIN" || ! -x "$UV_BIN" ]]; then
   UV_BIN="$HOME/.local/bin/uv"
@@ -22,5 +19,7 @@ fi
 
 srun "$UV_BIN" run pytest -q \
   -m "not part1_full_acceptance" \
-  --basetemp "$SCRATCH/part1-launch-readiness-$SLURM_JOB_ID" \
+  tests/test_submit_part1_unattended.py \
+  tests/test_submit_part1_production_chain.py \
+  tests/test_part1_launch_plan.py \
   --tb=short

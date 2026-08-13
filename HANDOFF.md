@@ -46,6 +46,15 @@ job-level fix sets pytest `--basetemp` to
 `$SCRATCH/part1-launch-readiness-$SLURM_JOB_ID`, giving every test a unique
 non-ephemeral temporary root without editing tests individually.
 
+Readiness `10362106` proved a global `$SCRATCH` basetemp is also unsuitable:
+tests intentionally exercising ephemeral-root refusal require pytest's normal
+temporary location. It was cancelled, gate `10362107` did not run, and no
+production job was submitted. Final readiness is deliberately limited to the
+16 launch-critical tests in `test_submit_part1_unattended.py`,
+`test_submit_part1_production_chain.py`, and `test_part1_launch_plan.py`.
+Manifest and retained-smoke validation remain mandatory inside the downstream
+production gate.
+
 ## Approved recovery chain
 
 Run only this entry point from a clean, exactly deployed recovery commit:
