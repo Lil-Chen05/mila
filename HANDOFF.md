@@ -149,3 +149,9 @@ organization remain.
   strict coverage before timing out during merge; no integrity defect appeared.
 - The exact focused-readiness command passed locally with 797 tests and one
   full-shape test deselected in `943.13s`.
+- Gate `10362215` submitted production array `10362218`, but tasks failed before
+  Python/model startup with Slurm exit `64`: the default CPU bind mask was
+  outside each step allocation. The array was cancelled and wrote no scientific
+  shards. The generation wrapper now uses `srun --cpu-bind=none`; changed code
+  requires a new commit-bound production manifest rather than reuse of the old
+  model run.

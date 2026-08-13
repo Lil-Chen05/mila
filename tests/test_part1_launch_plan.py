@@ -76,12 +76,17 @@ def test_part1_jobs_have_exact_resources_uv_resolution_and_future_clis() -> None
             "part1_analyze.sh",
         )
     }
-    for content in jobs.values():
+    for name, content in jobs.items():
         assert "command -v uv" in content
         assert '$HOME/.local/bin/uv' in content
         assert '[[ -z "$UV_BIN" || ! -x "$UV_BIN" ]]' in content
         assert '[[ ! -x "$UV_BIN" ]]' in content
-        assert 'srun "$UV_BIN" run python' in content
+        expected_srun = (
+            'srun --cpu-bind=none "$UV_BIN" run python'
+            if name == "part1_generate_array.sh"
+            else 'srun "$UV_BIN" run python'
+        )
+        assert expected_srun in content
     for name in ("part1_generate_array.sh", "part1_phase3_smoke.sh"):
         assert "#SBATCH --gpus-per-task=l40s:1" in jobs[name]
         assert "#SBATCH --cpus-per-task=4" in jobs[name]
@@ -90,6 +95,7 @@ def test_part1_jobs_have_exact_resources_uv_resolution_and_future_clis() -> None
         assert 'export HF_HOME="$SCRATCH/hf_cache"' in jobs[name]
     assert '${MODEL_RUN_ID:?' in jobs["part1_generate_array.sh"]
     assert '${SLURM_ARRAY_TASK_ID:?' in jobs["part1_generate_array.sh"]
+    assert 'srun --cpu-bind=none "$UV_BIN" run python' in jobs["part1_generate_array.sh"]
     assert "sbatch --array" not in jobs["part1_generate_array.sh"]
     assert "--shard-index 0" in jobs["part1_phase3_smoke.sh"]
     for name, cli, wall_time in (

@@ -23,7 +23,7 @@ if [[ ! -x "$UV_BIN" ]]; then
   exit 127
 fi
 
-srun "$UV_BIN" run python scripts/run_part1_shard.py \
+srun --cpu-bind=none "$UV_BIN" run python scripts/run_part1_shard.py \
   --execution-scope production \
   --shard-index "$SLURM_ARRAY_TASK_ID" \
   --shard-count 500 \

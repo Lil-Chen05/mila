@@ -87,6 +87,13 @@ before manifest creation and produced no production receipt or job. Retained
 smokes are no longer live launch inputs. Strict validation remains mandatory on
 the actual generated production shards before merge and analysis.
 
+Gate `10362215` successfully submitted the first production chain, but GPU
+array `10362218` failed before Python/model startup because Mila's default
+`srun` CPU bind mask fell outside each task allocation. The array was cancelled
+and produced no scientific shards. The generation wrapper now sets
+`--cpu-bind=none`; provenance requires a new commit-bound production manifest
+and chain rather than reusing the old model run.
+
 The commit containing this checkpoint is the final tracked production
 candidate; its exact SHA is captured by the unattended bootstrap receipt and,
 only after focused readiness passes, by the production model-run manifest. The fresh
