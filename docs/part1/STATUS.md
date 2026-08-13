@@ -23,8 +23,9 @@ trajectory, statistics, bootstrap, and analysis code was deployed on Mila at
 The stable shard contains exactly 10 natural results, 110 checkpoint results,
 and 240 audit events, and direct integrity validation passed. The hardened CLI
 validator is implemented, independently approved, and passed 57 focused plus
-291 regression tests. Its Mila Smoke A/B/Phase 3 execution remains pending, so
-Phase 3 acceptance and production readiness have not passed.
+291 regression tests. Smoke A/B retain their completed historical acceptance;
+live hardened validation now targets current-format Phase 3 smoke. Production
+readiness has not yet passed.
 
 Pre-submission gates passed on Mila: the tracked tree was clean at the exact
 commit above; `uv.lock` matched preflight SHA-256
@@ -69,8 +70,17 @@ pytest root breaks the opposite class of tests that intentionally exercise
 ephemeral-path refusal. It was cancelled and gate `10362107` did not run; no
 production job was submitted. The final minimal readiness definition therefore
 runs only the 16 launch-critical bootstrap, receipt, dependency, collision,
-resource, and launch-plan tests. Immutable manifests and all retained real-model
-smokes remain separately validated by the production gate before any GPU job.
+resource, and launch-plan tests. Immutable manifests and current-format Phase 3
+smoke remain separately validated by the production gate before any GPU job;
+Smoke A/B remain historical acceptance evidence.
+
+Readiness `10362161` then passed all 16 launch-critical tests in `13.18s`, but
+gate `10362162` failed safely before manifest creation because historical Smoke
+A/B predate the `.finalized` lifecycle marker required by the hardened current
+validator. No production manifest, receipt, or job was created. The launch gate now validates only
+the current-format Phase 3 smoke live; the already accepted Smoke A/B jobs and
+their recorded counts remain historical evidence and are not mutated or
+retrofit to a newer storage contract.
 
 The commit containing this checkpoint is the final tracked production
 candidate; its exact SHA is captured by the unattended bootstrap receipt and,

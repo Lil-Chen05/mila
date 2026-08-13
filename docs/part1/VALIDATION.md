@@ -34,12 +34,13 @@ The submission gate itself passed on Mila:
 | Scheduler/collision/shell checks | **PASSED** — `MaxArraySize=1001`, no existing Phase 3 smoke roots, all relevant job scripts pass `bash -n` |
 | Focused no-model Mila tests | **PASSED** — 34 passed in 1148.24 seconds |
 | Final bounded Phase 3 smoke direct integrity | **PASSED** — job `10324103`, `COMPLETED`/`0:0`, `01:27:13`; terminal runner and exact 10 natural/110 checkpoint/240 audit shape directly validated |
-| Hardened CLI-validator acceptance | **PENDING** — must accept the bounded Phase 3 smoke and required read-only Smoke A/B coverage with retained machine-readable evidence |
+| Hardened CLI-validator acceptance | **PENDING LIVE GATE** — must accept current-format bounded Phase 3 smoke; Smoke A/B are retained as immutable historical acceptance evidence because they predate `.finalized` |
 | Full-shape synthetic acceptance | **WAIVED AFTER SCALE EVIDENCE** — corrected job `10347033` completed full strict coverage with no reported defect, then timed out during merge at 12 hours; it will not be repeated under the four-day deadline |
 | Focused recovery readiness, local | **PASSED** — `797 passed, 1 deselected in 943.13s`; the deselected test is exactly `part1_full_acceptance` |
 | Focused recovery readiness, Mila first attempt | **FIXTURE FAILURE** — job `10357631` reached an environment-dependent assertion because Mila's pytest `tmp_path` is under forbidden `/tmp`; gate `10357632` remained fail-closed and no production job was submitted |
 | Focused recovery readiness, Mila second attempt | **ENVIRONMENT FAILURE** — job `10362018` passed the first corrected fixture, then another `tmp_path` test hit the same forbidden-`/tmp` ordering; readiness `10362018` and gate `10362019` were cancelled, no production was submitted, and the job-level pytest basetemp was moved to unique `$SCRATCH` storage |
 | Focused recovery readiness, Mila third attempt | **ENVIRONMENT INCOMPATIBILITY** — global `$SCRATCH` basetemp caused tests intentionally checking ephemeral-path rejection to fail; readiness `10362106` was cancelled, gate `10362107` did not run, no production was submitted, and readiness was narrowed to the 16 launch-critical orchestration/plan tests |
+| Focused recovery readiness, Mila fourth attempt | **READINESS PASSED / LEGACY GATE MISMATCH** — readiness `10362161` passed 16 tests in `13.18s`; gate `10362162` failed before production because Smoke A/B predate required `.finalized` markers; no production manifest, receipt, or job was created, and live hardened validation was narrowed to current-format Phase 3 smoke |
 | Final launch-critical local suite | **PASSED** — 257 tests in `570.14s`, excluding only the explicit full-shape marker prepared for CPU SLURM |
 | Unattended submission review | **PASSED BEFORE RECOVERY** — exact `afterok` bootstrap, exclusive receipts, race/crash reconciliation, and `%16` dependencies were independently approved; focused-readiness recovery requires fresh tests and review before submission |
 
@@ -392,7 +393,8 @@ integrity validation passed. Hardened CLI-validator execution and focused
 readiness remain pending; the duplicate synthetic full-shape rehearsal is
 explicitly waived. Phase 3 production readiness has not yet passed.
 
-Only after the focused-readiness and retained-smoke gates, final documentation, full verification,
+Only after focused readiness and live current-format Phase 3 validation, with
+Smoke A/B retained as historical evidence, final documentation, full verification,
 independent review, the final tracked commit, and a clean worktree may the
 operational production model-run manifest be created under the ignored
 persistent production root. The manifest must record the final commit and its

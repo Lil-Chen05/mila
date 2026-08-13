@@ -132,7 +132,8 @@ def test_production_gate_is_cpu_only_and_submits_only_after_manifest_creation() 
     assert '${BOOTSTRAP_RECEIPT:?' in content
     assert '${SLURM_JOB_ID:?' in content
     assert content.count("scripts/validate_part1_smoke_results.py") == 1
-    assert "for SCOPE in smoke_a smoke_b phase3_smoke" in content
+    assert 'SCOPE="phase3_smoke"' in content
+    assert "for SCOPE in smoke_a smoke_b phase3_smoke" not in content
     smoke_position = content.index("scripts/validate_part1_smoke_results.py")
     create_position = content.index("scripts/create_part1_model_run_manifest.py")
     plan_position = content.index("scripts/part1_launch_plan.py")

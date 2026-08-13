@@ -92,9 +92,10 @@ features without explicit approval.
   remain absent.
 - The unattended path queues only the CPU focused-readiness suite with
   `acceptance_mode=focused_readiness_v1` and its exact `afterok` production
-  gate initially. The gate must validate all retained smokes and the clean
-  final commit before it may create the production manifest or submit the `%16`
-  array. Partial submission receipts block automatic resubmission.
+  gate initially. The gate must validate the current-format Phase 3 smoke and
+  the clean final commit before it may create the production manifest or submit
+  the `%16` array. Smoke A/B remain immutable historical acceptance evidence.
+  Partial submission receipts block automatic resubmission.
 
 Use two immutable provenance levels: a tracked, model-independent study
 manifest and one operational model-run manifest per model revision and adapter.
