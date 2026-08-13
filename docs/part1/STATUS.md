@@ -50,6 +50,12 @@ with one full-shape test deselected in `943.13s`. No production model-run
 manifest or production root exists, and the full array has not yet been
 submitted.
 
+Recovery readiness job `10357631` exposed one cross-platform test-fixture
+assumption: pytest places `tmp_path` under `/tmp` on Mila, so the ephemeral-root
+guard correctly fired before the test's expected configured-root mismatch.
+This is pure validation-test behavior and does not affect production code or
+science. Gate `10357632` remains fail-closed; no production job was submitted.
+
 The commit containing this checkpoint is the final tracked production
 candidate; its exact SHA is captured by the unattended bootstrap receipt and,
 only after focused readiness passes, by the production model-run manifest. The fresh

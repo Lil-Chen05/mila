@@ -32,6 +32,13 @@ results/part1-submission/96822f88c0a38bac4a35f29e90caf601831e7f50/bootstrap_rece
 The user explicitly waived another full-shape rehearsal. Do not resubmit job
 `10347033` or run `jobs/part1_full_acceptance.sh` as a production prerequisite.
 
+Focused-readiness attempt `10357631` found a pure cross-platform fixture issue:
+Mila's pytest `tmp_path` resolves under forbidden `/tmp`, causing the
+ephemeral-root error to precede the mismatch error expected by one config test.
+Its dependent gate is `10357632`; it did not submit production. The fixture now
+uses a non-ephemeral configured-root mismatch and must be verified before a new
+recovery commit is submitted.
+
 ## Approved recovery chain
 
 Run only this entry point from a clean, exactly deployed recovery commit:

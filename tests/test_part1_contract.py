@@ -1208,7 +1208,7 @@ def test_config_templates_encode_fixed_science_and_phase1_guard(
         validate_phase1_config(
             configs,
             mode="smoke",
-            persistent_root=tmp_path / "different-root",
+            persistent_root=root.parent / "part1-smoke-mismatch",
         )
 
     with pytest.raises(ValueError, match="ephemeral"):
