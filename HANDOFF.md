@@ -39,6 +39,13 @@ Its dependent gate is `10357632`; it did not submit production. The fixture now
 uses a non-ephemeral configured-root mismatch and must be verified before a new
 recovery commit is submitted.
 
+Readiness attempt `10362018` confirmed the issue was job-wide when another
+`tmp_path` test encountered the same `/tmp` guard. Readiness `10362018` and gate
+`10362019` were cancelled; no production job was submitted. The minimal
+job-level fix sets pytest `--basetemp` to
+`$SCRATCH/part1-launch-readiness-$SLURM_JOB_ID`, giving every test a unique
+non-ephemeral temporary root without editing tests individually.
+
 ## Approved recovery chain
 
 Run only this entry point from a clean, exactly deployed recovery commit:

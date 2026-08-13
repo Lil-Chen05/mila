@@ -56,6 +56,14 @@ guard correctly fired before the test's expected configured-root mismatch.
 This is pure validation-test behavior and does not affect production code or
 science. Gate `10357632` remains fail-closed; no production job was submitted.
 
+The next readiness attempt, job `10362018`, passed the first corrected fixture
+but exposed the same general issue in another `tmp_path` test. Readiness
+`10362018` and gate `10362019` were cancelled after the failure was observed;
+no production job was submitted. The job-level correction now binds pytest's
+temporary root to the unique persistent-scratch path
+`$SCRATCH/part1-launch-readiness-$SLURM_JOB_ID`, rather than modifying each
+affected test individually.
+
 The commit containing this checkpoint is the final tracked production
 candidate; its exact SHA is captured by the unattended bootstrap receipt and,
 only after focused readiness passes, by the production model-run manifest. The fresh

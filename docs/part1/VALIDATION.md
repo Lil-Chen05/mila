@@ -38,6 +38,7 @@ The submission gate itself passed on Mila:
 | Full-shape synthetic acceptance | **WAIVED AFTER SCALE EVIDENCE** — corrected job `10347033` completed full strict coverage with no reported defect, then timed out during merge at 12 hours; it will not be repeated under the four-day deadline |
 | Focused recovery readiness, local | **PASSED** — `797 passed, 1 deselected in 943.13s`; the deselected test is exactly `part1_full_acceptance` |
 | Focused recovery readiness, Mila first attempt | **FIXTURE FAILURE** — job `10357631` reached an environment-dependent assertion because Mila's pytest `tmp_path` is under forbidden `/tmp`; gate `10357632` remained fail-closed and no production job was submitted |
+| Focused recovery readiness, Mila second attempt | **ENVIRONMENT FAILURE** — job `10362018` passed the first corrected fixture, then another `tmp_path` test hit the same forbidden-`/tmp` ordering; readiness `10362018` and gate `10362019` were cancelled, no production was submitted, and the job-level pytest basetemp was moved to unique `$SCRATCH` storage |
 | Final launch-critical local suite | **PASSED** — 257 tests in `570.14s`, excluding only the explicit full-shape marker prepared for CPU SLURM |
 | Unattended submission review | **PASSED BEFORE RECOVERY** — exact `afterok` bootstrap, exclusive receipts, race/crash reconciliation, and `%16` dependencies were independently approved; focused-readiness recovery requires fresh tests and review before submission |
 
