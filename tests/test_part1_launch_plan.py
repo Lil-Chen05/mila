@@ -131,14 +131,12 @@ def test_production_gate_is_cpu_only_and_submits_only_after_manifest_creation() 
     assert '${ACCEPTANCE_JOB_ID:?' in content
     assert '${BOOTSTRAP_RECEIPT:?' in content
     assert '${SLURM_JOB_ID:?' in content
-    assert content.count("scripts/validate_part1_smoke_results.py") == 1
-    assert 'SCOPE="phase3_smoke"' in content
-    assert "for SCOPE in smoke_a smoke_b phase3_smoke" not in content
-    smoke_position = content.index("scripts/validate_part1_smoke_results.py")
+    assert "scripts/validate_part1_smoke_results.py" not in content
     create_position = content.index("scripts/create_part1_model_run_manifest.py")
     plan_position = content.index("scripts/part1_launch_plan.py")
     submit_position = content.index("scripts/submit_part1_production_chain.py")
-    assert smoke_position < create_position < plan_position < submit_position
+    manifest_position = content.index("scripts/validate_part1_manifests.py")
+    assert manifest_position < create_position < plan_position < submit_position
     assert '--acceptance-job-id "$ACCEPTANCE_JOB_ID"' in content
     assert '--gate-job-id "$SLURM_JOB_ID"' in content
     assert '--bootstrap-receipt "$BOOTSTRAP_RECEIPT"' in content

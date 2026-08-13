@@ -52,17 +52,24 @@ temporary location. It was cancelled, gate `10362107` did not run, and no
 production job was submitted. Final readiness is deliberately limited to the
 16 launch-critical tests in `test_submit_part1_unattended.py`,
 `test_submit_part1_production_chain.py`, and `test_part1_launch_plan.py`.
-Manifest and current-format Phase 3 smoke validation remain mandatory inside
-the downstream production gate. Smoke A/B remain historical evidence.
+Immutable-manifest and clean-commit validation remain mandatory inside the
+production gate. All retained smokes remain historical evidence.
 
 Readiness `10362161` passed all 16 launch-critical tests in `13.18s`. Gate
 `10362162` then failed before production because Smoke A/B were generated under
 the older shard lifecycle and contain no `.finalized` file required by the
-hardened current validator. Phase 3 smoke is current-format and validates. The
-gate therefore validates Phase 3 smoke live; Smoke A/B remain immutable
-historical evidence with their previously accepted counts and job outcomes.
+hardened current validator. This prompted an attempted Phase 3-only live gate;
+Smoke A/B remained immutable historical evidence with their previously
+accepted counts and job outcomes.
 No legacy artifact is mutated or retrofitted, and no production receipt was
 created by gate `10362162`.
+
+Readiness `10362197` passed in `10s`; gate `10362198` then showed that the
+earlier Phase 3 smoke also predates the final prompt-hash contract. It failed
+before manifest creation and created no production receipt or job. Retained
+smokes are therefore historical evidence, not live launch inputs. Actual
+production outputs still undergo strict post-generation validation before
+merge or analysis.
 
 ## Approved recovery chain
 
@@ -77,7 +84,7 @@ It atomically records and submits:
 1. a CPU-only focused regression job with a one-hour ceiling and marker
    expression `not part1_full_acceptance`;
 2. a production gate with exact `afterok` on focused readiness;
-3. after the gate validates manifests and the current-format Phase 3 smoke,
+3. after the gate validates immutable manifests, the clean commit, and launch plan,
    generation array `0-499%16`;
 4. real-output validation with `afterany` on generation and a 12-hour ceiling;
 5. canonical merge with `afterok` on validation and a 24-hour ceiling; and

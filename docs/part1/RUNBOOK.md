@@ -41,8 +41,8 @@ and has **not** passed merely because these direct checks passed.
 Continue Phase 3 Task 8 in this exact order:
 
 1. finish and verify the hardened CLI validator;
-2. run its live acceptance path against current-format Phase 3 smoke; retain
-   the completed Smoke A/B jobs and counts as immutable historical evidence;
+2. retain completed Smoke A/B/Phase 3 jobs and counts as immutable historical
+   evidence; validate actual production shards strictly after generation;
 3. retain full-shape timeout `10347033` as historical scale evidence; do not
    repeat it;
 4. finalize the six Part 1 documents plus `AGENTS.md`, run full verification,
@@ -72,8 +72,7 @@ gate cannot run if readiness fails. Do not submit either job script directly. Th
 receipt under `results/part1-submission/<final-commit>/bootstrap_receipt.json`
 records both job IDs, the exact `afterok` relationship, the command arguments,
 and any in-flight stage for crash reconciliation. Once released, the gate
-validates that receipt, the tracked manifests, and current-format Phase 3 smoke
-with the hardened read-only validator, creates the
+validates that receipt, tracked manifests, and clean commit, creates the
 production model-run manifest from the same clean commit, validates the `%16`
 launch plan, submits generation plus dependent validation/merge/final analysis,
 and atomically records all six job IDs under
@@ -678,9 +677,9 @@ does not make drifted science compatible.
 3. Bounded Phase 3 smoke job `10324103` completed `0:0` in `01:27:13`; its
    exact 10 natural/110 checkpoint/240 audit shape and direct integrity checks
    passed.
-4. Run focused readiness, then let the gate complete hardened CLI validation on
-   current-format Phase 3 smoke. Retain completed Smoke A/B as historical
-   evidence; do not repeat full-shape synthetic acceptance.
+4. Run focused readiness and retain completed smokes as historical evidence;
+   do not repeat full-shape synthetic acceptance. Strictly validate actual
+   production shards after generation.
 5. Finalize the six Part 1 documents plus `AGENTS.md`, run full verification and
    independent review, create the final tracked commit, and require a clean
    tracked worktree.

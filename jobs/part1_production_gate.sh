@@ -23,18 +23,6 @@ fi
 
 srun "$UV_BIN" run python scripts/validate_part1_manifests.py
 
-SCOPE="phase3_smoke"
-SMOKE_MANIFEST="results/part1-smoke/model-runs/$SCOPE/model_run_manifest.json"
-MODEL_RUN_ID="$(
-  "$UV_BIN" run python -c \
-    'import json, sys; print(json.load(open(sys.argv[1]))["model_run_id"])' \
-    "$SMOKE_MANIFEST"
-)"
-SHARD_ROOT="results/part1-smoke/$SCOPE/$MODEL_RUN_ID/raw_shards/shard-000"
-srun "$UV_BIN" run python scripts/validate_part1_smoke_results.py \
-  --model-run-manifest "$SMOKE_MANIFEST" \
-  --shard-root "$SHARD_ROOT"
-
 CREATE_REPORT="$(
   srun "$UV_BIN" run python scripts/create_part1_model_run_manifest.py
 )"

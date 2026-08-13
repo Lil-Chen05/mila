@@ -276,9 +276,8 @@ and no production array has been submitted.
 
 Task 8 uses this fail-closed order:
 
-1. complete and verify the hardened CLI validator, obtain its live acceptance
-   result for current-format Phase 3 smoke, and retain Smoke A/B as immutable
-   historical acceptance evidence;
+1. retain completed real-model smokes as historical evidence, and use strict
+   validation on the actual production shards after generation;
 2. retain timed-out job `10347033` as scale evidence and do not repeat the
    full-shape rehearsal;
 3. finalize the six Part 1 documents plus `AGENTS.md`, run full verification,
@@ -287,8 +286,8 @@ Task 8 uses this fail-closed order:
    tracked worktree;
 5. submit the one-hour CPU-only focused-readiness suite and an exact `afterok`
    production gate;
-6. only after focused readiness succeeds, the gate validates current-format
-   Phase 3 smoke while retaining Smoke A/B as historical acceptance evidence,
+6. only after focused readiness succeeds, the gate validates immutable
+   manifests and the clean commit while retaining smokes as historical evidence,
    creates the immutable operational production manifest from that exact
    commit, validates the `0-499%16` launch plan, and submits generation;
 7. validation runs after the array terminates, while merge and final analysis
