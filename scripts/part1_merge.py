@@ -772,8 +772,16 @@ def validate_merge_manifest(manifest: Mapping[str, Any]) -> None:
         if item["state"] == "absent":
             if item["sha256"] != _sha256(b"") or item["byte_size"] != 0:
                 raise ValueError("absent merge source must have empty hash and zero bytes")
-        elif item["byte_size"] <= 0 or item["sha256"] == _sha256(b""):
-            raise ValueError("regular merge source must be nonempty")
+        else:
+            empty_pair = item["byte_size"] == 0 and item["sha256"] == _sha256(b"")
+            nonempty_pair = item["byte_size"] > 0 and item["sha256"] != _sha256(b"")
+            if item["kind"] == "runtime_guard":
+                if not (empty_pair or nonempty_pair):
+                    raise ValueError(
+                        "regular runtime_guard source hash and byte size are inconsistent"
+                    )
+            elif not nonempty_pair:
+                raise ValueError("regular merge source must be nonempty")
         source_paths.append(relative_path)
     if source_paths != sorted(source_paths) or len(source_paths) != len(set(source_paths)):
         raise ValueError("merge manifest source inventory order or uniqueness differs")
@@ -1795,21 +1803,36 @@ def publish_merge(
         published = True
         return (target, manifest) if return_manifest else target
     finally:
+        active_exception = sys.exception()
+        deferred_cleanup_error: BaseException | None = None
         try:
             if not published and not retain_stage:
-                _remove_own_stage(
-                    stage,
-                    target.parent,
-                    prefix,
-                    parent_descriptor=parent_descriptor,
-                    stage_descriptor=stage_descriptor,
-                    fault_hook=hook,
-                )
+                try:
+                    _remove_own_stage(
+                        stage,
+                        target.parent,
+                        prefix,
+                        parent_descriptor=parent_descriptor,
+                        stage_descriptor=stage_descriptor,
+                        fault_hook=hook,
+                    )
+                except BaseException as cleanup_error:
+                    retain_stage = True
+                    if active_exception is not None:
+                        active_exception.add_note(
+                            "merge stage cleanup also failed; the primary exception is "
+                            f"preserved and stage retained at {stage}: "
+                            f"{type(cleanup_error).__name__}: {cleanup_error}"
+                        )
+                    else:
+                        deferred_cleanup_error = cleanup_error
         finally:
             try:
                 os.close(stage_descriptor)
             finally:
                 os.close(parent_descriptor)
+        if deferred_cleanup_error is not None:
+            raise deferred_cleanup_error
 
 
 def merge_part1_results(

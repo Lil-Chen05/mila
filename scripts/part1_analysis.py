@@ -64,6 +64,7 @@ from part1_prompt_hash_waiver import (
     require_production_checkout_generation_state,
     validate_prompt_hash_waiver,
 )
+from part1_merge_stage_recovery import validate_merge_stage_recovery
 from part1_runtime import validate_manifest_compatibility
 from part1_statistics import (
     checkpoint_calibration_analysis,
@@ -476,6 +477,8 @@ class AnalysisSource:
     small_fixture: bool
     revalidate_inputs: Callable[[], None]
     prompt_hash_waiver: Mapping[str, Any] | None = None
+    merge_stage_recovery: Mapping[str, Any] | None = None
+    publication_mode: str = "exclusive_noreplace_v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -577,9 +580,61 @@ def _prompt_hash_waiver_provenance(source: AnalysisSource) -> dict[str, Any] | N
     }
 
 
+def _validate_merge_stage_recovery_provenance(
+    value: Mapping[str, Any], *, model_run_id: str
+) -> dict[str, Any]:
+    value = dict(value)
+    expected = {
+        "merge_stage_recovery_id", "relative_path", "sha256", "byte_size",
+        "original_merge_recovery_commit", "publication_recovery_commit",
+    }
+    if set(value) != expected:
+        raise ValueError("analysis merge-stage recovery provenance fields differ")
+    if any(
+        not isinstance(value[field], str) or len(value[field]) != 64
+        or any(character not in "0123456789abcdef" for character in value[field])
+        for field in ("merge_stage_recovery_id", "sha256")
+    ) or any(
+        not isinstance(value[field], str) or len(value[field]) != 40
+        or any(character not in "0123456789abcdef" for character in value[field])
+        for field in ("original_merge_recovery_commit", "publication_recovery_commit")
+    ) or type(value["byte_size"]) is not int or value["byte_size"] <= 0:
+        raise ValueError("analysis merge-stage recovery provenance values are invalid")
+    expected_path = (
+        f"results/part1/{model_run_id}"
+        "/validation/merge_stage_recovery.json"
+    )
+    if value["relative_path"] != expected_path:
+        raise ValueError("analysis merge-stage recovery path is not canonical")
+    return value
+
+
+def _merge_stage_recovery_provenance(
+    source: AnalysisSource,
+) -> dict[str, Any] | None:
+    if source.merge_stage_recovery is None:
+        return None
+    return _validate_merge_stage_recovery_provenance(
+        source.merge_stage_recovery,
+        model_run_id=source.model_manifest["model_run_id"],
+    )
+
+
 def _validate_source_contract(source: AnalysisSource, bootstrap_replicates: int) -> None:
     if type(source.small_fixture) is not bool:
         raise ValueError("small_fixture must be boolean")
+    if source.publication_mode not in {
+        "exclusive_noreplace_v1",
+        "cooperative_claim_same_parent_atomic_rename_v1",
+    }:
+        raise ValueError("analysis publication mode differs from the fixed contract")
+    if not source.small_fixture and (
+        source.publication_mode == "cooperative_claim_same_parent_atomic_rename_v1"
+    ) != (source.merge_stage_recovery is not None):
+        raise ValueError(
+            "production cooperative publication requires merge-stage recovery provenance"
+        )
+    _merge_stage_recovery_provenance(source)
     if type(bootstrap_replicates) is not int or bootstrap_replicates <= 0:
         raise ValueError("bootstrap_replicates must be a positive integer")
     if not source.small_fixture and bootstrap_replicates not in PRODUCTION_BOOTSTRAP_REPLICATES:
@@ -646,6 +701,9 @@ def _analysis_identity_payload(
     waiver = _prompt_hash_waiver_provenance(source)
     if waiver is not None:
         payload["prompt_hash_waiver"] = waiver
+    recovery = _merge_stage_recovery_provenance(source)
+    if recovery is not None:
+        payload["merge_stage_recovery"] = recovery
     return payload
 
 
@@ -901,7 +959,9 @@ def compute_analysis(
     output_root = source.model_manifest["output_paths"]["analysis"]
     summary = {
         "schema_name": "part1_analysis_summary",
-        "schema_version": "1.1.0" if source.prompt_hash_waiver is not None else "1.0.0",
+        "schema_version": "1.1.0" if (
+            source.prompt_hash_waiver is not None or source.merge_stage_recovery is not None
+        ) else "1.0.0",
         "analysis_id": identity,
         **_analysis_identity_payload(
             source,
@@ -1012,6 +1072,9 @@ def _source_provenance(source: AnalysisSource) -> dict[str, Any]:
     waiver = _prompt_hash_waiver_provenance(source)
     if waiver is not None:
         provenance["prompt_hash_waiver"] = waiver
+    recovery = _merge_stage_recovery_provenance(source)
+    if recovery is not None:
+        provenance["merge_stage_recovery"] = recovery
     return provenance
 
 
@@ -1210,14 +1273,19 @@ def validate_analysis_manifest(manifest: Mapping[str, Any]) -> None:
         "plots",
         "artifacts",
     }
-    waiver_mode = manifest.get("schema_version") == "1.1.0"
+    waiver_mode = "prompt_hash_waiver" in manifest
+    recovery_mode = "merge_stage_recovery" in manifest
     if waiver_mode:
         expected_fields.add("prompt_hash_waiver")
+    if recovery_mode:
+        expected_fields.add("merge_stage_recovery")
     if not isinstance(manifest, Mapping) or set(manifest) != expected_fields:
         raise ValueError("analysis manifest fields differ from the fixed contract")
     if (
         manifest["schema_name"] != "part1_analysis_manifest"
         or manifest["schema_version"] not in {"1.0.0", "1.1.0"}
+        or (manifest["schema_version"] == "1.1.0") != (waiver_mode or recovery_mode)
+        or (recovery_mode and not waiver_mode)
         or manifest["analysis_contract_version"] != "part1-analysis-v1"
         or manifest["analysis_format_version"] != ANALYSIS_FORMAT_VERSION
         or manifest["csv_serialization_version"] != CSV_SERIALIZATION_VERSION
@@ -1253,6 +1321,13 @@ def validate_analysis_manifest(manifest: Mapping[str, Any]) -> None:
             for field in ("byte_size", "coverage_report_byte_size")
         ):
             raise ValueError("analysis waiver provenance values are invalid")
+    if recovery_mode:
+        if not isinstance(manifest["merge_stage_recovery"], Mapping):
+            raise ValueError("analysis merge-stage recovery provenance is invalid")
+        _validate_merge_stage_recovery_provenance(
+            manifest["merge_stage_recovery"],
+            model_run_id=manifest["model_run_id"],
+        )
     identity_fields = (
         "analysis_id",
         "analysis_manifest_hash",
@@ -1283,6 +1358,8 @@ def validate_analysis_manifest(manifest: Mapping[str, Any]) -> None:
     ]
     if waiver_mode:
         identity_keys.append("prompt_hash_waiver")
+    if "merge_stage_recovery" in manifest:
+        identity_keys.append("merge_stage_recovery")
     identity_payload = {
         key: manifest[key]
         for key in identity_keys
@@ -1372,7 +1449,9 @@ def _write_stage(
         artifacts[name] = _artifact_entry(stage / name, kind=kind)
     manifest: dict[str, Any] = {
         "schema_name": "part1_analysis_manifest",
-        "schema_version": "1.1.0" if source.prompt_hash_waiver is not None else "1.0.0",
+        "schema_version": "1.1.0" if (
+            source.prompt_hash_waiver is not None or source.merge_stage_recovery is not None
+        ) else "1.0.0",
         "analysis_id": computation.analysis_id,
         "analysis_manifest_hash": "",
         **_analysis_identity_payload(
@@ -1886,12 +1965,19 @@ SUMMARY_FIELDS = frozenset(
 def _validate_summary_semantics(
     summary: Mapping[str, Any], manifest: Mapping[str, Any], tables: Mapping[str, Sequence[Mapping[str, Any]]]
 ) -> None:
-    waiver_mode = summary.get("schema_version") == "1.1.0"
+    waiver_mode = "prompt_hash_waiver" in summary
+    recovery_mode = "merge_stage_recovery" in summary
     expected_fields = set(SUMMARY_FIELDS)
     if waiver_mode:
         expected_fields.add("prompt_hash_waiver")
+    if recovery_mode:
+        expected_fields.add("merge_stage_recovery")
     if set(summary) != expected_fields or summary["schema_name"] != "part1_analysis_summary" or summary["schema_version"] not in {"1.0.0", "1.1.0"}:
         raise ValueError("analysis summary fields/schema differ")
+    if (summary["schema_version"] == "1.1.0") != (waiver_mode or recovery_mode) or (
+        recovery_mode and not waiver_mode
+    ):
+        raise ValueError("analysis summary schema/provenance mode differs")
     if type(summary["source_natural_row_count"]) is not int or type(summary["source_checkpoint_row_count"]) is not int or type(summary["trajectory_row_count"]) is not int or min(summary["source_natural_row_count"], summary["source_checkpoint_row_count"], summary["trajectory_row_count"]) < 0:
         raise ValueError("analysis summary source counts have wrong JSON types/values")
     if summary["source_natural_row_count"] != len(tables["trajectory_features"]) or summary["trajectory_row_count"] != len(tables["trajectory_features"]):
@@ -2005,6 +2091,8 @@ def _validate_analysis_directory_descriptor(
     ]
     if "prompt_hash_waiver" in manifest:
         provenance_fields.append("prompt_hash_waiver")
+    if "merge_stage_recovery" in manifest:
+        provenance_fields.append("merge_stage_recovery")
     for field in provenance_fields:
         if not _same_json(summary.get(field), manifest.get(field)):
             raise ValueError(f"analysis summary/manifest provenance differs for {field}")
@@ -2055,6 +2143,8 @@ def _validate_analysis_directory_descriptor(
         }
         if "prompt_hash_waiver" in manifest:
             expected_source["prompt_hash_waiver"] = manifest["prompt_hash_waiver"]
+        if "merge_stage_recovery" in manifest:
+            expected_source["merge_stage_recovery"] = manifest["merge_stage_recovery"]
         if (
             set(metadata) != expected_metadata_fields
             or metadata.get("schema_name") != "part1_analysis_table_metadata"
@@ -2259,6 +2349,10 @@ def publish_analysis(
     published = False
     renamed = False
     retain_stage = False
+    claim_name = f".{target.name}.publish-claim"
+    claim_owned = False
+    claim_identity: tuple[int, int] | None = None
+    primary: BaseException | None = None
 
     def preserve_durability_failure(durability_error: BaseException) -> None:
         hook_error: BaseException | None = None
@@ -2320,23 +2414,81 @@ def publish_analysis(
                 "analysis stage identity changed before publication; refusing rename"
             )
         hook("after_stage_identity_check")
-        try:
-            _exclusive_rename_at(parent_descriptor, stage.name, target.name)
-        except FileExistsError:
-            source.revalidate_inputs()
-            existing = _validate_stable_existing_at(
-                parent_descriptor,
-                target.name,
-                expected_manifest=manifest,
-                expected_summary=computation.summary,
-                hook=hook,
+        if source.publication_mode == "cooperative_claim_same_parent_atomic_rename_v1":
+            try:
+                os.mkdir(claim_name, 0o700, dir_fd=parent_descriptor)
+            except FileExistsError as exc:
+                raise FileExistsError(
+                    f"cooperative analysis publication claim exists: {root / claim_name}"
+                ) from exc
+            claim_owned = True
+            claim_status = os.stat(
+                claim_name, dir_fd=parent_descriptor, follow_symlinks=False
             )
-            if existing is None:
-                raise PublicationStateIndeterminateError(
-                    "analysis rename reported a collision but no stable existing final "
-                    f"directory could be opened: {target}"
+            if not stat.S_ISDIR(claim_status.st_mode):
+                raise RuntimeError("analysis publication claim is not a directory")
+            claim_identity = (claim_status.st_dev, claim_status.st_ino)
+            source.revalidate_inputs()
+            if os.path.lexists(target):
+                raise FileExistsError(
+                    f"analysis target appeared while publication claim was held: {target}"
                 )
-            return target, existing
+            claimed_stage = _stat_directory_name_at(
+                parent_descriptor, stage.name, label="claimed analysis stage"
+            )
+            if not _same_inode(original_stage, claimed_stage):
+                raise RuntimeError(
+                    "analysis stage identity changed while publication claim was held"
+                )
+            try:
+                os.rename(
+                    stage.name,
+                    target.name,
+                    src_dir_fd=parent_descriptor,
+                    dst_dir_fd=parent_descriptor,
+                )
+            except BaseException as rename_error:
+                try:
+                    stage_after = os.stat(
+                        stage.name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                    stage_still_original = _same_inode(original_stage, stage_after)
+                    target_absent = not os.path.lexists(target)
+                except BaseException as evidence_error:
+                    raise PublicationStateIndeterminateError(
+                        "analysis rename failed and publication state is indeterminate; "
+                        f"rename_error={rename_error}; evidence_error={evidence_error}; "
+                        f"stage={stage}; target={target}"
+                    ) from rename_error
+                if stage_still_original and target_absent:
+                    raise
+                raise PublicationStateIndeterminateError(
+                    "analysis rename reported failure but publication may have occurred; "
+                    f"stage_still_original={stage_still_original}; "
+                    f"target_absent={target_absent}; stage={stage}; target={target}"
+                ) from rename_error
+        elif source.publication_mode == "exclusive_noreplace_v1":
+            try:
+                _exclusive_rename_at(parent_descriptor, stage.name, target.name)
+            except FileExistsError:
+                source.revalidate_inputs()
+                existing = _validate_stable_existing_at(
+                    parent_descriptor,
+                    target.name,
+                    expected_manifest=manifest,
+                    expected_summary=computation.summary,
+                    hook=hook,
+                )
+                if existing is None:
+                    raise PublicationStateIndeterminateError(
+                        "analysis rename reported a collision but no stable existing final "
+                        f"directory could be opened: {target}"
+                    )
+                return target, existing
+        else:
+            raise ValueError(f"unsupported analysis publication mode: {source.publication_mode}")
         renamed = True
         try:
             hook("after_exclusive_rename")
@@ -2401,22 +2553,74 @@ def publish_analysis(
             )
         published = True
         return target, manifest
+    except BaseException as exc:
+        if (
+            renamed
+            and source.publication_mode
+            == "cooperative_claim_same_parent_atomic_rename_v1"
+            and not isinstance(exc, PublicationStateIndeterminateError)
+        ):
+            wrapped = PublicationStateIndeterminateError(
+                "cooperative analysis publication failed after rename; state is "
+                f"indeterminate and paths were preserved: target={target}; stage={stage}; "
+                f"expected_inode=({original_stage.st_dev},{original_stage.st_ino}); "
+                f"error={type(exc).__name__}: {exc}"
+            )
+            primary = wrapped
+            raise wrapped from exc
+        primary = exc
+        raise
     finally:
+        claim_cleanup_error: BaseException | None = None
+        stage_cleanup_error: BaseException | None = None
+        if claim_owned and claim_identity is not None:
+            try:
+                current_claim = os.stat(
+                    claim_name, dir_fd=parent_descriptor, follow_symlinks=False
+                )
+                if (current_claim.st_dev, current_claim.st_ino) != claim_identity:
+                    raise RuntimeError("analysis publication claim identity was replaced")
+                os.rmdir(claim_name, dir_fd=parent_descriptor)
+                _fsync_directory_descriptor(parent_descriptor)
+            except BaseException as exc:
+                claim_cleanup_error = exc
         try:
             if not published and not renamed and not retain_stage:
-                _remove_own_stage(
-                    stage,
-                    root,
-                    prefix,
-                    parent_descriptor=parent_descriptor,
-                    stage_descriptor=stage_descriptor,
-                    fault_hook=hook,
-                )
+                try:
+                    _remove_own_stage(
+                        stage,
+                        root,
+                        prefix,
+                        parent_descriptor=parent_descriptor,
+                        stage_descriptor=stage_descriptor,
+                        fault_hook=hook,
+                    )
+                except BaseException as exc:
+                    stage_cleanup_error = exc
         finally:
             try:
                 os.close(stage_descriptor)
             finally:
                 os.close(parent_descriptor)
+        cleanup_errors = tuple(
+            error for error in (claim_cleanup_error, stage_cleanup_error)
+            if error is not None
+        )
+        if cleanup_errors:
+            if primary is not None:
+                for cleanup_error in cleanup_errors:
+                    primary.add_note(
+                        "analysis publication cleanup also failed: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    )
+            else:
+                deferred = cleanup_errors[0]
+                for additional in cleanup_errors[1:]:
+                    deferred.add_note(
+                        "additional analysis cleanup failure: "
+                        f"{type(additional).__name__}: {additional}"
+                    )
+                raise deferred
 
 
 def _read_analysis_config(repository_root: Path) -> tuple[dict[str, Any], bytes, Path]:
@@ -2453,6 +2657,7 @@ def load_production_analysis_source(
     repository_root: Path,
     model_run_manifest_path: Path,
     prompt_hash_waiver_path: Path | None = None,
+    merge_stage_recovery_path: Path | None = None,
 ) -> AnalysisSource:
     """Strictly load canonical production manifests and lossless merged rows."""
 
@@ -2525,6 +2730,10 @@ def load_production_analysis_source(
     prompt_hash_waiver: dict[str, Any] | None = None
     prompt_hash_waiver_bytes: bytes | None = None
     resolved_waiver_path: Path | None = None
+    merge_stage_recovery: dict[str, Any] | None = None
+    merge_stage_recovery_bytes: bytes | None = None
+    merge_stage_recovery_provenance: dict[str, Any] | None = None
+    resolved_recovery_path: Path | None = None
     if prompt_hash_waiver_path is not None:
         resolved_waiver_path = Path(prompt_hash_waiver_path)
         if not resolved_waiver_path.is_absolute():
@@ -2564,6 +2773,66 @@ def load_production_analysis_source(
             raise ValueError("analysis waiver/report/merge provenance differs")
     else:
         validate_coverage_report_semantics(coverage)
+    if merge_stage_recovery_path is not None:
+        if prompt_hash_waiver is None:
+            raise ValueError("merge-stage recovery analysis requires prompt-hash waiver")
+        resolved_recovery_path = Path(merge_stage_recovery_path)
+        if not resolved_recovery_path.is_absolute():
+            resolved_recovery_path = repository_root / resolved_recovery_path
+        resolved_recovery_path = Path(os.path.abspath(resolved_recovery_path))
+        expected_recovery_path = coverage_path.with_name("merge_stage_recovery.json")
+        if resolved_recovery_path != expected_recovery_path:
+            raise ValueError("merge-stage recovery sidecar path is not canonical")
+        merge_stage_recovery, merge_stage_recovery_bytes = _load_regular_json(
+            resolved_recovery_path, label="merge-stage recovery sidecar"
+        )
+        validate_merge_stage_recovery(merge_stage_recovery)
+        merge_manifest_value, merge_manifest_bytes = _load_regular_json(
+            merged_path / "merge_manifest.json", label="published merge manifest"
+        )
+        sidecar_merge = merge_stage_recovery["merge_manifest"]
+        if (
+            not _same_json(merge_manifest_value, merge)
+            or sidecar_merge.get("merge_id") != merge.get("merge_id")
+            or sidecar_merge.get("merge_manifest_hash") != merge.get("merge_manifest_hash")
+            or sidecar_merge.get("sha256") != _sha256(merge_manifest_bytes)
+            or sidecar_merge.get("byte_size") != len(merge_manifest_bytes)
+            or not _same_json(merge_stage_recovery.get("outputs"), merge.get("outputs"))
+            or merge_stage_recovery.get("source_inventory_sha256")
+            != _sha256(canonical_json_bytes(merge.get("source_files")))
+            or merge_stage_recovery["prompt_hash_waiver"].get("waiver_id")
+            != prompt_hash_waiver.get("waiver_id")
+            or merge_stage_recovery["prompt_hash_waiver"].get("sha256")
+            != _sha256(prompt_hash_waiver_bytes or b"")
+            or merge_stage_recovery["prompt_hash_waiver"].get("byte_size")
+            != len(prompt_hash_waiver_bytes or b"")
+            or merge_stage_recovery["coverage_report"].get("validation_report_id")
+            != coverage.get("validation_report_id")
+            or merge_stage_recovery["coverage_report"].get("sha256")
+            != _sha256(coverage_bytes)
+            or merge_stage_recovery["coverage_report"].get("byte_size")
+            != len(coverage_bytes)
+        ):
+            raise ValueError("merge-stage sidecar differs from published merge provenance")
+        recovery_code_root = Path(__file__).resolve().parents[1]
+        observed_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=recovery_code_root, check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        observed_dirty = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=recovery_code_root, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        if observed_head != merge_stage_recovery["publication_recovery_commit"] or observed_dirty:
+            raise ValueError("analysis checkout differs from publication recovery commit")
+        merge_stage_recovery_provenance = {
+            "merge_stage_recovery_id": merge_stage_recovery["merge_stage_recovery_id"],
+            "relative_path": resolved_recovery_path.relative_to(repository_root).as_posix(),
+            "sha256": _sha256(merge_stage_recovery_bytes),
+            "byte_size": len(merge_stage_recovery_bytes),
+            "original_merge_recovery_commit": merge_stage_recovery["original_merge_recovery_commit"],
+            "publication_recovery_commit": merge_stage_recovery["publication_recovery_commit"],
+        }
     if (coverage.get("paper_analysis_ready") is not True and prompt_hash_waiver is None) or _terminal_failure_count(
         coverage
     ) != 0:
@@ -2588,7 +2857,7 @@ def load_production_analysis_source(
         )
         if not _same_json(rebuilt, coverage):
             raise ValueError("coverage report differs from current immutable source/Git snapshot")
-    else:
+    elif merge_stage_recovery is None:
         require_source_snapshot(repository_root, coverage["source_files"])
 
     questions_path = repository_root / "manifests/part1/questions.jsonl"
@@ -2653,11 +2922,19 @@ def load_production_analysis_source(
     expected_git = (
         coverage["summary"]["observed_git_commit"]
         if prompt_hash_waiver is None
-        else prompt_hash_waiver["recovery_git_commit"]
+        else (
+            prompt_hash_waiver["recovery_git_commit"]
+            if merge_stage_recovery is None
+            else merge_stage_recovery["publication_recovery_commit"]
+        )
     )
     expected_clean = True if prompt_hash_waiver is not None else coverage["summary"]["clean_tracked_worktree"]
 
     def revalidate() -> None:
+        raw_source_paths = () if merge_stage_recovery is not None else tuple(
+            repository_root / source_file["relative_path"]
+            for source_file in coverage["source_files"]
+        )
         for immutable_path in (
             repository_root,
             manifest_path,
@@ -2668,10 +2945,7 @@ def load_production_analysis_source(
             question_manifest_path,
             study_manifest_path,
             repository_root / "uv.lock",
-            *(
-                repository_root / source_file["relative_path"]
-                for source_file in coverage["source_files"]
-            ),
+            *raw_source_paths,
         ):
             _require_no_symlink_components(immutable_path)
         current_model, current_model_bytes = _load_regular_json(
@@ -2697,7 +2971,19 @@ def load_production_analysis_source(
             )
             if current_waiver_bytes != prompt_hash_waiver_bytes or not _same_json(current_waiver, prompt_hash_waiver):
                 raise ValueError("prompt-hash waiver changed during analysis")
-            require_source_snapshot(repository_root, coverage["source_files"])
+            if merge_stage_recovery is None:
+                require_source_snapshot(repository_root, coverage["source_files"])
+            else:
+                assert resolved_recovery_path is not None
+                assert merge_stage_recovery_bytes is not None
+                current_recovery, current_recovery_bytes = _load_regular_json(
+                    resolved_recovery_path, label="merge-stage recovery sidecar"
+                )
+                if (
+                    current_recovery_bytes != merge_stage_recovery_bytes
+                    or not _same_json(current_recovery, merge_stage_recovery)
+                ):
+                    raise ValueError("merge-stage recovery sidecar changed during analysis")
             require_production_checkout_generation_state(
                 repository_root,
                 expected_generation_commit=model["final_production_git_commit"],
@@ -2741,6 +3027,12 @@ def load_production_analysis_source(
         small_fixture=False,
         revalidate_inputs=revalidate,
         prompt_hash_waiver=prompt_hash_waiver,
+        merge_stage_recovery=merge_stage_recovery_provenance,
+        publication_mode=(
+            "cooperative_claim_same_parent_atomic_rename_v1"
+            if merge_stage_recovery is not None
+            else "exclusive_noreplace_v1"
+        ),
     )
 
 
@@ -2750,6 +3042,7 @@ def analyze_production(
     model_run_manifest_path: Path,
     bootstrap_replicates: int = 5_000,
     prompt_hash_waiver_path: Path | None = None,
+    merge_stage_recovery_path: Path | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     if bootstrap_replicates not in PRODUCTION_BOOTSTRAP_REPLICATES:
         raise ValueError("production bootstrap replicates must be exactly 1000 or 5000")
@@ -2757,6 +3050,7 @@ def analyze_production(
         repository_root=repository_root,
         model_run_manifest_path=model_run_manifest_path,
         prompt_hash_waiver_path=prompt_hash_waiver_path,
+        merge_stage_recovery_path=merge_stage_recovery_path,
     )
     return publish_analysis(source, bootstrap_replicates=bootstrap_replicates)
 

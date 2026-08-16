@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import csv
+from dataclasses import replace
 import hashlib
 import io
 import json
@@ -1213,6 +1214,134 @@ def test_identical_rerun_keeps_inode_and_malformed_collision_fails(tmp_path: Pat
     (output / "unexpected.txt").write_text("collision")
     with pytest.raises(ValueError, match="missing or extra"):
         publish_analysis(source, bootstrap_replicates=2)
+
+
+def test_explicit_recovery_mode_publishes_with_cooperative_claim_on_gpfs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import part1_analysis as analysis
+
+    source, _ = _fixture_source(tmp_path)
+    source = replace(
+        source,
+        publication_mode="cooperative_claim_same_parent_atomic_rename_v1",
+    )
+    monkeypatch.setattr(
+        analysis,
+        "_exclusive_rename_at",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("renameat2-EINVAL")),
+    )
+    output, manifest = analysis.publish_analysis(source, bootstrap_replicates=2)
+    assert analysis.validate_analysis_directory(output) == manifest
+    assert not output.with_name(".development-r2.publish-claim").exists()
+
+
+def test_recovery_mode_competing_claim_and_target_race_fail_without_overwrite(
+    tmp_path: Path
+) -> None:
+    import part1_analysis as analysis
+
+    source, _ = _fixture_source(tmp_path)
+    source = replace(source, publication_mode="cooperative_claim_same_parent_atomic_rename_v1")
+    root = tmp_path / source.model_manifest["output_paths"]["analysis"]
+    root.mkdir(parents=True)
+    claim = root / ".development-r2.publish-claim"
+    claim.mkdir()
+    with pytest.raises(FileExistsError, match="claim"):
+        analysis.publish_analysis(source, bootstrap_replicates=2)
+    claim.rmdir()
+
+    target = root / "development-r2"
+    def race(boundary: str) -> None:
+        if boundary == "after_stage_identity_check":
+            target.mkdir()
+            (target / "winner").write_bytes(b"do-not-overwrite")
+
+    with pytest.raises(FileExistsError, match="appeared"):
+        analysis.publish_analysis(source, bootstrap_replicates=2, fault_hook=race)
+    assert (target / "winner").read_bytes() == b"do-not-overwrite"
+
+
+def test_analysis_cleanup_error_never_masks_active_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import part1_analysis as analysis
+
+    source, _ = _fixture_source(tmp_path)
+    source = replace(source, publication_mode="cooperative_claim_same_parent_atomic_rename_v1")
+    monkeypatch.setattr(
+        analysis,
+        "_remove_own_stage",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("cleanup-einval")),
+    )
+
+    def fail(boundary: str) -> None:
+        if boundary == "artifacts_written":
+            raise RuntimeError("primary-analysis-failure")
+
+    with pytest.raises(RuntimeError, match="primary-analysis-failure") as captured:
+        analysis.publish_analysis(source, bootstrap_replicates=2, fault_hook=fail)
+    assert any("cleanup-einval" in note for note in captured.value.__notes__)
+
+
+def test_merge_stage_recovery_provenance_enters_all_analysis_artifact_layers(
+    tmp_path: Path
+) -> None:
+    import part1_analysis as analysis
+
+    source, _ = _fixture_source(tmp_path)
+    waiver = {"waiver_id": _hex("waiver")}
+    source.merge_manifest["schema_version"] = "1.1.0"
+    source.merge_manifest["prompt_hash_waiver"] = {
+        "relative_path": f"results/part1/{source.model_manifest['model_run_id']}/validation/prompt_hash_waiver.json",
+        "waiver_id": waiver["waiver_id"],
+        "sha256": _hex("waiver-bytes"),
+        "byte_size": 100,
+    }
+    source.merge_manifest["coverage_report"] = {
+        "sha256": _hex("coverage-bytes"), "byte_size": 200,
+    }
+    provenance = {
+        "merge_stage_recovery_id": _hex("stage-recovery"),
+        "relative_path": f"results/part1/{source.model_manifest['model_run_id']}/validation/merge_stage_recovery.json",
+        "sha256": _hex("stage-recovery-bytes"),
+        "byte_size": 1234,
+        "original_merge_recovery_commit": "1" * 40,
+        "publication_recovery_commit": "2" * 40,
+    }
+    source = replace(
+        source,
+        prompt_hash_waiver=waiver,
+        merge_stage_recovery=provenance,
+        publication_mode="cooperative_claim_same_parent_atomic_rename_v1",
+    )
+    output, manifest = analysis.publish_analysis(source, bootstrap_replicates=2)
+    assert manifest["merge_stage_recovery"] == provenance
+    summary = json.loads((output / "analysis_summary.json").read_text())
+    assert summary["merge_stage_recovery"] == provenance
+    metadata = json.loads((output / "primary_auroc.metadata.json").read_text())
+    assert metadata["source_provenance"]["merge_stage_recovery"] == provenance
+
+
+def test_recovery_mode_first_post_rename_lookup_failure_is_indeterminate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import part1_analysis as analysis
+
+    source, _ = _fixture_source(tmp_path)
+    source = replace(source, publication_mode="cooperative_claim_same_parent_atomic_rename_v1")
+    original = analysis._stat_directory_name_at
+
+    def fail(descriptor: int, name: str, *, label: str):
+        if label == "published analysis":
+            raise OSError("post-rename-lookup")
+        return original(descriptor, name, label=label)
+
+    monkeypatch.setattr(analysis, "_stat_directory_name_at", fail)
+    with pytest.raises(analysis.PublicationStateIndeterminateError, match="indeterminate"):
+        analysis.publish_analysis(source, bootstrap_replicates=2)
+    target = tmp_path / source.model_manifest["output_paths"]["analysis"] / "development-r2"
+    assert target.is_dir()
 
 
 def test_manifest_standalone_identity_and_json_types_reject_rehashed_tampering(
