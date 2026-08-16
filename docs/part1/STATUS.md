@@ -2,6 +2,24 @@
 
 ## Executive status
 
+**Authoritative recovery checkpoint (2026-08-16):** commit
+`95a434ce7ab3d03619f7aad49993dd9745dab533` is pushed and deployed at
+`/home/mila/c/chenje/my-project-recovery-95a434c`; the production checkout is
+still clean at `ffa998a7ee1f156e150c8da33b258165ee53e032`. Waiver merge
+`10383206` failed `2:0` after `03:54:36` because manifest validation rejected
+legitimate zero-byte `runtime_guard` files; GPFS cleanup `EINVAL` then masked
+that primary diagnostic. The exact completed stage was preserved with 5,000
+natural, 55,000 checkpoint, and 120,003 audit rows plus bound manifest/output
+hashes. Analysis `10383207` was cancelled by dependency.
+
+The user approved focused stage validation/publication without another raw
+scan. Exclusive receipt `validation/merge_stage_recovery_submission_receipt.json`
+records finalize `10385970` and final analysis `10385971` with
+`afterok:10385970`; both were pending at submission. At the latest check,
+finalize was running on `cn-h001` and analysis was dependency-held. No result is
+yet claimed: `paper_analysis_ready` remains false until the stage is published
+and final analysis passes. Do not resubmit either recovery chain.
+
 **Authoritative production checkpoint (2026-08-15):** production generation is
 complete for model run
 `6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c` at
@@ -36,7 +54,7 @@ launcher submitted waiver preparation `10383205`, merge/check `10383206` with
 `afterok:10383205`, and final analysis `10383207` with `afterok:10383206`.
 Preparation completed `0:0` in four seconds and published waiver ID
 `dc6d50b0a4712eedac891bb55b794b532ea5e9232f6712b85536c196851f9163`;
-merge was running on `cn-h004`; analysis remained dependency-held.
+merge subsequently failed as described above and analysis was cancelled.
 `paper_analysis_ready` is not yet true; do not resubmit this chain.
 
 The historical chronology below predates this checkpoint where it says that no

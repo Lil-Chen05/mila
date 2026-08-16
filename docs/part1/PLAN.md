@@ -2,6 +2,23 @@
 
 ## Authority and current phase
 
+**Current execution plan (2026-08-16):** recovery commit
+`95a434ce7ab3d03619f7aad49993dd9745dab533` is deployed separately while the
+production checkout remains clean at
+`ffa998a7ee1f156e150c8da33b258165ee53e032`. Merge `10383206` completed the
+expensive raw scan and exact 5,000/55,000/120,003-row stage, then failed on an
+incorrect zero-byte `runtime_guard` manifest rule; cleanup GPFS `EINVAL` masked
+the primary diagnostic. Its dependent analysis was cancelled.
+
+The user approved the minimal remaining plan: validate the preserved stage,
+its exact manifest/output hashes and row counts without repeating the raw scan;
+atomically publish it; then run the unchanged final 5,000-bootstrap analysis.
+Exclusive receipt `merge_stage_recovery_submission_receipt.json` records
+finalize `10385970` and analysis `10385971` with exact `afterok:10385970`.
+Both were pending at submission; the latest check has finalize running on
+`cn-h001` and analysis dependency-held. Completion still requires the canonical
+merge and all final analysis artifacts with `paper_analysis_ready: true`.
+
 **Current recovery phase (2026-08-15):** the authorized `%16` production
 generation is complete at commit
 `ffa998a7ee1f156e150c8da33b258165ee53e032` for model run

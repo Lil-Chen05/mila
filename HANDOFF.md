@@ -1,6 +1,51 @@
 # Part 1 production recovery handoff
 
-## Current authoritative checkpoint (2026-08-15)
+## Current authoritative checkpoint (2026-08-16)
+
+Recovery commit `95a434ce7ab3d03619f7aad49993dd9745dab533` is pushed and
+deployed at `/home/mila/c/chenje/my-project-recovery-95a434c`. The immutable
+production checkout remains clean and pinned at generation commit
+`ffa998a7ee1f156e150c8da33b258165ee53e032`.
+
+The prior waiver merge job `10383206` failed `2:0` after `03:54:36`. Its
+primary failure was a merge-manifest validation rule that rejected legitimate
+zero-byte `runtime_guard` files; a later GPFS cleanup `EINVAL` masked that
+diagnostic in the final exception. The job nevertheless completed the expensive
+raw read and preserved an exact, fully written stage at
+`.merged.stage-ri97qy41`: 5,000 natural, 55,000 checkpoint, and 120,003 audit
+rows. Recovery binds the stage manifest SHA-256
+`16ad6ae082af664a3f3afecee83568f340e839ad2220117e3f03391c4bd10509`,
+merge ID `447cfc9125349369f24b3e0e6865c254b516ceb84c70263d9f0a0e36801938e6`,
+merge-manifest hash
+`a2f47af9378a6906c64f4f0ea9ae76d9d2f41c67be913b7c9cca5fe63dcbce03`,
+and the exact Parquet hashes/counts. Dependent analysis `10383207` was
+cancelled without running.
+
+The user approved focused validation and atomic publication of this preserved
+stage without duplicating the completed raw-shard scan. The new exclusive
+receipt is:
+
+```text
+/home/mila/c/chenje/my-project/results/part1/6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c/validation/merge_stage_recovery_submission_receipt.json
+```
+
+It records finalize job `10385970` and final analysis job `10385971` with exact
+`afterok:10385970`. Both were pending at submission; the latest check has
+finalize running on `cn-h001` and analysis dependency-held. Do not resubmit or
+alter the preserved stage. Resume with read-only monitoring:
+
+```bash
+ssh mila
+cd /home/mila/c/chenje/my-project-recovery-95a434c
+python -m json.tool /home/mila/c/chenje/my-project/results/part1/6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c/validation/merge_stage_recovery_submission_receipt.json
+squeue --jobs=10385970,10385971 --format='%i %T %M %R'
+sacct -j 10385970,10385971 --format=JobIDRaw,State,ExitCode,Elapsed,NodeList --parsable2
+tail -n 80 logs/part1-recover-merge-stage-10385970.out
+tail -n 80 logs/part1-analyze-stage-recovery-10385971.out
+```
+
+The remaining content in this section records the generation and first waiver
+recovery that led to the preserved stage.
 
 Production generation is complete. The production model-run ID is
 `6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c`,
@@ -55,12 +100,10 @@ merge/check:        10383206  afterok:10383205
 final analysis:     10383207  afterok:10383206
 ```
 
-At the last check, preparation had completed `0:0` in four seconds and published
+Historically, preparation completed `0:0` in four seconds and published
 waiver ID `dc6d50b0a4712eedac891bb55b794b532ea5e9232f6712b85536c196851f9163`;
-merge was running on `cn-h004`; analysis remained dependency-held. Do not
-resubmit. Continue by reading the durable receipt and monitoring these exact
-IDs. Do not rerun generation or the
-six-hour standard validator.
+merge later failed as documented above and analysis was cancelled. Do not
+resubmit that chain. Do not rerun generation or the six-hour standard validator.
 
 From the clean recovery worktree, submit the entire chain once with:
 

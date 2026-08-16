@@ -1,6 +1,57 @@
 # Part 1 runbook
 
-## Current post-generation recovery procedure (2026-08-15)
+## Current merge-stage recovery procedure (2026-08-16)
+
+The active recovery checkout is
+`/home/mila/c/chenje/my-project-recovery-95a434c` at
+`95a434ce7ab3d03619f7aad49993dd9745dab533`. Keep the production checkout
+clean and pinned at `ffa998a7ee1f156e150c8da33b258165ee53e032`.
+
+Merge `10383206` failed `2:0` after `03:54:36`: a legitimate empty
+`runtime_guard` was rejected by manifest validation, then cleanup hit GPFS
+`EINVAL` and masked the primary diagnostic. Preserve
+`.merged.stage-ri97qy41`; it contains the already completed raw-scan result
+with exact row counts 5,000 natural, 55,000 checkpoint, and 120,003 audit.
+Do not rerun the raw scan.
+
+The focused publication chain has already been submitted. Its exclusive
+receipt is:
+
+```text
+/home/mila/c/chenje/my-project/results/part1/6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c/validation/merge_stage_recovery_submission_receipt.json
+```
+
+Monitor only the recorded jobs; both were pending at submission:
+
+```text
+finalize: 10385970
+analysis: 10385971  afterok:10385970
+```
+
+At the latest check, finalize was running on `cn-h001`; analysis remained
+dependency-held.
+
+Use only read-only checks:
+
+```bash
+ssh mila
+cd /home/mila/c/chenje/my-project-recovery-95a434c
+python -m json.tool /home/mila/c/chenje/my-project/results/part1/6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c/validation/merge_stage_recovery_submission_receipt.json
+squeue --jobs=10385970,10385971 --format='%i %T %M %R'
+sacct -j 10385970,10385971 --format=JobIDRaw,State,ExitCode,Elapsed,NodeList --parsable2
+tail -n 80 logs/part1-recover-merge-stage-10385970.out
+tail -n 80 logs/part1-analyze-stage-recovery-10385971.out
+```
+
+Finalize must validate the exact stage manifest/hash, three output hashes and
+row counts, schemas, immutable waiver/report provenance, both clean Git states,
+and absence of competing publication before same-parent atomic rename. It does
+not duplicate the completed raw-shard scan. On success it writes
+`validation/merge_stage_recovery.json`; analysis `10385971` must verify that
+sidecar and the published merge before creating `analysis/final-r5000/`.
+Do not resubmit, rename, delete, or edit the preserved stage or either receipt.
+
+## Historical prompt-hash recovery procedure (2026-08-15)
 
 Do not submit generation, focused readiness, the production gate, or standard
 validation again. Production generation is complete for model run

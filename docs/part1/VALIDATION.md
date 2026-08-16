@@ -1,6 +1,37 @@
 # Part 1 validation ledger and acceptance matrix
 
-## Current production validation and exact-waiver state (2026-08-15)
+## Current preserved-stage recovery state (2026-08-16)
+
+Recovery commit `95a434ce7ab3d03619f7aad49993dd9745dab533` is deployed at
+`/home/mila/c/chenje/my-project-recovery-95a434c`, separate from the clean
+production checkout pinned at `ffa998a7ee1f156e150c8da33b258165ee53e032`.
+Prior merge `10383206` failed `2:0` after `03:54:36` when validation rejected
+legitimate zero-byte `runtime_guard` files; a subsequent GPFS cleanup `EINVAL`
+masked that original exception. Dependent analysis `10383207` was cancelled.
+
+The failure occurred after the raw scan and Parquet writes. The preserved
+`.merged.stage-ri97qy41` is bound to:
+
+| Artifact | Exact evidence |
+|---|---|
+| Merge manifest | 921,804 bytes; SHA-256 `16ad6ae082af664a3f3afecee83568f340e839ad2220117e3f03391c4bd10509` |
+| Merge identity | `447cfc9125349369f24b3e0e6865c254b516ceb84c70263d9f0a0e36801938e6` |
+| Merge-manifest hash | `a2f47af9378a6906c64f4f0ea9ae76d9d2f41c67be913b7c9cca5fe63dcbce03` |
+| Natural Parquet | 5,000 rows; SHA-256 `25f1a61104b17fa085fc16c2eb13df67cb01e6477d59d5417d0146c3127986d3` |
+| Checkpoint Parquet | 55,000 rows; SHA-256 `16dc510a2ea214f6225f3efec48b927bebaee279788cbd61e7d41b12db63f4f6` |
+| Audit Parquet | 120,003 rows; SHA-256 `ac72306de70170ba6a9c8e32e83b6008903e009f9ed91ca1fcdde5cc029d5cd2` |
+
+The user approved focused validation of this exact stage without duplicating
+the completed raw-shard scan. The recovery still validates the preserved
+manifest, Parquet bytes/counts/schemas, waiver and failed-report provenance,
+clean commits, and publication state before atomic rename. Exclusive receipt
+`validation/merge_stage_recovery_submission_receipt.json` records finalize
+`10385970` and analysis `10385971` with exact `afterok:10385970`; both were
+pending at submission. At the latest check, finalize was running on `cn-h001`
+and analysis was dependency-held. Final-paper readiness remains **not passed**
+until both jobs complete and all published artifacts validate.
+
+## Production validation and exact-waiver state (2026-08-15)
 
 Production generation is complete for model run
 `6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c` at
@@ -55,8 +86,8 @@ merge/check `10383206` (`afterok:10383205`), and final analysis `10383207`
 (`afterok:10383206`) were submitted through the exclusive launcher. Preparation
 completed `0:0` in four seconds and published waiver ID
 `dc6d50b0a4712eedac891bb55b794b532ea5e9232f6712b85536c196851f9163`.
-At the last check merge was running on `cn-h004` and analysis remained
-dependency-held. Final-paper readiness remains **not passed** until the chain
+Merge subsequently failed as described above and analysis was cancelled.
+Final-paper readiness remains **not passed** until the preserved-stage chain
 completes and its publications are validated.
 
 ## Full-shape timeout and approved recovery
