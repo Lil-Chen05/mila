@@ -18,6 +18,7 @@ import re
 import secrets
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 from typing import Any, Callable, Mapping, Sequence
@@ -36,6 +37,8 @@ from part1_coverage import (
     EXPECTED_CHECKPOINT_COUNT,
     EXPECTED_NATURAL_COUNT,
     _authoritative_source_inventory_defects,
+    _checkpoint_compatibility,
+    _natural_compatibility,
     build_coverage_report,
     coverage_report_id,
     validate_coverage_report_semantics,
@@ -43,6 +46,13 @@ from part1_coverage import (
 from part1_manifests import load_manifest_bundle
 from part1_runtime import validate_manifest_compatibility
 from part1_store import Part1ShardStore
+from part1_prompt_hash_waiver import (
+    require_complete_checkpoint_outcome,
+    require_content_derived_prompt_hash,
+    require_exact_failed_report,
+    require_production_checkout_generation_state,
+    validate_prompt_hash_waiver,
+)
 
 
 MERGE_FORMAT_VERSION = "part1-merge-v1"
@@ -611,12 +621,16 @@ def build_merge_manifest(
     coverage_report_path: str,
     coverage_report_sha256: str,
     coverage_report_byte_size: int,
+    prompt_hash_waiver_path: str | None = None,
+    prompt_hash_waiver_id: str | None = None,
+    prompt_hash_waiver_sha256: str | None = None,
+    prompt_hash_waiver_byte_size: int | None = None,
     source_files: Sequence[Mapping[str, Any]],
     outputs: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
     manifest: dict[str, Any] = {
         "schema_name": "part1_merge_manifest",
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0" if prompt_hash_waiver_path is not None else "1.0.0",
         "merge_id": "",
         "merge_manifest_hash": "",
         "merge_format_version": MERGE_FORMAT_VERSION,
@@ -634,6 +648,21 @@ def build_merge_manifest(
         "parquet_writer_settings": dict(PARQUET_WRITER_SETTINGS),
         "outputs": {kind: dict(item) for kind, item in outputs.items()},
     }
+    waiver_values = (
+        prompt_hash_waiver_path,
+        prompt_hash_waiver_id,
+        prompt_hash_waiver_sha256,
+        prompt_hash_waiver_byte_size,
+    )
+    if any(value is not None for value in waiver_values):
+        if any(value is None for value in waiver_values):
+            raise ValueError("merge prompt-hash waiver provenance is incomplete")
+        manifest["prompt_hash_waiver"] = {
+            "relative_path": prompt_hash_waiver_path,
+            "waiver_id": prompt_hash_waiver_id,
+            "sha256": prompt_hash_waiver_sha256,
+            "byte_size": prompt_hash_waiver_byte_size,
+        }
     manifest["merge_id"] = merge_id(manifest)
     manifest["merge_manifest_hash"] = merge_manifest_hash(manifest)
     return manifest
@@ -647,12 +676,17 @@ def validate_merge_manifest(manifest: Mapping[str, Any]) -> None:
         "model_run_manifest_hash", "coverage_report_id", "coverage_report",
         "source_files", "sort_orders", "parquet_writer_settings", "outputs",
     }
+    waiver_mode = manifest.get("schema_version") == "1.1.0"
+    if waiver_mode:
+        expected_fields.add("prompt_hash_waiver")
     if set(manifest) != expected_fields:
         raise ValueError("merge manifest fields differ from the fixed contract")
     if manifest["schema_name"] != "part1_merge_manifest" or manifest[
         "schema_version"
-    ] != "1.0.0":
+    ] not in {"1.0.0", "1.1.0"}:
         raise ValueError("merge manifest schema identity differs")
+    if (manifest["schema_version"] == "1.0.0") != ("prompt_hash_waiver" not in manifest):
+        raise ValueError("merge manifest schema/waiver mode differs")
     if manifest["merge_format_version"] != MERGE_FORMAT_VERSION or manifest[
         "parquet_writer_version"
     ] != PARQUET_WRITER_VERSION:
@@ -690,6 +724,25 @@ def validate_merge_manifest(manifest: Mapping[str, Any]) -> None:
         or coverage["byte_size"] <= 0
     ):
         raise ValueError("merge manifest coverage report provenance is invalid")
+    if waiver_mode:
+        waiver = manifest["prompt_hash_waiver"]
+        expected_waiver_path = (
+            f"results/part1/{manifest['model_run_id']}/validation/prompt_hash_waiver.json"
+        )
+        if not isinstance(waiver, Mapping) or set(waiver) != {
+            "relative_path", "waiver_id", "sha256", "byte_size"
+        } or (
+            waiver["relative_path"] != expected_waiver_path
+            or any(
+                not isinstance(waiver[field], str)
+                or SHA256_PATTERN.fullmatch(waiver[field]) is None
+                for field in ("waiver_id", "sha256")
+            )
+            or isinstance(waiver["byte_size"], bool)
+            or not isinstance(waiver["byte_size"], int)
+            or waiver["byte_size"] <= 0
+        ):
+            raise ValueError("merge manifest prompt-hash waiver provenance is invalid")
     source_files = manifest["source_files"]
     if not isinstance(source_files, list):
         raise ValueError("merge manifest source inventory is not a list")
@@ -823,6 +876,9 @@ class MergeInputs:
     natural_records: tuple[dict[str, Any], ...]
     checkpoint_records: tuple[dict[str, Any], ...]
     audit_events: tuple[dict[str, Any], ...]
+    prompt_hash_waiver: dict[str, Any] | None = None
+    prompt_hash_waiver_path: Path | None = None
+    prompt_hash_waiver_bytes: bytes | None = None
 
 
 def require_mergeable_coverage(report: Mapping[str, Any]) -> None:
@@ -1002,7 +1058,46 @@ def revalidate_merge_inputs(inputs: MergeInputs) -> None:
         raise ValueError(
             "validated source_files must be exactly equal to coverage report source_files"
         )
-    require_mergeable_coverage(inputs.coverage_report)
+    if inputs.prompt_hash_waiver is None:
+        require_mergeable_coverage(inputs.coverage_report)
+        if inputs.prompt_hash_waiver_path is not None or inputs.prompt_hash_waiver_bytes is not None:
+            raise ValueError("merge waiver provenance is inconsistent")
+    else:
+        if inputs.prompt_hash_waiver_path is None or inputs.prompt_hash_waiver_bytes is None:
+            raise ValueError("merge waiver bytes/path are missing")
+        validate_prompt_hash_waiver(inputs.prompt_hash_waiver)
+        current_waiver, current_waiver_bytes = _load_regular_json(
+            inputs.prompt_hash_waiver_path, label="prompt-hash waiver"
+        )
+        if current_waiver != inputs.prompt_hash_waiver or current_waiver_bytes != inputs.prompt_hash_waiver_bytes:
+            raise ValueError("prompt-hash waiver changed after validation")
+        require_exact_failed_report(
+            inputs.coverage_report,
+            report_bytes=inputs.coverage_report_bytes,
+            model_manifest=inputs.model_manifest,
+        )
+        require_production_checkout_generation_state(
+            inputs.repository_root,
+            expected_generation_commit=inputs.model_manifest["final_production_git_commit"],
+        )
+        waiver_report = inputs.prompt_hash_waiver["coverage_report"]
+        if (
+            waiver_report["validation_report_id"] != inputs.coverage_report["validation_report_id"]
+            or waiver_report["sha256"] != _sha256(inputs.coverage_report_bytes)
+            or waiver_report["byte_size"] != len(inputs.coverage_report_bytes)
+        ):
+            raise ValueError("waiver and failed coverage report provenance differ")
+        recovery_code_root = Path(__file__).resolve().parents[1]
+        if inputs.prompt_hash_waiver["recovery_git_commit"] != subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=recovery_code_root,
+            check=True, capture_output=True, text=True,
+        ).stdout.strip():
+            raise ValueError("current Git commit differs from prompt-hash waiver recovery commit")
+        if subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=recovery_code_root, check=True, capture_output=True, text=True,
+        ).stdout.strip():
+            raise ValueError("tracked worktree is not clean during prompt-hash waiver recovery")
     path = inputs.coverage_report_path
     _require_no_symlink_components(path)
     if not os.path.lexists(path) or stat.S_ISLNK(path.lstat().st_mode) or not stat.S_ISREG(
@@ -1013,16 +1108,17 @@ def revalidate_merge_inputs(inputs: MergeInputs) -> None:
     if current_coverage != inputs.coverage_report_bytes:
         raise ValueError("coverage report bytes changed after validation")
     require_source_snapshot(inputs.repository_root, inputs.source_files)
-    from part1_coverage import _global_snapshot_errors
+    if inputs.prompt_hash_waiver is None:
+        from part1_coverage import _global_snapshot_errors
 
-    snapshot_errors = _global_snapshot_errors(
-        repository_root=inputs.repository_root,
-        source_files=inputs.source_files,
-        expected_git_commit=inputs.coverage_report["summary"]["observed_git_commit"],
-        expected_clean_tracked=inputs.coverage_report["summary"]["clean_tracked_worktree"],
-    )
-    if snapshot_errors:
-        raise ValueError("whole-run snapshot changed: " + "; ".join(snapshot_errors[:5]))
+        snapshot_errors = _global_snapshot_errors(
+            repository_root=inputs.repository_root,
+            source_files=inputs.source_files,
+            expected_git_commit=inputs.coverage_report["summary"]["observed_git_commit"],
+            expected_clean_tracked=inputs.coverage_report["summary"]["clean_tracked_worktree"],
+        )
+        if snapshot_errors:
+            raise ValueError("whole-run snapshot changed: " + "; ".join(snapshot_errors[:5]))
 
 
 def load_validated_merge_inputs(
@@ -1030,6 +1126,7 @@ def load_validated_merge_inputs(
     repository_root: Path,
     model_run_manifest_path: Path,
     coverage_report_path: Path | None = None,
+    prompt_hash_waiver_path: Path | None = None,
 ) -> MergeInputs:
     """Re-run the production coverage gate, then read exactly its named streams."""
 
@@ -1075,21 +1172,57 @@ def load_validated_merge_inputs(
     coverage_report, coverage_bytes = _load_regular_json(
         coverage_report_path, label="coverage report"
     )
-    require_mergeable_coverage(coverage_report)
+    prompt_hash_waiver: dict[str, Any] | None = None
+    prompt_hash_waiver_bytes: bytes | None = None
+    resolved_waiver_path: Path | None = None
+    if prompt_hash_waiver_path is None:
+        require_mergeable_coverage(coverage_report)
+    else:
+        resolved_waiver_path = Path(prompt_hash_waiver_path)
+        if not resolved_waiver_path.is_absolute():
+            resolved_waiver_path = repository_root / resolved_waiver_path
+        resolved_waiver_path = Path(os.path.abspath(resolved_waiver_path))
+        expected_waiver_path = expected_coverage_path.with_name("prompt_hash_waiver.json")
+        if resolved_waiver_path != Path(os.path.abspath(expected_waiver_path)):
+            raise ValueError("prompt-hash waiver path is not canonical")
+        prompt_hash_waiver, prompt_hash_waiver_bytes = _load_regular_json(
+            resolved_waiver_path, label="prompt-hash waiver"
+        )
+        validate_prompt_hash_waiver(prompt_hash_waiver)
+        require_exact_failed_report(
+            coverage_report,
+            report_bytes=coverage_bytes,
+            model_manifest=model_manifest,
+        )
+        report_provenance = prompt_hash_waiver["coverage_report"]
+        if (
+            prompt_hash_waiver["study_id"] != model_manifest["study_id"]
+            or prompt_hash_waiver["model_run_id"] != model_manifest["model_run_id"]
+            or prompt_hash_waiver["model_run_manifest_hash"] != model_manifest["model_run_manifest_hash"]
+            or prompt_hash_waiver["generation_git_commit"] != model_manifest["final_production_git_commit"]
+            or report_provenance["relative_path"] != _canonical_relative(
+                repository_root, coverage_report_path, label="coverage report"
+            )
+            or report_provenance["validation_report_id"] != coverage_report["validation_report_id"]
+            or report_provenance["sha256"] != _sha256(coverage_bytes)
+            or report_provenance["byte_size"] != len(coverage_bytes)
+        ):
+            raise ValueError("prompt-hash waiver provenance differs from production inputs")
     if coverage_report["model_run_id"] != model_manifest["model_run_id"] or coverage_report[
         "model_run_manifest_hash"
     ] != model_manifest["model_run_manifest_hash"]:
         raise ValueError("coverage and production model-run identities differ")
     require_source_snapshot(repository_root, coverage_report["source_files"])
 
-    rebuilt = build_coverage_report(
-        repository_root=repository_root,
-        model_run_manifest_path=model_run_manifest_path,
-        validation_started_at=coverage_report["validation_started_at"],
-        validation_completed_at=coverage_report["validation_completed_at"],
-    )
-    if rebuilt != coverage_report:
-        raise ValueError("published coverage report does not equal current procedural revalidation")
+    if prompt_hash_waiver is None:
+        rebuilt = build_coverage_report(
+            repository_root=repository_root,
+            model_run_manifest_path=model_run_manifest_path,
+            validation_started_at=coverage_report["validation_started_at"],
+            validation_completed_at=coverage_report["validation_completed_at"],
+        )
+        if rebuilt != coverage_report:
+            raise ValueError("published coverage report does not equal current procedural revalidation")
 
     manifest_root = repository_root / "manifests" / "part1"
     bundle = load_manifest_bundle(
@@ -1186,6 +1319,18 @@ def load_validated_merge_inputs(
                     raise ValueError(f"natural row is assigned to the wrong shard: {shard_id}")
                 if row["raw_record_id"] in natural_ids:
                     raise ValueError("duplicate natural record ID across shards")
+                if prompt_hash_waiver is not None:
+                    compatibility_errors = _natural_compatibility(
+                        row, question=question, model_manifest=model_manifest
+                    )
+                    if compatibility_errors != [
+                        "natural prompt hash differs from model-run manifest"
+                    ]:
+                        raise ValueError(
+                            f"{shard_id} natural record has an unrelated manifest mismatch: "
+                            + "; ".join(compatibility_errors)
+                        )
+                    require_content_derived_prompt_hash(row)
                 natural_ids.add(row["raw_record_id"])
                 natural.append(row)
             for row in inspection.checkpoint_results:
@@ -1194,6 +1339,16 @@ def load_validated_merge_inputs(
                     raise ValueError(f"checkpoint row is assigned to the wrong shard: {shard_id}")
                 if row["checkpoint_record_id"] in checkpoint_ids:
                     raise ValueError("duplicate checkpoint record ID across shards")
+                if prompt_hash_waiver is not None:
+                    compatibility_errors = _checkpoint_compatibility(
+                        row, question=question, model_manifest=model_manifest
+                    )
+                    if compatibility_errors:
+                        raise ValueError(
+                            f"{shard_id} checkpoint record has an unrelated manifest mismatch: "
+                            + "; ".join(compatibility_errors)
+                        )
+                    require_complete_checkpoint_outcome(row)
                 checkpoint_ids.add(row["checkpoint_record_id"])
                 checkpoints.append(row)
             for row in inspection.audit_events:
@@ -1210,12 +1365,16 @@ def load_validated_merge_inputs(
 
     natural_partition = coverage_report["summary"]["natural_partition"]
     checkpoint_partition = coverage_report["summary"]["checkpoint_partition"]
-    expected_natural = natural_partition["complete"] + natural_partition[
-        "terminal_infrastructure_failure"
-    ]
-    expected_checkpoints = checkpoint_partition["complete"] + checkpoint_partition[
-        "terminal_infrastructure_failure"
-    ]
+    expected_natural = (
+        EXPECTED_NATURAL_COUNT
+        if prompt_hash_waiver is not None
+        else natural_partition["complete"] + natural_partition["terminal_infrastructure_failure"]
+    )
+    expected_checkpoints = (
+        coverage_report["summary"]["observed"]["checkpoint_physical_records"]
+        if prompt_hash_waiver is not None
+        else checkpoint_partition["complete"] + checkpoint_partition["terminal_infrastructure_failure"]
+    )
     if len(natural) != expected_natural or len(natural) != coverage_report["summary"][
         "observed"
     ]["natural_physical_records"]:
@@ -1239,6 +1398,9 @@ def load_validated_merge_inputs(
         natural_records=tuple(natural),
         checkpoint_records=tuple(checkpoints),
         audit_events=tuple(audit),
+        prompt_hash_waiver=prompt_hash_waiver,
+        prompt_hash_waiver_path=resolved_waiver_path,
+        prompt_hash_waiver_bytes=prompt_hash_waiver_bytes,
     )
     revalidate_merge_inputs(inputs)
     return inputs
@@ -1547,11 +1709,26 @@ def publish_merge(
         coverage_relative = _canonical_relative(
             inputs.repository_root, inputs.coverage_report_path, label="coverage report"
         )
+        waiver_arguments: dict[str, Any] = {}
+        if inputs.prompt_hash_waiver is not None:
+            assert inputs.prompt_hash_waiver_path is not None
+            assert inputs.prompt_hash_waiver_bytes is not None
+            waiver_arguments = {
+                "prompt_hash_waiver_path": _canonical_relative(
+                    inputs.repository_root,
+                    inputs.prompt_hash_waiver_path,
+                    label="prompt-hash waiver",
+                ),
+                "prompt_hash_waiver_id": inputs.prompt_hash_waiver["waiver_id"],
+                "prompt_hash_waiver_sha256": _sha256(inputs.prompt_hash_waiver_bytes),
+                "prompt_hash_waiver_byte_size": len(inputs.prompt_hash_waiver_bytes),
+            }
         manifest = build_merge_manifest(
             provenance=provenance,
             coverage_report_path=coverage_relative,
             coverage_report_sha256=_sha256(inputs.coverage_report_bytes),
             coverage_report_byte_size=len(inputs.coverage_report_bytes),
+            **waiver_arguments,
             source_files=inputs.source_files,
             outputs=outputs,
         )

@@ -2,6 +2,47 @@
 
 ## Authority and current phase
 
+**Current recovery phase (2026-08-15):** the authorized `%16` production
+generation is complete at commit
+`ffa998a7ee1f156e150c8da33b258165ee53e032` for model run
+`6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c`.
+Main array `10362272` and targeted retry `10362285` produced 500 finalized
+shards with the expected 5,000 natural and 55,000 checkpoint rows. Generation
+must not be repeated.
+
+Standard validation `10381201` is preserved as failed. It found one shared
+prompt-hash contract comparison defect, not 60,001 independent data defects:
+the 5,000 natural rows use the documented content-derived prompt hash, the
+validator compares it against the manifest-level prompt-contract hash, the
+55,000 checkpoints cascade from rejected parents, and the final error is the
+aggregate physical-count consequence. Zero warnings were recorded.
+
+The remaining plan is deliberately narrow:
+
+1. finish and independently verify the recovery-only waiver implementation;
+2. bind a waiver sidecar to the exact failed-report bytes/ID, model run,
+   generation commit, recovery commit, and exact permitted defect fingerprint;
+3. in the recovery merge path, verify every stored natural prompt hash from its
+   canonical prompt content while retaining every normal schema, lifecycle,
+   hierarchy, duplicate, source-snapshot, and exact-count check;
+4. explicitly require `natural_execution_outcome=complete` for all 5,000
+   natural rows and `checkpoint_execution_outcome=complete` for all 55,000
+   checkpoint rows, because failed-report incompatibility partitions mask those
+   terminal outcomes;
+5. publish the three canonical Parquet datasets only if all checks pass; and
+6. run the unchanged 5,000-bootstrap final analysis and require all final
+   tables, figures, metadata, and `paper_analysis_ready: true`.
+
+The standard validator and standard merge/analysis paths remain unchanged. The
+failed standard report is never converted to a pass. Any error outside the
+exact fingerprint blocks recovery publication. Waiver verification, merge, and
+analysis are not yet run. Recovery code must execute from a separate clean
+worktree while the production checkout stays clean and pinned at
+`ffa998a7ee1f156e150c8da33b258165ee53e032`.
+
+The older phase narrative below is retained as historical implementation
+context and is superseded where it says production has not launched.
+
 The first unattended chain ended safely: full-shape acceptance `10347033`
 timed out after 12 hours during merge, exact-`afterok` gate `10347034` was
 cancelled, and no production job was submitted. The full-shape rehearsal is

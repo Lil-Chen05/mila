@@ -2,6 +2,41 @@
 
 ## Executive status
 
+**Authoritative production checkpoint (2026-08-15):** production generation is
+complete for model run
+`6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c` at
+generation commit `ffa998a7ee1f156e150c8da33b258165ee53e032`. Main array
+`10362272` plus targeted retry `10362285` left all 500 production shard
+directories finalized. The persisted streams have the complete expected shape:
+5,000 natural rows and 55,000 checkpoint rows.
+
+Standard recovery validation job `10381201` ran for `06:19`, published coverage
+report ID `2bfe7cd6908351e3f1d6c9a2eec4f41c9dfa97f124f9da2f70925365490f23db`,
+and exited nonzero. Its 60,001 structural errors arise from one shared validator
+contract defect: all 5,000 natural records store the canonical content-derived
+prompt hash, while the validator incorrectly compares it with the manifest's
+global prompt-contract hash; all 55,000 checkpoints then fail only because the
+natural parent was rejected, followed by the aggregate physical-count error.
+A sampled stored hash exactly matched canonical recomputation from the stored
+prompt content. The failed report has zero warnings and is preserved as the
+standard validation result; it must not be rewritten as passed.
+
+The user approved a narrowly fingerprinted recovery-only waiver. It revalidates
+every natural prompt hash during the necessary merge read and retains normal
+schema, lifecycle, hierarchy, duplicate, source-snapshot, and exact-count
+checks. Since the failed report's incompatibility partition masks terminal
+outcomes, it also requires all 5,000 natural and all 55,000 checkpoint
+execution outcomes to be `complete`. It accepts no other error. Recovery code
+runs from a separate clean worktree while the production checkout remains clean
+and pinned at `ffa998a7ee1f156e150c8da33b258165ee53e032`. Standard validation
+behavior remains unchanged. The waiver implementation is being prepared
+locally; waiver verification, canonical merge, and final analysis have not yet
+run. There are currently no active SLURM jobs, and `paper_analysis_ready` is not
+yet true.
+
+The historical chronology below predates this checkpoint where it says that no
+production manifest, production root, or array exists.
+
 **Recovery snapshot:** full-shape acceptance job `10347033` reached `TIMEOUT`
 after `12:00:20` on 2026-08-12. It wrote the fixture in `58.304s` and completed
 strict coverage in `18135.654s`, then timed out during merge. Its fail-closed

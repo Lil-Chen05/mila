@@ -1,6 +1,135 @@
 # Part 1 runbook
 
-## Production recovery checkpoint
+## Current post-generation recovery procedure (2026-08-15)
+
+Do not submit generation, focused readiness, the production gate, or standard
+validation again. Production generation is complete for model run
+`6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c` at
+`ffa998a7ee1f156e150c8da33b258165ee53e032`. Jobs `10362272` and `10362285`
+left 500 finalized shards with 5,000 natural and 55,000 checkpoint records.
+
+Preserve this standard failed report byte-for-byte:
+
+```text
+results/part1/6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c/validation/coverage_report.json
+validation ID: 2bfe7cd6908351e3f1d6c9a2eec4f41c9dfa97f124f9da2f70925365490f23db
+```
+
+It records the exact prompt-hash validator defect described in
+[VALIDATION.md](VALIDATION.md). It is not a successful coverage report and must
+not be replaced, edited, or relabeled. The user-authorized recovery path uses a
+separate waiver sidecar bound to the report's exact bytes and fingerprint.
+
+After the scoped implementation is committed, deploy that recovery commit in a
+separate Mila worktree. Keep `/home/mila/c/chenje/my-project` clean and pinned
+to the generation commit. Recovery code may execute from the separate worktree,
+but its repository/persistent-root argument must point at the pinned production
+checkout so it reads the existing manifest, failed report, and raw shards. Do
+not call the standard global snapshot check against the recovery checkout.
+
+Before submission:
+
+```bash
+ssh mila
+cd /home/mila/c/chenje/my-project
+git rev-parse HEAD
+git status --short
+squeue --me
+sha256sum results/part1/6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c/validation/coverage_report.json
+```
+
+Require the first command to print
+`ffa998a7ee1f156e150c8da33b258165ee53e032`, no tracked changes, no active
+production jobs, and retain the printed report SHA-256 in the waiver. Then use
+only the recovery CLI/job commands added by the scoped recovery commit. Every
+CPU `srun` must specify `--cpu-bind=none`, and dependencies must be:
+
+```text
+waiver verification -> merge (afterok) -> analysis (afterok)
+```
+
+From the clean recovery worktree, submit exactly once:
+
+```bash
+uv run python scripts/submit_part1_prompt_hash_waiver_recovery.py \
+  --production-repository-root /home/mila/c/chenje/my-project \
+  --model-run-id 6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c
+```
+
+The launcher submits only these CPU jobs:
+
+```text
+jobs/part1_prepare_prompt_hash_waiver.sh
+jobs/part1_merge_prompt_hash_waiver.sh    afterok:<prepare-job-id>
+jobs/part1_analyze_prompt_hash_waiver.sh  afterok:<merge-job-id>
+```
+
+It atomically records partial submission state and all returned IDs at:
+
+```text
+/home/mila/c/chenje/my-project/results/part1/6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c/validation/prompt_hash_waiver_recovery_receipt.json
+```
+
+An existing receipt is exclusive evidence; do not run the launcher again.
+Inspect it and its exact job IDs instead:
+
+```bash
+python -m json.tool \
+  /home/mila/c/chenje/my-project/results/part1/6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c/validation/prompt_hash_waiver_recovery_receipt.json
+```
+
+Logs persist under the recovery worktree's `logs/` directory:
+
+```text
+logs/part1-waiver-prepare-<prepare-job-id>.out
+logs/part1-merge-waiver-<merge-job-id>.out
+logs/part1-analyze-waiver-<analysis-job-id>.out
+```
+
+The waiver stage must accept only 500 shards, 5,000 natural rows, 55,000
+checkpoint rows, zero warnings, the exact 5,000 prompt-contract mismatches, the
+exact 55,000 parent cascades, and the aggregate count error. During merge,
+recompute all 5,000 natural prompt hashes from `prompt_version`,
+`rendered_prompt`, and `prompt_token_ids`; retain all other standard merge
+checks. The incompatibility partition in the failed report masks terminal
+outcomes, so merge must separately require all 5,000 natural records to have
+`natural_execution_outcome=complete` and all 55,000 checkpoint records to have
+`checkpoint_execution_outcome=complete`. Record the failed report ID/hash,
+waiver artifact ID/hash, generation commit, recovery commit, exact
+authorization, and all three job IDs in durable provenance/receipt files.
+
+Do not declare completion until the recovery chain produces three canonical
+Parquet datasets, the final analysis manifest and summary, eight CSV tables,
+six figures, and `paper_analysis_ready: true`. At this checkpoint the recovery
+jobs are not yet submitted.
+
+Expected production-root publications are:
+
+```text
+results/part1/<model-run-id>/validation/prompt_hash_waiver.json
+results/part1/<model-run-id>/merged/merge_manifest.json
+results/part1/<model-run-id>/merged/natural_results.parquet
+results/part1/<model-run-id>/merged/checkpoint_results.parquet
+results/part1/<model-run-id>/merged/audit_events.parquet
+results/part1/<model-run-id>/analysis/final-r5000/analysis_manifest.json
+results/part1/<model-run-id>/analysis/final-r5000/analysis_summary.json
+results/part1/<model-run-id>/analysis/final-r5000/trajectory_features.csv
+results/part1/<model-run-id>/analysis/final-r5000/trajectory_events.csv
+results/part1/<model-run-id>/analysis/final-r5000/primary_auroc.csv
+results/part1/<model-run-id>/analysis/final-r5000/secondary_checkpoint_auroc.csv
+results/part1/<model-run-id>/analysis/final-r5000/calibration_metrics.csv
+results/part1/<model-run-id>/analysis/final-r5000/reliability_bins.csv
+results/part1/<model-run-id>/analysis/final-r5000/within_question_summary.csv
+results/part1/<model-run-id>/analysis/final-r5000/within_question_distribution.csv
+```
+
+Each CSV has a same-stem `.metadata.json`. The six analysis figures are
+`primary_auroc.png`, `checkpoint_ece.png`, `natural_reliability.png`,
+`checkpoint_reliability_main.png`,
+`within_question_paired_differences.png`, and
+`switching_stabilization.png`.
+
+## Historical pre-production recovery checkpoint
 
 Full-shape acceptance `10347033` timed out after `12:00:20` during merge and
 gate `10347034` was cancelled by its unsatisfied `afterok` dependency. No

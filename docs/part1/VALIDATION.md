@@ -1,5 +1,58 @@
 # Part 1 validation ledger and acceptance matrix
 
+## Current production validation and exact-waiver state (2026-08-15)
+
+Production generation is complete for model run
+`6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c` at
+commit `ffa998a7ee1f156e150c8da33b258165ee53e032`. Main array `10362272` plus
+targeted retry `10362285` yielded 500 finalized shards. Recovery validation
+`10381201` observed exactly 500 shards, 5,000 natural records, and 55,000
+checkpoint records, with zero warnings, and preserved coverage report ID
+`2bfe7cd6908351e3f1d6c9a2eec4f41c9dfa97f124f9da2f70925365490f23db`.
+
+The standard result is **FAILED AND PRESERVED**, not waived into a pass. Its
+60,001 structural errors have one shared cause:
+
+| Evidence | Interpretation |
+|---|---|
+| 5,000 natural `manifest_incompatible` errors | Validator compares the record's content-derived prompt hash with the manifest's distinct global prompt-contract hash. |
+| 55,000 checkpoint `retryable_incomplete` errors | Exact cascade from rejection of each otherwise present natural parent. |
+| 1 physical-count error | Consequence of excluding all records above from the accepted partition. |
+| 0 warnings | No additional warning category was observed. |
+| Sample canonical recomputation | Stored natural hash exactly matched recomputation from `prompt_version`, `rendered_prompt`, and `prompt_token_ids`. |
+
+These observations establish full persisted shape and isolate a validator
+contract mismatch. They do not, by themselves, establish that every row is
+valid. The user-authorized recovery-only waiver therefore must re-read all raw
+records and recompute every natural prompt hash during merge. It must retain
+the standard schema, lifecycle, hierarchy, duplicate, source-snapshot,
+checkpoint compatibility, and exact-count checks, and reject any discrepancy
+outside the exact fingerprint above.
+
+Acceptance of the recovery requires all of the following:
+
+- the failed report bytes, SHA-256, validation ID, inventory, error partition,
+  warning count, model-run ID, and generation commit match the waiver sidecar;
+- all 5,000 natural content-derived prompt hashes recompute exactly;
+- all 5,000 natural rows have `natural_execution_outcome=complete` and all
+  55,000 checkpoint rows have `checkpoint_execution_outcome=complete`, checked
+  separately because the failed report's incompatibility partition masks those
+  terminal outcomes;
+- all 55,000 checkpoints pass their normal compatibility and parent checks once
+  the erroneous manifest-level prompt comparison is excluded;
+- the recovery merge publishes exactly three canonical Parquet datasets and
+  records the failed report plus waiver provenance; and
+- unchanged 5,000-bootstrap analysis publishes the final manifest/summary,
+  eight CSV tables, six figures, and `paper_analysis_ready: true`.
+
+Standard validator/merge/analysis behavior remains unchanged, and the failed
+coverage report is never rewritten. At this checkpoint the waiver
+implementation is under local review; waiver verification, recovery merge, and
+analysis have not run, so final-paper readiness remains **not passed**.
+Recovery code runs from a separate clean worktree while the production checkout
+remains clean and pinned at
+`ffa998a7ee1f156e150c8da33b258165ee53e032`.
+
 ## Full-shape timeout and approved recovery
 
 Final candidate `96822f88c0a38bac4a35f29e90caf601831e7f50` passed Mila

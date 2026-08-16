@@ -21,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repository-root", type=Path, default=REPOSITORY_ROOT)
     parser.add_argument("--model-run-manifest", type=Path, required=True)
     parser.add_argument("--coverage-report", type=Path)
+    parser.add_argument("--prompt-hash-waiver", type=Path)
     return parser
 
 
@@ -32,6 +33,7 @@ def main(argv: list[str] | None = None) -> int:
             repository_root=repository_root,
             model_run_manifest_path=args.model_run_manifest,
             coverage_report_path=args.coverage_report,
+            prompt_hash_waiver_path=args.prompt_hash_waiver,
         )
         publication = publish_merge(inputs, return_manifest=True)
         if not isinstance(publication, tuple):
@@ -47,7 +49,11 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    paper_ready = inputs.coverage_report["paper_analysis_ready"]
+    paper_ready = (
+        inputs.coverage_report["paper_analysis_ready"]
+        if inputs.prompt_hash_waiver is None
+        else True
+    )
     print(
         json.dumps(
             {

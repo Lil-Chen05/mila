@@ -25,6 +25,7 @@ def build_parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
     parser = parser_class(description=__doc__)
     parser.add_argument("--repository-root", type=Path, default=REPOSITORY_ROOT)
     parser.add_argument("--model-run-manifest", type=Path, required=True)
+    parser.add_argument("--prompt-hash-waiver", type=Path)
     parser.add_argument(
         "--bootstrap-replicates",
         type=int,
@@ -41,6 +42,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             repository_root=arguments.repository_root,
             model_run_manifest_path=arguments.model_run_manifest,
             bootstrap_replicates=arguments.bootstrap_replicates,
+            prompt_hash_waiver_path=arguments.prompt_hash_waiver,
         )
     except Exception as exc:
         print(

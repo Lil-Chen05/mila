@@ -1,5 +1,76 @@
 # Part 1 production recovery handoff
 
+## Current authoritative checkpoint (2026-08-15)
+
+Production generation is complete. The production model-run ID is
+`6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c`,
+bound to generation commit `ffa998a7ee1f156e150c8da33b258165ee53e032`.
+Array `10362272` produced the production shards; two tasks that encountered a
+one-time `raw_shards` directory-creation race were completed by targeted retry
+`10362285`. All 500 shard directories now contain `.finalized`.
+
+This is strong persistence and shape evidence, but it is not a successful
+standard coverage result. Recovery validation `10381201` scanned the completed
+outputs for `06:19` and preserved this failed report without publishing a
+merge:
+
+```text
+results/part1/6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c/validation/coverage_report.json
+validation ID: 2bfe7cd6908351e3f1d6c9a2eec4f41c9dfa97f124f9da2f70925365490f23db
+observed:      500 shards, 5,000 natural rows, 55,000 checkpoint rows
+warnings:      0
+```
+
+The report is not ready because the standard validator compares each natural
+row's content-derived `prompt_hash` with the model-run manifest's global prompt
+contract hash. Those are intentionally different hash domains. A sampled
+production row's stored hash exactly matched a fresh canonical recomputation
+from its `prompt_version`, rendered prompt, and prompt token IDs. The same
+single comparison rejected all 5,000 natural rows; all 55,000 checkpoint
+failures are the parent-rejection cascade. The report also contains the
+resulting physical-count error, for 60,001 structural errors total. This is a
+validator-contract defect, not evidence that the generated records are wrong.
+
+The user authorized an exact, recovery-only prompt-hash waiver. It must preserve
+the failed standard report byte-for-byte, accept only the fingerprint above,
+recompute and verify every natural row's content-derived prompt hash while the
+merge already reads all records, and retain all normal schema, lifecycle,
+hierarchy, duplicate, source-snapshot, and exact-count checks. Any unrelated
+defect must still fail closed. Because the failed report's incompatibility
+partition masks terminal outcomes, recovery merge must additionally require
+`natural_execution_outcome=complete` on all 5,000 natural rows and
+`checkpoint_execution_outcome=complete` on all 55,000 checkpoint rows before
+paper readiness. Standard validation and standard merge/analysis behavior
+remain unchanged. The waiver, recovery merge, and final analysis have not yet
+run. There are currently no active SLURM jobs.
+
+Continue by reviewing and committing the scoped recovery implementation, then
+deploy it in a separate Mila recovery worktree. Leave the production checkout
+at `ffa998a7ee1f156e150c8da33b258165ee53e032`. Submit only the documented
+recovery chain, with `srun --cpu-bind=none`: waiver verification, then merge by
+exact `afterok`, then the 5,000-bootstrap analysis by exact `afterok`. Record
+all returned IDs in a durable recovery receipt. Do not rerun generation or the
+six-hour standard validator.
+
+From the clean recovery worktree, submit the entire chain once with:
+
+```bash
+uv run python scripts/submit_part1_prompt_hash_waiver_recovery.py \
+  --production-repository-root /home/mila/c/chenje/my-project \
+  --model-run-id 6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c
+```
+
+The launcher exclusively creates and incrementally updates:
+
+```text
+/home/mila/c/chenje/my-project/results/part1/6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c/validation/prompt_hash_waiver_recovery_receipt.json
+```
+
+Do not resubmit if that receipt exists. The three logs are written under the
+recovery worktree's `logs/` as `part1-waiver-prepare-<job-id>.out`,
+`part1-merge-waiver-<job-id>.out`, and
+`part1-analyze-waiver-<job-id>.out`.
+
 ## Read this first
 
 The scientific contract is `AGENTS.md` plus
@@ -71,9 +142,10 @@ smokes are therefore historical evidence, not live launch inputs. Actual
 production outputs still undergo strict post-generation validation before
 merge or analysis.
 
-## Approved recovery chain
+## Historical pre-generation recovery chain
 
-Run only this entry point from a clean, exactly deployed recovery commit:
+The following entry point was the approved production-launch path and is now
+historical because production generation has completed. Do not resubmit it:
 
 ```bash
 uv run python scripts/submit_part1_unattended.py

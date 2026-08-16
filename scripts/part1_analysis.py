@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import stat
+import subprocess
 from statistics import median
 import tempfile
 from typing import Any, Callable, Mapping, Sequence
@@ -56,6 +57,12 @@ from part1_merge import (
     decode_merge_table,
     validate_merge_directory,
     validate_merge_directory_at,
+    require_source_snapshot,
+)
+from part1_prompt_hash_waiver import (
+    require_exact_failed_report,
+    require_production_checkout_generation_state,
+    validate_prompt_hash_waiver,
 )
 from part1_runtime import validate_manifest_compatibility
 from part1_statistics import (
@@ -468,6 +475,7 @@ class AnalysisSource:
     checkpoint_rows: tuple[Mapping[str, Any], ...]
     small_fixture: bool
     revalidate_inputs: Callable[[], None]
+    prompt_hash_waiver: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,6 +552,31 @@ def _terminal_failure_count(coverage: Mapping[str, Any]) -> int:
     return int(values[0] + values[1])
 
 
+def _paper_analysis_ready(source: AnalysisSource) -> bool:
+    return bool(
+        source.coverage_report.get("paper_analysis_ready") is True
+        or source.prompt_hash_waiver is not None
+    )
+
+
+def _prompt_hash_waiver_provenance(source: AnalysisSource) -> dict[str, Any] | None:
+    if source.prompt_hash_waiver is None:
+        return None
+    merge_waiver = source.merge_manifest.get("prompt_hash_waiver")
+    coverage = source.merge_manifest.get("coverage_report")
+    if not isinstance(merge_waiver, Mapping) or not isinstance(coverage, Mapping):
+        raise ValueError("waiver analysis source lacks merge waiver/report provenance")
+    return {
+        "waiver_id": source.prompt_hash_waiver["waiver_id"],
+        "relative_path": merge_waiver["relative_path"],
+        "sha256": merge_waiver["sha256"],
+        "byte_size": merge_waiver["byte_size"],
+        "coverage_report_id": source.coverage_report["validation_report_id"],
+        "coverage_report_sha256": coverage["sha256"],
+        "coverage_report_byte_size": coverage["byte_size"],
+    }
+
+
 def _validate_source_contract(source: AnalysisSource, bootstrap_replicates: int) -> None:
     if type(source.small_fixture) is not bool:
         raise ValueError("small_fixture must be boolean")
@@ -568,9 +601,13 @@ def _validate_source_contract(source: AnalysisSource, bootstrap_replicates: int)
         merge.get("coverage_report_id"), coverage.get("validation_report_id")
     ):
         raise ValueError("analysis merge/coverage provenance differs")
-    if coverage.get("paper_analysis_ready") is not True or _terminal_failure_count(
-        coverage
-    ) != 0:
+    waiver_ready = (
+        source.prompt_hash_waiver is not None
+        and merge.get("schema_version") == "1.1.0"
+        and merge.get("prompt_hash_waiver", {}).get("waiver_id")
+        == source.prompt_hash_waiver.get("waiver_id")
+    )
+    if (coverage.get("paper_analysis_ready") is not True and not waiver_ready) or _terminal_failure_count(coverage) != 0:
         raise ValueError(
             "paper-final analysis requires paper_analysis_ready and zero terminal "
             "infrastructure failures"
@@ -585,7 +622,7 @@ def _mode_and_child(replicates: int) -> tuple[str, str]:
 def _analysis_identity_payload(
     source: AnalysisSource, *, bootstrap_replicates: int, bootstrap_mode: str
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "study_id": source.model_manifest["study_id"],
         "study_manifest_hash": source.model_manifest["study_manifest_hash"],
         "question_manifest_hash": source.model_manifest["question_manifest_hash"],
@@ -606,6 +643,10 @@ def _analysis_identity_payload(
         "csv_type_contract_version": CSV_TYPE_CONTRACT_VERSION,
         "plot_version": PLOT_VERSION,
     }
+    waiver = _prompt_hash_waiver_provenance(source)
+    if waiver is not None:
+        payload["prompt_hash_waiver"] = waiver
+    return payload
 
 
 def analysis_id(
@@ -860,7 +901,7 @@ def compute_analysis(
     output_root = source.model_manifest["output_paths"]["analysis"]
     summary = {
         "schema_name": "part1_analysis_summary",
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0" if source.prompt_hash_waiver is not None else "1.0.0",
         "analysis_id": identity,
         **_analysis_identity_payload(
             source,
@@ -870,7 +911,7 @@ def compute_analysis(
         "source_natural_row_count": len(source.natural_rows),
         "source_checkpoint_row_count": len(source.checkpoint_rows),
         "trajectory_row_count": len(trajectory_rows),
-        "paper_analysis_ready": source.coverage_report["paper_analysis_ready"],
+        "paper_analysis_ready": _paper_analysis_ready(source),
         "terminal_infrastructure_failure_count": _terminal_failure_count(
             source.coverage_report
         ),
@@ -958,7 +999,7 @@ def _csv_bytes(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> byt
 
 
 def _source_provenance(source: AnalysisSource) -> dict[str, Any]:
-    return {
+    provenance = {
         "study_id": source.model_manifest["study_id"],
         "study_manifest_hash": source.model_manifest["study_manifest_hash"],
         "question_manifest_hash": source.model_manifest["question_manifest_hash"],
@@ -968,6 +1009,10 @@ def _source_provenance(source: AnalysisSource) -> dict[str, Any]:
         "merge_manifest_hash": source.merge_manifest["merge_manifest_hash"],
         "coverage_report_id": source.coverage_report["validation_report_id"],
     }
+    waiver = _prompt_hash_waiver_provenance(source)
+    if waiver is not None:
+        provenance["prompt_hash_waiver"] = waiver
+    return provenance
 
 
 def _write_fsynced(path: Path, data: bytes) -> None:
@@ -1165,11 +1210,14 @@ def validate_analysis_manifest(manifest: Mapping[str, Any]) -> None:
         "plots",
         "artifacts",
     }
+    waiver_mode = manifest.get("schema_version") == "1.1.0"
+    if waiver_mode:
+        expected_fields.add("prompt_hash_waiver")
     if not isinstance(manifest, Mapping) or set(manifest) != expected_fields:
         raise ValueError("analysis manifest fields differ from the fixed contract")
     if (
         manifest["schema_name"] != "part1_analysis_manifest"
-        or manifest["schema_version"] != "1.0.0"
+        or manifest["schema_version"] not in {"1.0.0", "1.1.0"}
         or manifest["analysis_contract_version"] != "part1-analysis-v1"
         or manifest["analysis_format_version"] != ANALYSIS_FORMAT_VERSION
         or manifest["csv_serialization_version"] != CSV_SERIALIZATION_VERSION
@@ -1187,6 +1235,24 @@ def validate_analysis_manifest(manifest: Mapping[str, Any]) -> None:
         or manifest["repetition_filter_applied"] is not False
     ):
         raise ValueError("analysis manifest fixed semantics differ")
+    if waiver_mode:
+        waiver = manifest["prompt_hash_waiver"]
+        if not isinstance(waiver, Mapping) or set(waiver) != {
+            "waiver_id", "relative_path", "sha256", "byte_size",
+            "coverage_report_id", "coverage_report_sha256",
+            "coverage_report_byte_size",
+        }:
+            raise ValueError("analysis waiver provenance fields differ")
+        if any(
+            not isinstance(waiver[field], str) or len(waiver[field]) != 64
+            for field in (
+                "waiver_id", "sha256", "coverage_report_id", "coverage_report_sha256"
+            )
+        ) or any(
+            isinstance(waiver[field], bool) or not isinstance(waiver[field], int) or waiver[field] <= 0
+            for field in ("byte_size", "coverage_report_byte_size")
+        ):
+            raise ValueError("analysis waiver provenance values are invalid")
     identity_fields = (
         "analysis_id",
         "analysis_manifest_hash",
@@ -1207,27 +1273,19 @@ def validate_analysis_manifest(manifest: Mapping[str, Any]) -> None:
         for field in identity_fields
     ):
         raise ValueError("analysis manifest contains an invalid SHA-256 identity")
+    identity_keys = [
+        "study_id", "study_manifest_hash", "question_manifest_hash", "model_run_id",
+        "model_run_manifest_hash", "merge_id", "merge_manifest_hash",
+        "coverage_report_id", "analysis_config_hash", "analysis_contract_version",
+        "bootstrap_seed", "bootstrap_replicates", "bootstrap_mode",
+        "analysis_format_version", "csv_serialization_version",
+        "csv_type_contract_version", "plot_version",
+    ]
+    if waiver_mode:
+        identity_keys.append("prompt_hash_waiver")
     identity_payload = {
         key: manifest[key]
-        for key in (
-            "study_id",
-            "study_manifest_hash",
-            "question_manifest_hash",
-            "model_run_id",
-            "model_run_manifest_hash",
-            "merge_id",
-            "merge_manifest_hash",
-            "coverage_report_id",
-            "analysis_config_hash",
-            "analysis_contract_version",
-            "bootstrap_seed",
-            "bootstrap_replicates",
-            "bootstrap_mode",
-            "analysis_format_version",
-            "csv_serialization_version",
-            "csv_type_contract_version",
-            "plot_version",
-        )
+        for key in identity_keys
     }
     if manifest["analysis_id"] != _domain_hash(
         "analysis_id", ANALYSIS_IDENTITY_VERSION, identity_payload
@@ -1314,7 +1372,7 @@ def _write_stage(
         artifacts[name] = _artifact_entry(stage / name, kind=kind)
     manifest: dict[str, Any] = {
         "schema_name": "part1_analysis_manifest",
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0" if source.prompt_hash_waiver is not None else "1.0.0",
         "analysis_id": computation.analysis_id,
         "analysis_manifest_hash": "",
         **_analysis_identity_payload(
@@ -1828,7 +1886,11 @@ SUMMARY_FIELDS = frozenset(
 def _validate_summary_semantics(
     summary: Mapping[str, Any], manifest: Mapping[str, Any], tables: Mapping[str, Sequence[Mapping[str, Any]]]
 ) -> None:
-    if set(summary) != SUMMARY_FIELDS or summary["schema_name"] != "part1_analysis_summary" or summary["schema_version"] != "1.0.0":
+    waiver_mode = summary.get("schema_version") == "1.1.0"
+    expected_fields = set(SUMMARY_FIELDS)
+    if waiver_mode:
+        expected_fields.add("prompt_hash_waiver")
+    if set(summary) != expected_fields or summary["schema_name"] != "part1_analysis_summary" or summary["schema_version"] not in {"1.0.0", "1.1.0"}:
         raise ValueError("analysis summary fields/schema differ")
     if type(summary["source_natural_row_count"]) is not int or type(summary["source_checkpoint_row_count"]) is not int or type(summary["trajectory_row_count"]) is not int or min(summary["source_natural_row_count"], summary["source_checkpoint_row_count"], summary["trajectory_row_count"]) < 0:
         raise ValueError("analysis summary source counts have wrong JSON types/values")
@@ -1921,7 +1983,7 @@ def _validate_analysis_directory_descriptor(
     )
     if expected_summary is not None and not _same_json(summary, dict(expected_summary)):
         raise ValueError("analysis summary differs from the computed result")
-    for field in (
+    provenance_fields = [
         "analysis_id",
         "study_id",
         "study_manifest_hash",
@@ -1940,7 +2002,10 @@ def _validate_analysis_directory_descriptor(
         "csv_serialization_version",
         "csv_type_contract_version",
         "plot_version",
-    ):
+    ]
+    if "prompt_hash_waiver" in manifest:
+        provenance_fields.append("prompt_hash_waiver")
+    for field in provenance_fields:
         if not _same_json(summary.get(field), manifest.get(field)):
             raise ValueError(f"analysis summary/manifest provenance differs for {field}")
     decoded_tables: dict[str, list[dict[str, Any]]] = {}
@@ -1988,6 +2053,8 @@ def _validate_analysis_directory_descriptor(
                 "coverage_report_id",
             )
         }
+        if "prompt_hash_waiver" in manifest:
+            expected_source["prompt_hash_waiver"] = manifest["prompt_hash_waiver"]
         if (
             set(metadata) != expected_metadata_fields
             or metadata.get("schema_name") != "part1_analysis_table_metadata"
@@ -2382,7 +2449,10 @@ def _read_analysis_config(repository_root: Path) -> tuple[dict[str, Any], bytes,
 
 
 def load_production_analysis_source(
-    *, repository_root: Path, model_run_manifest_path: Path
+    *,
+    repository_root: Path,
+    model_run_manifest_path: Path,
+    prompt_hash_waiver_path: Path | None = None,
 ) -> AnalysisSource:
     """Strictly load canonical production manifests and lossless merged rows."""
 
@@ -2452,8 +2522,49 @@ def load_production_analysis_source(
     ):
         raise ValueError("coverage bytes or identity differ from merge provenance")
     validate_instance("validation_report", coverage)
-    validate_coverage_report_semantics(coverage)
-    if coverage.get("paper_analysis_ready") is not True or _terminal_failure_count(
+    prompt_hash_waiver: dict[str, Any] | None = None
+    prompt_hash_waiver_bytes: bytes | None = None
+    resolved_waiver_path: Path | None = None
+    if prompt_hash_waiver_path is not None:
+        resolved_waiver_path = Path(prompt_hash_waiver_path)
+        if not resolved_waiver_path.is_absolute():
+            resolved_waiver_path = repository_root / resolved_waiver_path
+        resolved_waiver_path = Path(os.path.abspath(resolved_waiver_path))
+        expected_waiver_path = coverage_path.with_name("prompt_hash_waiver.json")
+        if resolved_waiver_path != expected_waiver_path:
+            raise ValueError("analysis prompt-hash waiver path is not canonical")
+        prompt_hash_waiver, prompt_hash_waiver_bytes = _load_regular_json(
+            resolved_waiver_path, label="prompt-hash waiver"
+        )
+        validate_prompt_hash_waiver(prompt_hash_waiver)
+        require_exact_failed_report(
+            coverage, report_bytes=coverage_bytes, model_manifest=model
+        )
+        require_production_checkout_generation_state(
+            repository_root,
+            expected_generation_commit=model["final_production_git_commit"],
+        )
+        waiver_provenance = merge.get("prompt_hash_waiver")
+        if (
+            merge.get("schema_version") != "1.1.0"
+            or not isinstance(waiver_provenance, Mapping)
+            or waiver_provenance.get("relative_path")
+            != resolved_waiver_path.relative_to(repository_root).as_posix()
+            or waiver_provenance.get("waiver_id") != prompt_hash_waiver["waiver_id"]
+            or waiver_provenance.get("sha256") != _sha256(prompt_hash_waiver_bytes)
+            or waiver_provenance.get("byte_size") != len(prompt_hash_waiver_bytes)
+            or prompt_hash_waiver["coverage_report"]["validation_report_id"]
+            != coverage["validation_report_id"]
+            or prompt_hash_waiver["coverage_report"]["sha256"] != _sha256(coverage_bytes)
+            or prompt_hash_waiver["coverage_report"]["byte_size"] != len(coverage_bytes)
+            or prompt_hash_waiver["model_run_id"] != model["model_run_id"]
+            or prompt_hash_waiver["model_run_manifest_hash"] != model["model_run_manifest_hash"]
+            or prompt_hash_waiver["generation_git_commit"] != model["final_production_git_commit"]
+        ):
+            raise ValueError("analysis waiver/report/merge provenance differs")
+    else:
+        validate_coverage_report_semantics(coverage)
+    if (coverage.get("paper_analysis_ready") is not True and prompt_hash_waiver is None) or _terminal_failure_count(
         coverage
     ) != 0:
         raise ValueError(
@@ -2468,14 +2579,17 @@ def load_production_analysis_source(
         ),
     ):
         _require_no_symlink_components(snapshot_path)
-    rebuilt = build_coverage_report(
-        repository_root=repository_root,
-        model_run_manifest_path=manifest_path,
-        validation_started_at=coverage["validation_started_at"],
-        validation_completed_at=coverage["validation_completed_at"],
-    )
-    if not _same_json(rebuilt, coverage):
-        raise ValueError("coverage report differs from current immutable source/Git snapshot")
+    if prompt_hash_waiver is None:
+        rebuilt = build_coverage_report(
+            repository_root=repository_root,
+            model_run_manifest_path=manifest_path,
+            validation_started_at=coverage["validation_started_at"],
+            validation_completed_at=coverage["validation_completed_at"],
+        )
+        if not _same_json(rebuilt, coverage):
+            raise ValueError("coverage report differs from current immutable source/Git snapshot")
+    else:
+        require_source_snapshot(repository_root, coverage["source_files"])
 
     questions_path = repository_root / "manifests/part1/questions.jsonl"
     question_manifest_path = repository_root / "manifests/part1/questions.manifest.json"
@@ -2536,8 +2650,12 @@ def load_production_analysis_source(
         os.close(parent_descriptor)
     validate_merge_directory(merged_path, expected_manifest=merge)
 
-    expected_git = coverage["summary"]["observed_git_commit"]
-    expected_clean = coverage["summary"]["clean_tracked_worktree"]
+    expected_git = (
+        coverage["summary"]["observed_git_commit"]
+        if prompt_hash_waiver is None
+        else prompt_hash_waiver["recovery_git_commit"]
+    )
+    expected_clean = True if prompt_hash_waiver is not None else coverage["summary"]["clean_tracked_worktree"]
 
     def revalidate() -> None:
         for immutable_path in (
@@ -2572,12 +2690,37 @@ def load_production_analysis_source(
             current_coverage, coverage
         ):
             raise ValueError("coverage report changed during analysis")
-        errors = _global_snapshot_errors(
-            repository_root=repository_root,
-            source_files=coverage["source_files"],
-            expected_git_commit=expected_git,
-            expected_clean_tracked=expected_clean,
-        )
+        if prompt_hash_waiver is not None:
+            assert resolved_waiver_path is not None and prompt_hash_waiver_bytes is not None
+            current_waiver, current_waiver_bytes = _load_regular_json(
+                resolved_waiver_path, label="prompt-hash waiver"
+            )
+            if current_waiver_bytes != prompt_hash_waiver_bytes or not _same_json(current_waiver, prompt_hash_waiver):
+                raise ValueError("prompt-hash waiver changed during analysis")
+            require_source_snapshot(repository_root, coverage["source_files"])
+            require_production_checkout_generation_state(
+                repository_root,
+                expected_generation_commit=model["final_production_git_commit"],
+            )
+            recovery_code_root = Path(__file__).resolve().parents[1]
+            observed_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=recovery_code_root, check=True,
+                capture_output=True, text=True,
+            ).stdout.strip()
+            observed_dirty = subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=no"],
+                cwd=recovery_code_root, check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            errors = [] if observed_head == expected_git and not observed_dirty else [
+                "recovery Git commit or tracked cleanliness changed"
+            ]
+        else:
+            errors = _global_snapshot_errors(
+                repository_root=repository_root,
+                source_files=coverage["source_files"],
+                expected_git_commit=expected_git,
+                expected_clean_tracked=expected_clean,
+            )
         if errors:
             raise ValueError("analysis immutable source/Git snapshot changed: " + "; ".join(errors[:5]))
 
@@ -2597,6 +2740,7 @@ def load_production_analysis_source(
         checkpoint_rows=recovered["checkpoint_results"],
         small_fixture=False,
         revalidate_inputs=revalidate,
+        prompt_hash_waiver=prompt_hash_waiver,
     )
 
 
@@ -2605,12 +2749,14 @@ def analyze_production(
     repository_root: Path,
     model_run_manifest_path: Path,
     bootstrap_replicates: int = 5_000,
+    prompt_hash_waiver_path: Path | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     if bootstrap_replicates not in PRODUCTION_BOOTSTRAP_REPLICATES:
         raise ValueError("production bootstrap replicates must be exactly 1000 or 5000")
     source = load_production_analysis_source(
         repository_root=repository_root,
         model_run_manifest_path=model_run_manifest_path,
+        prompt_hash_waiver_path=prompt_hash_waiver_path,
     )
     return publish_analysis(source, bootstrap_replicates=bootstrap_replicates)
 
