@@ -46,12 +46,18 @@ Acceptance of the recovery requires all of the following:
   eight CSV tables, six figures, and `paper_analysis_ready: true`.
 
 Standard validator/merge/analysis behavior remains unchanged, and the failed
-coverage report is never rewritten. At this checkpoint the waiver
-implementation is under local review; waiver verification, recovery merge, and
-analysis have not run, so final-paper readiness remains **not passed**.
-Recovery code runs from a separate clean worktree while the production checkout
-remains clean and pinned at
-`ffa998a7ee1f156e150c8da33b258165ee53e032`.
+coverage report is never rewritten. Recovery commit
+`1a4b6039758cd8fd84b68f74c0828e6c5f382dae` passed focused verification and
+independent review. It runs from a separate clean worktree while the production
+checkout remains clean and pinned at
+`ffa998a7ee1f156e150c8da33b258165ee53e032`. Waiver preparation `10383205`,
+merge/check `10383206` (`afterok:10383205`), and final analysis `10383207`
+(`afterok:10383206`) were submitted through the exclusive launcher. Preparation
+completed `0:0` in four seconds and published waiver ID
+`dc6d50b0a4712eedac891bb55b794b532ea5e9232f6712b85536c196851f9163`.
+At the last check merge was running on `cn-h004` and analysis remained
+dependency-held. Final-paper readiness remains **not passed** until the chain
+completes and its publications are validated.
 
 ## Full-shape timeout and approved recovery
 

@@ -41,15 +41,25 @@ partition masks terminal outcomes, recovery merge must additionally require
 `natural_execution_outcome=complete` on all 5,000 natural rows and
 `checkpoint_execution_outcome=complete` on all 55,000 checkpoint rows before
 paper readiness. Standard validation and standard merge/analysis behavior
-remain unchanged. The waiver, recovery merge, and final analysis have not yet
-run. There are currently no active SLURM jobs.
+remain unchanged.
 
-Continue by reviewing and committing the scoped recovery implementation, then
-deploy it in a separate Mila recovery worktree. Leave the production checkout
-at `ffa998a7ee1f156e150c8da33b258165ee53e032`. Submit only the documented
-recovery chain, with `srun --cpu-bind=none`: waiver verification, then merge by
-exact `afterok`, then the 5,000-bootstrap analysis by exact `afterok`. Record
-all returned IDs in a durable recovery receipt. Do not rerun generation or the
+Recovery commit `1a4b6039758cd8fd84b68f74c0828e6c5f382dae` was independently
+reviewed and deployed in separate Mila worktree
+`/home/mila/c/chenje/my-project-recovery-1a4b603`. The production checkout
+remains pinned at `ffa998a7ee1f156e150c8da33b258165ee53e032`. The exclusive
+launcher submitted this chain at `2026-08-16T03:28:50Z`:
+
+```text
+waiver preparation: 10383205
+merge/check:        10383206  afterok:10383205
+final analysis:     10383207  afterok:10383206
+```
+
+At the last check, preparation had completed `0:0` in four seconds and published
+waiver ID `dc6d50b0a4712eedac891bb55b794b532ea5e9232f6712b85536c196851f9163`;
+merge was running on `cn-h004`; analysis remained dependency-held. Do not
+resubmit. Continue by reading the durable receipt and monitoring these exact
+IDs. Do not rerun generation or the
 six-hour standard validator.
 
 From the clean recovery worktree, submit the entire chain once with:

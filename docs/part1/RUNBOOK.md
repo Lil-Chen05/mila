@@ -98,10 +98,24 @@ outcomes, so merge must separately require all 5,000 natural records to have
 waiver artifact ID/hash, generation commit, recovery commit, exact
 authorization, and all three job IDs in durable provenance/receipt files.
 
+The chain was submitted once from recovery commit
+`1a4b6039758cd8fd84b68f74c0828e6c5f382dae` with these authoritative IDs:
+
+```text
+prepare:  10383205
+merge:    10383206  afterok:10383205
+analysis: 10383207  afterok:10383206
+```
+
+Do not run the launcher again. Preparation completed `0:0` in four seconds and
+published waiver ID
+`dc6d50b0a4712eedac891bb55b794b532ea5e9232f6712b85536c196851f9163`.
+At the last check merge was running on `cn-h004`, while analysis remained held
+by its exact dependency. Monitor only these IDs and the exclusive receipt.
+
 Do not declare completion until the recovery chain produces three canonical
 Parquet datasets, the final analysis manifest and summary, eight CSV tables,
-six figures, and `paper_analysis_ready: true`. At this checkpoint the recovery
-jobs are not yet submitted.
+six figures, and `paper_analysis_ready: true`.
 
 Expected production-root publications are:
 

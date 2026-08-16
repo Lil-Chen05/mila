@@ -17,7 +17,10 @@ validator compares it against the manifest-level prompt-contract hash, the
 55,000 checkpoints cascade from rejected parents, and the final error is the
 aggregate physical-count consequence. Zero warnings were recorded.
 
-The remaining plan is deliberately narrow:
+The remaining execution plan is deliberately narrow. Steps 1 and 2 are
+complete in reviewed recovery commit
+`1a4b6039758cd8fd84b68f74c0828e6c5f382dae`; the submitted chain is now
+performing steps 3 through 6:
 
 1. finish and independently verify the recovery-only waiver implementation;
 2. bind a waiver sidecar to the exact failed-report bytes/ID, model run,
@@ -35,10 +38,13 @@ The remaining plan is deliberately narrow:
 
 The standard validator and standard merge/analysis paths remain unchanged. The
 failed standard report is never converted to a pass. Any error outside the
-exact fingerprint blocks recovery publication. Waiver verification, merge, and
-analysis are not yet run. Recovery code must execute from a separate clean
-worktree while the production checkout stays clean and pinned at
-`ffa998a7ee1f156e150c8da33b258165ee53e032`.
+exact fingerprint blocks recovery publication. Recovery code executes from
+`/home/mila/c/chenje/my-project-recovery-1a4b603`, while the production
+checkout stays clean and pinned at
+`ffa998a7ee1f156e150c8da33b258165ee53e032`. Submitted jobs are waiver
+preparation `10383205`, merge/check `10383206` (`afterok:10383205`), and final
+analysis `10383207` (`afterok:10383206`). Preparation completed `0:0` in four
+seconds; merge was running on `cn-h004`; analysis remained dependency-held.
 
 The older phase narrative below is retained as historical implementation
 context and is superseded where it says production has not launched.

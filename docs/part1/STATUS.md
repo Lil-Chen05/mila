@@ -29,10 +29,15 @@ outcomes, it also requires all 5,000 natural and all 55,000 checkpoint
 execution outcomes to be `complete`. It accepts no other error. Recovery code
 runs from a separate clean worktree while the production checkout remains clean
 and pinned at `ffa998a7ee1f156e150c8da33b258165ee53e032`. Standard validation
-behavior remains unchanged. The waiver implementation is being prepared
-locally; waiver verification, canonical merge, and final analysis have not yet
-run. There are currently no active SLURM jobs, and `paper_analysis_ready` is not
-yet true.
+behavior remains unchanged. Recovery commit
+`1a4b6039758cd8fd84b68f74c0828e6c5f382dae` passed focused verification and
+independent review and was deployed in a separate Mila worktree. The exclusive
+launcher submitted waiver preparation `10383205`, merge/check `10383206` with
+`afterok:10383205`, and final analysis `10383207` with `afterok:10383206`.
+Preparation completed `0:0` in four seconds and published waiver ID
+`dc6d50b0a4712eedac891bb55b794b532ea5e9232f6712b85536c196851f9163`;
+merge was running on `cn-h004`; analysis remained dependency-held.
+`paper_analysis_ready` is not yet true; do not resubmit this chain.
 
 The historical chronology below predates this checkpoint where it says that no
 production manifest, production root, or array exists.
