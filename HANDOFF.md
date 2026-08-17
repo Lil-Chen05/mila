@@ -1,8 +1,39 @@
 # Part 1 production recovery handoff
 
-## Current authoritative checkpoint (2026-08-17)
+## Active publication-only recovery (2026-08-17)
 
-Direct full analysis is submitted and must not be resubmitted. Recovery commit
+Commit `054d02d4dc4d1a7c24e7806fe3424ab69b899f6f` is pushed and
+deployed cleanly at `/home/mila/c/chenje/my-project-recovery-054d02d`.
+CPU job `10391026` was submitted to validate and atomically publish the exact
+preserved analysis stage without recomputing the completed 5,000 bootstraps:
+
+```text
+/home/mila/c/chenje/my-project/results/part1/6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c/analysis/.final-r5000.stage-5o7fg8le
+analysis ID: 2c141766ccd3e77c8692294bcb067c3ea66bfcfd2fd0f18c2ca3d61c45f01bb7
+target:      final-r5000
+```
+
+Job `10391026` completed `0:0` in nine seconds on `cn-m001`. Its post-rename
+validator reported analysis manifest hash
+`ea1e182034bd66fee2c7300e67f4db2a583965474d5e510a2f176136265cce9c`
+and `paper_analysis_ready: true`. The hidden stage and publication claim are
+absent, and the immutable final directory contains all 24 expected artifacts.
+Do not resubmit. Historical accounting can be inspected read-only:
+
+```bash
+squeue --jobs=10391026 --format='%i|%j|%T|%M|%l|%R'
+sacct -j 10391026 --format=JobIDRaw,JobName,State,ExitCode,Elapsed,Start,End,NodeList --parsable2
+tail -n 100 /home/mila/c/chenje/my-project-recovery-054d02d/logs/part1-finalize-analysis-10391026.out
+```
+
+The prior direct job `10390517` is terminal `FAILED`/`2:0` after `00:54:47`; it completed every
+analysis artifact but its final validator incorrectly used alphabetical subject
+order instead of the fixed study order. It must not be resubmitted. Part 1
+production analysis is now complete and paper-analysis ready.
+
+## Earlier direct-analysis checkpoint (2026-08-17)
+
+The direct full-analysis attempt is historical and must not be resubmitted. Recovery commit
 `c2b10f6107ccc43620f9cb865dc3916577f91a3d` is pushed and deployed in the
 clean worktree `/home/mila/c/chenje/my-project-recovery-c2b10f6`. Its exclusive
 receipt records analysis job `10390517`, 5,000 bootstrap replicates,
@@ -12,12 +43,9 @@ receipt records analysis job `10390517`, 5,000 bootstrap replicates,
 /home/mila/c/chenje/my-project/results/part1/6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c/validation/direct_analysis_recovery_receipt.json
 ```
 
-At the first reconciled check, job `10390517` was `PENDING` for cluster
-capacity. It subsequently started on `cn-m003` and was `RUNNING` at the latest
-check. Its initial log contains only a Matplotlib cache warning followed by an
-automatic writable `/tmp` cache fallback; this is not a job failure and does
-not affect persistent outputs. Monitor read-only; do not run
-the launcher again, cancel the job, modify either Mila checkout, or replace the
+Job `10390517` later failed `2:0` after `00:54:47` on the fixed-order validator
+defect documented above. Its initial Matplotlib cache warning was unrelated.
+Do not run the launcher again, modify either Mila checkout, or replace the
 receipt:
 
 ```bash
@@ -36,9 +64,8 @@ for each natural parent. Commit `c2b10f6` preserves global
 `checkpoint_record_id` uniqueness and per-parent checkpoint consistency while
 removing only that invalid global-label requirement. Its direct recovery path
 reads each merged file once, validates the immutable recovery provenance and
-artifact bytes, and runs the unchanged final 5,000-bootstrap analysis. Final
-paper readiness remains unclaimed until job `10390517` completes and all
-analysis publications validate.
+artifact bytes, and ran the unchanged final 5,000-bootstrap analysis. The exact
+preserved stage was subsequently validated and published by `10391026`.
 
 ## Earlier preserved-stage checkpoint (2026-08-16)
 

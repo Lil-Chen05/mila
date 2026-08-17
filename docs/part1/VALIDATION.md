@@ -1,5 +1,25 @@
 # Part 1 validation ledger and acceptance matrix
 
+## Publication-only recovery state (2026-08-17)
+
+Direct analysis job `10390517` completed all 5,000 bootstrap calculations and
+wrote the complete 24-file analysis stage, then failed final reload on an
+ordering-only validator defect: the producer uses the mandated fixed subject
+order, while the validator used alphabetical order. Commit
+`054d02d4dc4d1a7c24e7806fe3424ab69b899f6f` adds a regression for physics
+preceding chemistry under the study contract and corrects only that comparator.
+
+The same commit adds publication-only recovery that validates every artifact,
+typed table semantics, hashes, metadata, plots, exact model/analysis/bootstrap
+identity, directory inode, and collision state before atomic rename, then
+revalidates the published inode and fsyncs the parent. Its focused analysis and
+recovery verification passed 104 tests. Mila CPU job `10391026` completed `0:0`
+in nine seconds; post-rename validation passed. The final directory contains all
+24 expected artifacts, the stage and claim are absent, its manifest hash is
+`ea1e182034bd66fee2c7300e67f4db2a583965474d5e510a2f176136265cce9c`, and
+both manifest and summary record `paper_analysis_ready: true`. Final-paper
+analysis acceptance is **PASSED**.
+
 ## Direct full-analysis recovery state (2026-08-17)
 
 Merge finalize job `10385970` successfully published the exact canonical
@@ -19,12 +39,10 @@ metrics, checkpoint definitions, sampling, and the 5,000-bootstrap analysis are
 unchanged.
 
 The exclusive receipt records direct analysis job `10390517` as `submitted`
-with `no_preflight: true`. Its first scheduler state was `PENDING` for cluster
-capacity; it later started on `cn-m003` and was `RUNNING` at the latest check.
-Final-paper acceptance is still **not passed**. Require scheduler
-state `COMPLETED`, exit `0:0`, the final analysis manifest and summary, eight
-CSV tables with metadata, six figures, and `paper_analysis_ready: true` before
-claiming completion.
+with `no_preflight: true`. It failed `2:0` after completing all calculations
+because of the fixed-order validator defect. Publication recovery `10391026`
+subsequently validated and published the complete stage; final-paper acceptance
+is recorded in the authoritative section above.
 
 ## Current preserved-stage recovery state (2026-08-16)
 

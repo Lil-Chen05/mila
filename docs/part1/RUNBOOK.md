@@ -1,6 +1,26 @@
 # Part 1 runbook
 
-## Active direct-analysis recovery (2026-08-17)
+## Completed publication-only recovery (2026-08-17)
+
+Job `10391026` completed `0:0` in nine seconds from clean recovery commit
+`054d02d4dc4d1a7c24e7806fe3424ab69b899f6f`. Do not rerun the direct-analysis
+launcher or submit the finalizer again. Historical inspection uses only:
+
+```bash
+squeue --jobs=10391026 --format='%i|%j|%T|%M|%l|%R'
+sacct -j 10391026 --format=JobIDRaw,JobName,State,ExitCode,Elapsed,Start,End,NodeList --parsable2
+tail -n 100 /home/mila/c/chenje/my-project-recovery-054d02d/logs/part1-finalize-analysis-10391026.out
+```
+
+The job binds preserved stage `.final-r5000.stage-5o7fg8le`, model run
+`6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c`,
+analysis ID `2c141766ccd3e77c8692294bcb067c3ea66bfcfd2fd0f18c2ca3d61c45f01bb7`,
+and 5,000 bootstrap replicates. Post-rename validation passed;
+`analysis/final-r5000` contains all 24 expected artifacts, the hidden stage and
+`.final-r5000.publish-claim` are absent, and the final manifest and summary both
+record `paper_analysis_ready: true`.
+
+## Failed direct-analysis attempt (2026-08-17)
 
 The direct full-analysis job is already submitted. Do **not** rerun
 `scripts/submit_part1_direct_analysis_recovery.py` or submit the job script
@@ -23,11 +43,10 @@ sacct -j 10390517 --format=JobIDRaw,JobName,State,ExitCode,Elapsed,Start,End,Nod
 tail -n 100 /home/mila/c/chenje/my-project-recovery-c2b10f6/logs/part1-direct-analysis-10390517.out
 ```
 
-At submission reconciliation the job was `PENDING` for cluster capacity. It
-subsequently started on `cn-m003` and was `RUNNING` at the latest check. The
-initial Matplotlib cache warning used an automatic writable `/tmp` fallback and
-does not require intervention. Once it is terminal, require `COMPLETED` and
-exit `0:0`, then validate the immutable analysis publication under:
+Job `10390517` failed `2:0` after `00:54:47` on the fixed-order validator
+defect after writing the complete stage. Its initial Matplotlib cache warning
+was unrelated. Publication recovery `10391026` subsequently validated and
+published the exact stage under:
 
 ```text
 /home/mila/c/chenje/my-project/results/part1/6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c/analysis/final-r5000/

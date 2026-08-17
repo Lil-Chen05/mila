@@ -1,6 +1,20 @@
 # Part 1 implementation plan
 
-## Current execution checkpoint (2026-08-17)
+## Active publication recovery (2026-08-17)
+
+The full direct analysis completed all calculations and wrote all 24 expected
+artifacts, then failed its final reload because the validator sorted subjects
+alphabetically rather than by `FIXED_SUBJECTS`. Commit `054d02d` corrects only
+that ordering contract and adds a publication-only recovery which fully
+validates the preserved stage before and after an atomic same-parent rename.
+
+Job `10391026` completed `0:0` in nine seconds. It did not recompute bootstrap
+estimates or change any scientific result. Post-rename validation passed, all
+24 expected artifacts are immutable under `final-r5000`, the stage and claim
+are absent, and `paper_analysis_ready: true`. The production computation and
+analysis plan is complete; do not submit another analysis job.
+
+## Earlier direct-analysis checkpoint (2026-08-17)
 
 The canonical merged datasets are published. The first final-analysis attempt,
 job `10385971`, spent `10:21:23` before failing on a global checkpoint-label
@@ -12,11 +26,9 @@ retaining per-parent label/index consistency and global record-identity checks.
 The user explicitly waived a separate preflight under the time constraint.
 The exclusive direct launcher submitted the complete 5,000-bootstrap analysis
 as job `10390517`; the durable receipt records `no_preflight: true` and status
-`submitted`. The job was initially pending for cluster capacity, then started
-on `cn-m003` and was running at the latest check. The only next operational
-step is read-only monitoring followed, after terminal success, by
-validation of the final manifest, eight CSV tables, six figures, metadata, and
-`paper_analysis_ready: true`. Do not resubmit the launcher.
+`submitted`. The job later failed on the fixed-order validator defect after
+writing the complete stage. Publication recovery `10391026` validated and
+published that stage successfully. Do not resubmit the launcher.
 
 ## Authority and current phase
 
