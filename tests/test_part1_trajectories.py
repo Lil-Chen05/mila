@@ -520,6 +520,39 @@ def test_checkpoint_duplicates_and_input_order_are_rejected() -> None:
         build_trajectory_rows([natural], [checkpoints[1], checkpoints[0]])
 
 
+def test_checkpoint_ids_may_repeat_across_distinct_natural_parents() -> None:
+    """Production cp-00..cp-10 names are parent-local, not global IDs."""
+
+    from part1_trajectories import build_trajectory_rows
+
+    naturals = [
+        _natural(sample_index=0, run_id=0),
+        _natural(sample_index=1, run_id=0),
+    ]
+    checkpoints = []
+    for natural in naturals:
+        natural["checkpoint_ids"] = [f"cp-{index:02d}" for index in range(11)]
+        for index in range(11):
+            checkpoint = _checkpoint(natural, index)
+            checkpoint["checkpoint_id"] = f"cp-{index:02d}"
+            checkpoint["alias_metadata"]["owner_checkpoint_id"] = f"cp-{index:02d}"
+            checkpoint["alias_metadata"]["members"] = [f"cp-{index:02d}"]
+            checkpoints.append(checkpoint)
+
+    rows = build_trajectory_rows(naturals, checkpoints)
+    assert len(rows) == 2
+    assert [slot["checkpoint_id"] for slot in rows[0]["checkpoint_calibration"]] == [
+        f"cp-{index:02d}" for index in range(11)
+    ]
+
+    duplicate_record = copy.deepcopy(checkpoints)
+    duplicate_record[11]["checkpoint_record_id"] = duplicate_record[0][
+        "checkpoint_record_id"
+    ]
+    with pytest.raises(ValueError, match="duplicate checkpoint_record_id"):
+        build_trajectory_rows(naturals, duplicate_record)
+
+
 def test_checkpoint_under_natural_infrastructure_failure_is_rejected() -> None:
     from part1_trajectories import build_trajectory_rows
 

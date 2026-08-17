@@ -52,12 +52,19 @@ from part1_merge import (
     _fsync_directory_descriptor,
     _load_regular_json,
     _read_regular_file_at,
+    _schema,
+    _schema_sha256,
     _remove_own_stage,
     _require_no_symlink_components,
     decode_merge_table,
+    validate_merge_manifest,
     validate_merge_directory,
     validate_merge_directory_at,
     require_source_snapshot,
+)
+from part1_direct_analysis_recovery import (
+    direct_analysis_recovery_id,
+    validate_direct_analysis_recovery_receipt,
 )
 from part1_prompt_hash_waiver import (
     require_exact_failed_report,
@@ -584,11 +591,15 @@ def _validate_merge_stage_recovery_provenance(
     value: Mapping[str, Any], *, model_run_id: str
 ) -> dict[str, Any]:
     value = dict(value)
-    expected = {
+    base = {
         "merge_stage_recovery_id", "relative_path", "sha256", "byte_size",
         "original_merge_recovery_commit", "publication_recovery_commit",
     }
-    if set(value) != expected:
+    direct = {
+        "direct_analysis_recovery_id", "direct_analysis_receipt_relative_path",
+        "analysis_execution_commit", "no_preflight",
+    }
+    if frozenset(value) not in {frozenset(base), frozenset(base | direct)}:
         raise ValueError("analysis merge-stage recovery provenance fields differ")
     if any(
         not isinstance(value[field], str) or len(value[field]) != 64
@@ -606,6 +617,19 @@ def _validate_merge_stage_recovery_provenance(
     )
     if value["relative_path"] != expected_path:
         raise ValueError("analysis merge-stage recovery path is not canonical")
+    if direct.issubset(value):
+        if (
+            not isinstance(value["direct_analysis_recovery_id"], str)
+            or len(value["direct_analysis_recovery_id"]) != 64
+            or any(character not in "0123456789abcdef" for character in value["direct_analysis_recovery_id"])
+            or value["direct_analysis_receipt_relative_path"]
+            != f"results/part1/{model_run_id}/validation/direct_analysis_recovery_receipt.json"
+            or not isinstance(value["analysis_execution_commit"], str)
+            or len(value["analysis_execution_commit"]) != 40
+            or any(character not in "0123456789abcdef" for character in value["analysis_execution_commit"])
+            or value["no_preflight"] is not True
+        ):
+            raise ValueError("direct-analysis execution provenance is invalid")
     return value
 
 
@@ -634,6 +658,12 @@ def _validate_source_contract(source: AnalysisSource, bootstrap_replicates: int)
         raise ValueError(
             "production cooperative publication requires merge-stage recovery provenance"
         )
+    if (
+        not source.small_fixture
+        and source.merge_stage_recovery is not None
+        and "direct_analysis_recovery_id" not in source.merge_stage_recovery
+    ):
+        raise ValueError("production recovery analysis lacks direct execution provenance")
     _merge_stage_recovery_provenance(source)
     if type(bootstrap_replicates) is not int or bootstrap_replicates <= 0:
         raise ValueError("bootstrap_replicates must be a positive integer")
@@ -2652,12 +2682,340 @@ def _read_analysis_config(repository_root: Path) -> tuple[dict[str, Any], bytes,
     return value, data, path
 
 
+def _current_git_state(repository: Path) -> tuple[str, bool]:
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    dirty = bool(subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        cwd=repository, check=True, capture_output=True, text=True,
+    ).stdout.strip())
+    return head, dirty
+
+
+def _file_snapshot(path: Path) -> tuple[int, int, int, int]:
+    status = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISREG(status.st_mode):
+        raise ValueError(f"analysis input is not a regular file: {path}")
+    return status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns
+
+
+def _load_explicit_recovery_analysis_source(
+    *,
+    repository_root: Path,
+    manifest_path: Path,
+    model: Mapping[str, Any],
+    model_bytes: bytes,
+    config: Mapping[str, Any],
+    config_bytes: bytes,
+    config_path: Path,
+    merged_path: Path,
+    prompt_hash_waiver_path: Path,
+    merge_stage_recovery_path: Path,
+    direct_analysis_recovery_receipt_path: Path,
+) -> AnalysisSource:
+    """Load the authorized merged artifacts once, without replaying shard validation."""
+
+    coverage_path = (
+        repository_root / "results" / "part1" / model["model_run_id"]
+        / "validation" / "coverage_report.json"
+    )
+    waiver_path = Path(prompt_hash_waiver_path)
+    if not waiver_path.is_absolute():
+        waiver_path = repository_root / waiver_path
+    sidecar_path = Path(merge_stage_recovery_path)
+    if not sidecar_path.is_absolute():
+        sidecar_path = repository_root / sidecar_path
+    receipt_path = Path(direct_analysis_recovery_receipt_path)
+    if not receipt_path.is_absolute():
+        receipt_path = repository_root / receipt_path
+    waiver_path = Path(os.path.abspath(waiver_path))
+    sidecar_path = Path(os.path.abspath(sidecar_path))
+    receipt_path = Path(os.path.abspath(receipt_path))
+    validation_root = coverage_path.parent
+    if (
+        waiver_path != validation_root / "prompt_hash_waiver.json"
+        or sidecar_path != validation_root / "merge_stage_recovery.json"
+        or receipt_path != validation_root / "direct_analysis_recovery_receipt.json"
+    ):
+        raise ValueError("explicit recovery authorization paths are not canonical")
+    for path in (coverage_path, waiver_path, sidecar_path, receipt_path, merged_path):
+        _require_no_symlink_components(path)
+
+    coverage, coverage_bytes = _load_regular_json(coverage_path, label="coverage report")
+    waiver, waiver_bytes = _load_regular_json(waiver_path, label="prompt-hash waiver")
+    sidecar, sidecar_bytes = _load_regular_json(
+        sidecar_path, label="merge-stage recovery sidecar"
+    )
+    receipt, _receipt_bytes = _load_regular_json(
+        receipt_path, label="direct-analysis recovery receipt"
+    )
+    validate_instance("validation_report", coverage)
+    validate_prompt_hash_waiver(waiver)
+    validate_merge_stage_recovery(sidecar)
+    validate_direct_analysis_recovery_receipt(receipt)
+    if receipt["status"] == "submission_failed":
+        raise ValueError("direct-analysis recovery receipt records submission failure")
+    require_exact_failed_report(coverage, report_bytes=coverage_bytes, model_manifest=model)
+    require_production_checkout_generation_state(
+        repository_root,
+        expected_generation_commit=model["final_production_git_commit"],
+    )
+    provenance_checks = {
+        "waiver_model_run": waiver.get("model_run_id") == model["model_run_id"],
+        "waiver_manifest": waiver.get("model_run_manifest_hash") == model["model_run_manifest_hash"],
+        "waiver_generation": waiver.get("generation_git_commit") == model["final_production_git_commit"],
+        "waiver_report_id": waiver.get("coverage_report", {}).get("validation_report_id")
+        == coverage.get("validation_report_id"),
+        "waiver_report_hash": waiver.get("coverage_report", {}).get("sha256")
+        == _sha256(coverage_bytes),
+        "waiver_report_size": waiver.get("coverage_report", {}).get("byte_size")
+        == len(coverage_bytes),
+        "sidecar_model_run": sidecar.get("model_run_id", model["model_run_id"])
+        == model["model_run_id"],
+        "receipt_model_run": receipt.get("model_run_id") == model["model_run_id"],
+        "receipt_manifest": receipt.get("model_run_manifest_hash")
+        == model["model_run_manifest_hash"],
+        "receipt_sidecar_id": receipt.get("merge_stage_recovery_id")
+        == sidecar["merge_stage_recovery_id"],
+        "receipt_sidecar_hash": receipt.get("merge_stage_recovery_sha256")
+        == _sha256(sidecar_bytes),
+        "receipt_sidecar_size": receipt.get("merge_stage_recovery_byte_size")
+        == len(sidecar_bytes),
+        "sidecar_waiver_id": sidecar.get("prompt_hash_waiver", {}).get("waiver_id")
+        == waiver.get("waiver_id"),
+        "sidecar_waiver_hash": sidecar.get("prompt_hash_waiver", {}).get("sha256")
+        == _sha256(waiver_bytes),
+        "sidecar_waiver_size": sidecar.get("prompt_hash_waiver", {}).get("byte_size")
+        == len(waiver_bytes),
+        "sidecar_coverage_id": sidecar.get("coverage_report", {}).get("validation_report_id")
+        == coverage.get("validation_report_id"),
+        "sidecar_coverage_hash": sidecar.get("coverage_report", {}).get("sha256")
+        == _sha256(coverage_bytes),
+        "sidecar_coverage_size": sidecar.get("coverage_report", {}).get("byte_size")
+        == len(coverage_bytes),
+    }
+    mismatches = sorted(key for key, matched in provenance_checks.items() if not matched)
+    if mismatches:
+        raise ValueError(
+            "explicit recovery model/waiver/sidecar/receipt provenance differs: "
+            + ", ".join(mismatches)
+        )
+    recovery_root = Path(__file__).resolve().parents[1]
+    current_head, current_dirty = _current_git_state(recovery_root)
+    if current_head != receipt["analysis_execution_commit"] or current_dirty:
+        raise ValueError("analysis checkout differs from direct recovery receipt")
+
+    merged_input_paths = (
+        merged_path / "merge_manifest.json",
+        *(merged_path / MERGE_TABLE_FILENAMES[kind] for kind in (
+            "natural_results", "checkpoint_results", "audit_events"
+        )),
+    )
+    merged_snapshots = {path: _file_snapshot(path) for path in merged_input_paths}
+    parent_descriptor = os.open(
+        merged_path.parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    merged_descriptor = os.open(
+        merged_path.name,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=parent_descriptor,
+    )
+    try:
+        merge_bytes = _read_regular_file_at(merged_descriptor, "merge_manifest.json")
+        try:
+            merge = json.loads(merge_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("published merge manifest is invalid JSON") from exc
+        if not isinstance(merge, dict):
+            raise ValueError("published merge manifest must be an object")
+        validate_merge_manifest(merge)
+        sidecar_merge = sidecar["merge_manifest"]
+        if (
+            sidecar_merge.get("merge_id") != merge.get("merge_id")
+            or sidecar_merge.get("merge_manifest_hash") != merge.get("merge_manifest_hash")
+            or sidecar_merge.get("sha256") != _sha256(merge_bytes)
+            or sidecar_merge.get("byte_size") != len(merge_bytes)
+            or sidecar.get("source_inventory_sha256")
+            != _sha256(canonical_json_bytes(merge.get("source_files")))
+            or not _same_json(sidecar.get("outputs"), merge.get("outputs"))
+        ):
+            raise ValueError("merge-stage sidecar differs from published merge manifest")
+        for field in (
+            "study_id", "study_manifest_hash", "question_manifest_hash",
+            "model_run_id", "model_run_manifest_hash",
+        ):
+            if not _same_json(model.get(field), merge.get(field)):
+                raise ValueError(f"model/merge provenance differs for {field}")
+        merge_waiver = merge.get("prompt_hash_waiver", {})
+        merge_coverage = merge.get("coverage_report", {})
+        if (
+            merge.get("coverage_report_id") != coverage.get("validation_report_id")
+            or merge_coverage.get("sha256") != _sha256(coverage_bytes)
+            or merge_coverage.get("byte_size") != len(coverage_bytes)
+            or merge_waiver.get("waiver_id") != waiver.get("waiver_id")
+            or merge_waiver.get("sha256") != _sha256(waiver_bytes)
+            or merge_waiver.get("byte_size") != len(waiver_bytes)
+        ):
+            raise ValueError("merge waiver/coverage provenance differs")
+
+        provenance = {
+            key: merge[key] for key in (
+                "study_id", "study_manifest_hash", "question_manifest_hash",
+                "model_run_id", "model_run_manifest_hash", "coverage_report_id",
+            )
+        }
+        recovered: dict[str, tuple[dict[str, Any], ...]] = {}
+        for kind in ("natural_results", "checkpoint_results", "audit_events"):
+            filename = MERGE_TABLE_FILENAMES[kind]
+            data = _read_regular_file_at(merged_descriptor, filename)
+            output = merge["outputs"][kind]
+            if (
+                output.get("relative_path") != filename
+                or output.get("sha256") != _sha256(data)
+                or output.get("byte_size") != len(data)
+            ):
+                raise ValueError(f"merged {kind} bytes differ during explicit recovery")
+            parquet = pq.ParquetFile(pa.BufferReader(data))
+            table_schema = parquet.schema_arrow
+            row_count = parquet.metadata.num_rows
+            expected_schema = _schema(kind, provenance, output["row_count"])
+            metadata = {
+                key.decode("utf-8"): value.decode("utf-8")
+                for key, value in (table_schema.metadata or {}).items()
+            }
+            if (
+                table_schema != expected_schema
+                or _schema_sha256(table_schema) != output["schema_sha256"]
+                or row_count != output["row_count"]
+                or metadata != output["embedded_metadata"]
+            ):
+                raise ValueError(f"merged {kind} schema, metadata, or row count differs")
+            if kind != "audit_events":
+                table = parquet.read()
+                recovered[kind] = tuple(decode_merge_table(kind, table))
+    finally:
+        os.close(merged_descriptor)
+        os.close(parent_descriptor)
+    for path, expected in merged_snapshots.items():
+        if _file_snapshot(path) != expected:
+            raise ValueError(f"merged input changed while it was read: {path}")
+
+    questions_path = repository_root / "manifests/part1/questions.jsonl"
+    question_manifest_path = repository_root / "manifests/part1/questions.manifest.json"
+    study_manifest_path = repository_root / "manifests/part1/study_manifest.json"
+    tracked_paths = (
+        questions_path, question_manifest_path, study_manifest_path,
+        repository_root / "uv.lock",
+    )
+    for path in tracked_paths:
+        _require_no_symlink_components(path)
+    tracked_snapshots = {path: _file_snapshot(path) for path in tracked_paths}
+    tracked_bytes = {path: path.read_bytes() for path in tracked_paths}
+    bundle = load_manifest_bundle(
+        questions_path=questions_path,
+        question_manifest_path=question_manifest_path,
+        study_manifest_path=study_manifest_path,
+    )
+    validate_manifest_compatibility(bundle.study_manifest, model)
+    if len(bundle.records) != 500 or [row["sample_index"] for row in bundle.records] != list(range(500)):
+        raise ValueError("tracked question bundle is not the fixed ordered 500-question frame")
+    for path, expected in tracked_snapshots.items():
+        if _file_snapshot(path) != expected:
+            raise ValueError(f"tracked study input changed while it was read: {path}")
+    snapshots = {**merged_snapshots, **tracked_snapshots}
+    receipt_identity = receipt["direct_analysis_recovery_id"]
+
+    def revalidate() -> None:
+        for path, expected in snapshots.items():
+            if _file_snapshot(path) != expected:
+                raise ValueError(f"explicit recovery input file changed: {path}")
+        current_model, current_model_bytes = _load_regular_json(
+            manifest_path, label="production model-run manifest"
+        )
+        current_config, current_config_bytes, _ = _read_analysis_config(repository_root)
+        current_coverage, current_coverage_bytes = _load_regular_json(
+            coverage_path, label="coverage report"
+        )
+        current_waiver, current_waiver_bytes = _load_regular_json(
+            waiver_path, label="prompt-hash waiver"
+        )
+        current_sidecar, current_sidecar_bytes = _load_regular_json(
+            sidecar_path, label="merge-stage recovery sidecar"
+        )
+        current_merge, current_merge_bytes = _load_regular_json(
+            merged_path / "merge_manifest.json", label="published merge manifest"
+        )
+        current_receipt, _ = _load_regular_json(
+            receipt_path, label="direct-analysis recovery receipt"
+        )
+        validate_direct_analysis_recovery_receipt(current_receipt)
+        if (
+            current_model_bytes != model_bytes or not _same_json(current_model, model)
+            or current_config_bytes != config_bytes or not _same_json(current_config, config)
+            or current_coverage_bytes != coverage_bytes or not _same_json(current_coverage, coverage)
+            or current_waiver_bytes != waiver_bytes or not _same_json(current_waiver, waiver)
+            or current_sidecar_bytes != sidecar_bytes or not _same_json(current_sidecar, sidecar)
+            or current_merge_bytes != merge_bytes or not _same_json(current_merge, merge)
+            or current_receipt["direct_analysis_recovery_id"] != receipt_identity
+            or current_receipt["analysis_execution_commit"] != receipt["analysis_execution_commit"]
+        ):
+            raise ValueError("explicit recovery immutable provenance changed")
+        for path, expected_bytes in tracked_bytes.items():
+            if path.read_bytes() != expected_bytes:
+                raise ValueError(f"tracked study input bytes changed: {path}")
+        require_production_checkout_generation_state(
+            repository_root,
+            expected_generation_commit=model["final_production_git_commit"],
+        )
+        head, dirty = _current_git_state(recovery_root)
+        if head != receipt["analysis_execution_commit"] or dirty:
+            raise ValueError("direct analysis recovery Git state changed")
+
+    revalidate()
+    recovery_provenance = {
+        "merge_stage_recovery_id": sidecar["merge_stage_recovery_id"],
+        "relative_path": sidecar_path.relative_to(repository_root).as_posix(),
+        "sha256": _sha256(sidecar_bytes),
+        "byte_size": len(sidecar_bytes),
+        "original_merge_recovery_commit": sidecar["original_merge_recovery_commit"],
+        "publication_recovery_commit": sidecar["publication_recovery_commit"],
+        "direct_analysis_recovery_id": receipt["direct_analysis_recovery_id"],
+        "direct_analysis_receipt_relative_path": receipt_path.relative_to(repository_root).as_posix(),
+        "analysis_execution_commit": receipt["analysis_execution_commit"],
+        "no_preflight": True,
+    }
+    return AnalysisSource(
+        repository_root=repository_root,
+        model_manifest=copy.deepcopy(model),
+        merge_manifest=copy.deepcopy(merge),
+        coverage_report=copy.deepcopy(coverage),
+        analysis_config=copy.deepcopy(config),
+        question_frame=tuple(
+            {"subject": row["subject"], "question_id": row["question_id"]}
+            for row in bundle.records
+        ),
+        natural_rows=recovered["natural_results"],
+        checkpoint_rows=recovered["checkpoint_results"],
+        small_fixture=False,
+        revalidate_inputs=revalidate,
+        prompt_hash_waiver=copy.deepcopy(waiver),
+        merge_stage_recovery=recovery_provenance,
+        publication_mode="cooperative_claim_same_parent_atomic_rename_v1",
+    )
+
+
 def load_production_analysis_source(
     *,
     repository_root: Path,
     model_run_manifest_path: Path,
     prompt_hash_waiver_path: Path | None = None,
     merge_stage_recovery_path: Path | None = None,
+    direct_analysis_recovery_receipt_path: Path | None = None,
 ) -> AnalysisSource:
     """Strictly load canonical production manifests and lossless merged rows."""
 
@@ -2701,6 +3059,26 @@ def load_production_analysis_source(
     config, config_bytes, config_path = _read_analysis_config(repository_root)
     merged_path = repository_root / model["output_paths"]["merged"]
     _require_no_symlink_components(merged_path)
+    if merge_stage_recovery_path is not None:
+        if prompt_hash_waiver_path is None or direct_analysis_recovery_receipt_path is None:
+            raise ValueError(
+                "explicit merge-stage recovery requires waiver and direct-analysis receipt"
+            )
+        return _load_explicit_recovery_analysis_source(
+            repository_root=repository_root,
+            manifest_path=manifest_path,
+            model=model,
+            model_bytes=model_bytes,
+            config=config,
+            config_bytes=config_bytes,
+            config_path=config_path,
+            merged_path=merged_path,
+            prompt_hash_waiver_path=prompt_hash_waiver_path,
+            merge_stage_recovery_path=merge_stage_recovery_path,
+            direct_analysis_recovery_receipt_path=direct_analysis_recovery_receipt_path,
+        )
+    if direct_analysis_recovery_receipt_path is not None:
+        raise ValueError("direct-analysis receipt requires explicit merge-stage recovery")
     merge = validate_merge_directory(merged_path)
     for field in (
         "study_id",
@@ -3043,6 +3421,7 @@ def analyze_production(
     bootstrap_replicates: int = 5_000,
     prompt_hash_waiver_path: Path | None = None,
     merge_stage_recovery_path: Path | None = None,
+    direct_analysis_recovery_receipt_path: Path | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     if bootstrap_replicates not in PRODUCTION_BOOTSTRAP_REPLICATES:
         raise ValueError("production bootstrap replicates must be exactly 1000 or 5000")
@@ -3051,6 +3430,7 @@ def analyze_production(
         model_run_manifest_path=model_run_manifest_path,
         prompt_hash_waiver_path=prompt_hash_waiver_path,
         merge_stage_recovery_path=merge_stage_recovery_path,
+        direct_analysis_recovery_receipt_path=direct_analysis_recovery_receipt_path,
     )
     return publish_analysis(source, bootstrap_replicates=bootstrap_replicates)
 

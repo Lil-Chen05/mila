@@ -27,6 +27,7 @@ def build_parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
     parser.add_argument("--model-run-manifest", type=Path, required=True)
     parser.add_argument("--prompt-hash-waiver", type=Path)
     parser.add_argument("--merge-stage-recovery", type=Path)
+    parser.add_argument("--direct-analysis-recovery-receipt", type=Path)
     parser.add_argument(
         "--bootstrap-replicates",
         type=int,
@@ -45,6 +46,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             bootstrap_replicates=arguments.bootstrap_replicates,
             prompt_hash_waiver_path=arguments.prompt_hash_waiver,
             merge_stage_recovery_path=arguments.merge_stage_recovery,
+            direct_analysis_recovery_receipt_path=(
+                arguments.direct_analysis_recovery_receipt
+            ),
         )
     except Exception as exc:
         print(

@@ -320,6 +320,158 @@ def _strict_loader_fixture(
     }
 
 
+def _explicit_recovery_loader_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Any]:
+    """Extend the strict fixture with the explicit recovery authorization files."""
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    fixture = _strict_loader_fixture(tmp_path, monkeypatch)
+    analysis = fixture["analysis"]
+    repository = fixture["repository"]
+    merged = repository / fixture["model"]["output_paths"]["merged"]
+    validation = fixture["coverage_path"].parent
+    tracked = repository / "manifests" / "part1"
+    tracked.mkdir(parents=True)
+    for name in ("questions.jsonl", "questions.manifest.json", "study_manifest.json"):
+        (tracked / name).write_text("fixture", encoding="utf-8")
+    (repository / "uv.lock").write_text("fixture", encoding="utf-8")
+    fixture["model"]["final_production_git_commit"] = "a" * 40
+    fixture["model_path"].write_bytes(
+        json.dumps(fixture["model"], sort_keys=True, separators=(",", ":")).encode()
+    )
+
+    tables = {}
+    for kind, output in fixture["merge"]["outputs"].items():
+        output["relative_path"] = analysis.MERGE_TABLE_FILENAMES[kind]
+        table_path = merged / analysis.MERGE_TABLE_FILENAMES[kind]
+        tables[kind] = pq.read_table(table_path)
+        output["schema_sha256"] = hashlib.sha256(
+            tables[kind].schema.serialize().to_pybytes()
+        ).hexdigest()
+        output["embedded_metadata"] = {}
+    audit_path = merged / analysis.MERGE_TABLE_FILENAMES["audit_events"]
+    audit_table = pa.table({"fixture": ["audit"]})
+    pq.write_table(audit_table, audit_path)
+    audit_bytes = audit_path.read_bytes()
+    tables["audit_events"] = audit_table
+    fixture["merge"]["outputs"]["audit_events"] = {
+        "relative_path": analysis.MERGE_TABLE_FILENAMES["audit_events"],
+        "sha256": hashlib.sha256(audit_bytes).hexdigest(),
+        "byte_size": len(audit_bytes),
+        "row_count": 1,
+        "schema_sha256": hashlib.sha256(
+            audit_table.schema.serialize().to_pybytes()
+        ).hexdigest(),
+        "embedded_metadata": {},
+    }
+    fixture["merge"]["schema_version"] = "1.1.0"
+    fixture["merge"]["source_files"] = []
+
+    waiver = {
+        "waiver_id": "b" * 64,
+        "recovery_git_commit": "c" * 40,
+        "model_run_id": fixture["model"]["model_run_id"],
+        "model_run_manifest_hash": fixture["model"]["model_run_manifest_hash"],
+        "generation_git_commit": fixture["model"]["final_production_git_commit"],
+        "coverage_report": {
+            "validation_report_id": fixture["coverage"]["validation_report_id"],
+            "sha256": hashlib.sha256(fixture["coverage_path"].read_bytes()).hexdigest(),
+            "byte_size": len(fixture["coverage_path"].read_bytes()),
+        },
+    }
+    waiver_path = validation / "prompt_hash_waiver.json"
+    waiver_bytes = json.dumps(waiver, sort_keys=True, separators=(",", ":")).encode()
+    waiver_path.write_bytes(waiver_bytes)
+    fixture["merge"]["prompt_hash_waiver"] = {
+        "relative_path": waiver_path.relative_to(repository).as_posix(),
+        "waiver_id": waiver["waiver_id"],
+        "sha256": hashlib.sha256(waiver_bytes).hexdigest(),
+        "byte_size": len(waiver_bytes),
+    }
+    merge_path = merged / "merge_manifest.json"
+    merge_bytes = json.dumps(
+        fixture["merge"], sort_keys=True, separators=(",", ":")
+    ).encode()
+    merge_path.write_bytes(merge_bytes)
+    sidecar = {
+        "merge_stage_recovery_id": "d" * 64,
+        "publication_recovery_commit": "e" * 40,
+        "original_merge_recovery_commit": "f" * 40,
+        "merge_manifest": {
+            "merge_id": fixture["merge"]["merge_id"],
+            "merge_manifest_hash": fixture["merge"]["merge_manifest_hash"],
+            "sha256": hashlib.sha256(merge_bytes).hexdigest(),
+            "byte_size": len(merge_bytes),
+        },
+        "outputs": copy.deepcopy(fixture["merge"]["outputs"]),
+        "source_inventory_sha256": hashlib.sha256(
+            analysis.canonical_json_bytes([])
+        ).hexdigest(),
+        "prompt_hash_waiver": {
+            "waiver_id": waiver["waiver_id"],
+            "sha256": hashlib.sha256(waiver_bytes).hexdigest(),
+            "byte_size": len(waiver_bytes),
+        },
+        "coverage_report": {
+            "validation_report_id": fixture["coverage"]["validation_report_id"],
+            "sha256": hashlib.sha256(fixture["coverage_path"].read_bytes()).hexdigest(),
+            "byte_size": len(fixture["coverage_path"].read_bytes()),
+        },
+    }
+    sidecar_path = validation / "merge_stage_recovery.json"
+    sidecar_bytes = json.dumps(sidecar, sort_keys=True, separators=(",", ":")).encode()
+    sidecar_path.write_bytes(sidecar_bytes)
+    receipt = {
+        "schema_version": "part1-direct-analysis-recovery-receipt-v1",
+        "direct_analysis_recovery_id": "1" * 64,
+        "model_run_id": fixture["model"]["model_run_id"],
+        "model_run_manifest_hash": fixture["model"]["model_run_manifest_hash"],
+        "merge_stage_recovery_id": sidecar["merge_stage_recovery_id"],
+        "merge_stage_recovery_sha256": hashlib.sha256(sidecar_bytes).hexdigest(),
+        "merge_stage_recovery_byte_size": len(sidecar_bytes),
+        "analysis_execution_commit": "2" * 40,
+        "bootstrap_replicates": 5000,
+        "no_preflight": True,
+        "status": "submitted",
+        "analysis_job_id": "12345",
+    }
+    receipt_path = validation / "direct_analysis_recovery_receipt.json"
+    receipt_path.write_bytes(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
+    )
+
+    monkeypatch.setattr(analysis, "validate_prompt_hash_waiver", lambda *_args: None)
+    monkeypatch.setattr(analysis, "require_exact_failed_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        analysis, "require_production_checkout_generation_state", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(analysis, "validate_merge_stage_recovery", lambda *_args: None)
+    monkeypatch.setattr(analysis, "validate_merge_manifest", lambda *_args: None, raising=False)
+    monkeypatch.setattr(analysis, "validate_direct_analysis_recovery_receipt", lambda *_args: None, raising=False)
+    monkeypatch.setattr(analysis, "_current_git_state", lambda *_args: ("2" * 40, False), raising=False)
+    monkeypatch.setattr(
+        analysis,
+        "_schema",
+        lambda kind, _provenance, _row_count: tables[kind].schema,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        analysis,
+        "_schema_sha256",
+        lambda schema: hashlib.sha256(schema.serialize().to_pybytes()).hexdigest(),
+        raising=False,
+    )
+    return {
+        **fixture,
+        "waiver_path": waiver_path,
+        "sidecar_path": sidecar_path,
+        "receipt_path": receipt_path,
+    }
+
+
 def test_analysis_config_uses_an_independent_exact_json_typed_oracle() -> None:
     from part1_analysis import analysis_config_hash, validate_analysis_config
 
@@ -374,6 +526,78 @@ def test_strict_production_loader_reads_canonical_descriptor_bound_inputs_and_re
     fixture["calls"]["snapshot_errors"].append("tracked source changed")
     with pytest.raises(ValueError, match="source/Git snapshot changed"):
         source.revalidate_inputs()
+
+
+def test_explicit_recovery_loader_reads_each_merged_file_once_without_full_revalidation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _explicit_recovery_loader_fixture(tmp_path, monkeypatch)
+    analysis = fixture["analysis"]
+    forbidden: list[str] = []
+
+    def forbid(label: str):
+        def fail(*_args: Any, **_kwargs: Any):
+            forbidden.append(label)
+            raise AssertionError(f"explicit recovery called forbidden {label}")
+        return fail
+
+    monkeypatch.setattr(analysis, "validate_merge_directory", forbid("full merge validator"))
+    monkeypatch.setattr(analysis, "validate_merge_directory_at", forbid("descriptor full validator"))
+    monkeypatch.setattr(analysis, "require_source_snapshot", forbid("raw shard scan"))
+    monkeypatch.setattr(
+        analysis.pq,
+        "read_table",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("audit/full-table read_table path is forbidden")
+        ),
+    )
+    decoded: list[str] = []
+    original_decode = analysis.decode_merge_table
+
+    def decode(kind: str, table: Any):
+        decoded.append(kind)
+        if kind == "audit_events":
+            raise AssertionError("audit events must not be fully decoded")
+        return original_decode(kind, table)
+
+    monkeypatch.setattr(analysis, "decode_merge_table", decode)
+    source = analysis.load_production_analysis_source(
+        repository_root=fixture["repository"],
+        model_run_manifest_path=fixture["model_path"],
+        prompt_hash_waiver_path=fixture["waiver_path"],
+        merge_stage_recovery_path=fixture["sidecar_path"],
+        direct_analysis_recovery_receipt_path=fixture["receipt_path"],
+    )
+
+    assert source.merge_stage_recovery is not None
+    assert source.merge_stage_recovery["analysis_execution_commit"] == "2" * 40
+    assert decoded == ["natural_results", "checkpoint_results"]
+    assert forbidden == []
+    assert fixture["calls"]["descriptor_reads"] == [
+        "merge_manifest.json",
+        analysis.MERGE_TABLE_FILENAMES["natural_results"],
+        analysis.MERGE_TABLE_FILENAMES["checkpoint_results"],
+        analysis.MERGE_TABLE_FILENAMES["audit_events"],
+    ]
+    source.revalidate_inputs()
+    assert forbidden == []
+
+
+def test_direct_analysis_recovery_launcher_submits_one_no_preflight_job() -> None:
+    submitter = Path("scripts/submit_part1_direct_analysis_recovery.py").read_text(
+        encoding="utf-8"
+    )
+    job = Path("jobs/part1_direct_analysis_recovery.sh").read_text(encoding="utf-8")
+    assert "_exclusive_create_json" in submitter
+    assert "direct_analysis_recovery_receipt.json" in submitter
+    assert submitter.count("jobs/part1_direct_analysis_recovery.sh") == 1
+    assert "part1_validate" not in submitter
+    assert "jobs/part1_merge" not in submitter
+    assert "preflight" not in submitter.lower().replace("no_preflight", "")
+    assert "--direct-analysis-recovery-receipt" in job
+    assert "--merge-stage-recovery" in job
+    assert "--prompt-hash-waiver" in job
+    assert "srun --cpu-bind=none" in job
 
 
 def test_strict_production_loader_rejects_merged_table_hash_drift_during_descriptor_read(

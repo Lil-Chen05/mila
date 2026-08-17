@@ -403,15 +403,15 @@ def _index_checkpoints(
     record_ids: set[Any] = set()
     previous_index = -1
     for checkpoint in checkpoint_rows:
+        checkpoint_id = checkpoint.get("checkpoint_id")
+        if isinstance(checkpoint_id, str) and checkpoint_id in checkpoint_ids:
+            raise ValueError("duplicate checkpoint_id")
         index = _validate_checkpoint(checkpoint, natural)
         if index < previous_index:
             raise ValueError("out-of-order checkpoints for natural parent")
         previous_index = index
         if index in by_index:
             raise ValueError("duplicate checkpoint requested index")
-        checkpoint_id = checkpoint.get("checkpoint_id")
-        if checkpoint_id in checkpoint_ids:
-            raise ValueError("duplicate checkpoint_id")
         checkpoint_ids.add(checkpoint_id)
         record_id = checkpoint.get("checkpoint_record_id")
         if record_id in record_ids:
@@ -827,7 +827,6 @@ def build_trajectory_rows(
     checkpoint_indices_by_parent: dict[Any, set[Any]] = {
         raw_record_id: set() for raw_record_id in naturals_by_id
     }
-    checkpoint_ids: set[Any] = set()
     checkpoint_record_ids: set[Any] = set()
     for checkpoint in checkpoint_rows:
         parent_id = checkpoint.get("parent_raw_record_id")
@@ -840,10 +839,6 @@ def build_trajectory_rows(
         if requested_index in checkpoint_indices_by_parent[parent_id]:
             raise ValueError("duplicate checkpoint requested index")
         checkpoint_indices_by_parent[parent_id].add(requested_index)
-        checkpoint_id = checkpoint.get("checkpoint_id")
-        if checkpoint_id in checkpoint_ids:
-            raise ValueError("duplicate checkpoint_id")
-        checkpoint_ids.add(checkpoint_id)
         record_id = checkpoint.get("checkpoint_record_id")
         if record_id in checkpoint_record_ids:
             raise ValueError("duplicate checkpoint_record_id")
