@@ -1,6 +1,46 @@
 # Part 1 production recovery handoff
 
-## Current authoritative checkpoint (2026-08-16)
+## Current authoritative checkpoint (2026-08-17)
+
+Direct full analysis is submitted and must not be resubmitted. Recovery commit
+`c2b10f6107ccc43620f9cb865dc3916577f91a3d` is pushed and deployed in the
+clean worktree `/home/mila/c/chenje/my-project-recovery-c2b10f6`. Its exclusive
+receipt records analysis job `10390517`, 5,000 bootstrap replicates,
+`no_preflight: true`, and status `submitted`:
+
+```text
+/home/mila/c/chenje/my-project/results/part1/6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c/validation/direct_analysis_recovery_receipt.json
+```
+
+At the first reconciled check, job `10390517` was `PENDING` for cluster
+capacity. It subsequently started on `cn-m003` and was `RUNNING` at the latest
+check. Its initial log contains only a Matplotlib cache warning followed by an
+automatic writable `/tmp` cache fallback; this is not a job failure and does
+not affect persistent outputs. Monitor read-only; do not run
+the launcher again, cancel the job, modify either Mila checkout, or replace the
+receipt:
+
+```bash
+ssh mila
+squeue --jobs=10390517 --format='%i|%j|%T|%M|%l|%R'
+sacct -j 10390517 --format=JobIDRaw,JobName,State,ExitCode,Elapsed,Start,End,NodeList --parsable2
+tail -n 100 /home/mila/c/chenje/my-project-recovery-c2b10f6/logs/part1-direct-analysis-10390517.out
+```
+
+The merged production datasets are already atomically published and remain
+immutable: 5,000 natural rows, 55,000 checkpoint rows, and 120,003 audit rows.
+The previous analysis job `10385971` failed after `10:21:23` because the
+trajectory builder incorrectly required checkpoint labels such as `cp-00` to
+be globally unique, although the protocol intentionally reuses those labels
+for each natural parent. Commit `c2b10f6` preserves global
+`checkpoint_record_id` uniqueness and per-parent checkpoint consistency while
+removing only that invalid global-label requirement. Its direct recovery path
+reads each merged file once, validates the immutable recovery provenance and
+artifact bytes, and runs the unchanged final 5,000-bootstrap analysis. Final
+paper readiness remains unclaimed until job `10390517` completes and all
+analysis publications validate.
+
+## Earlier preserved-stage checkpoint (2026-08-16)
 
 Recovery commit `95a434ce7ab3d03619f7aad49993dd9745dab533` is pushed and
 deployed at `/home/mila/c/chenje/my-project-recovery-95a434c`. The immutable
@@ -105,7 +145,7 @@ waiver ID `dc6d50b0a4712eedac891bb55b794b532ea5e9232f6712b85536c196851f9163`;
 merge later failed as documented above and analysis was cancelled. Do not
 resubmit that chain. Do not rerun generation or the six-hour standard validator.
 
-From the clean recovery worktree, submit the entire chain once with:
+Historical first-waiver submission command (do not run again):
 
 ```bash
 uv run python scripts/submit_part1_prompt_hash_waiver_recovery.py \

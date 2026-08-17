@@ -1,5 +1,31 @@
 # Part 1 validation ledger and acceptance matrix
 
+## Direct full-analysis recovery state (2026-08-17)
+
+Merge finalize job `10385970` successfully published the exact canonical
+production datasets: 5,000 natural rows, 55,000 checkpoint rows, and 120,003
+audit rows. Final analysis job `10385971` failed `2:0` after `10:21:23` because
+the trajectory layer rejected repeated checkpoint labels globally. Labels
+`cp-00` through `cp-10` are intentionally scoped to each natural parent; their
+global record identities remain unique.
+
+Recovery commit `c2b10f6107ccc43620f9cb865dc3916577f91a3d` retains global
+`checkpoint_record_id` uniqueness and per-parent checkpoint label/index
+consistency, validates the immutable merge/recovery provenance, and reads each
+merged dataset once. The audit Parquet is checked through metadata/schema
+without decoding its 120,003 rows. A pre/post artifact snapshot and final cheap
+byte/stat revalidation guard publication against input changes. Scientific
+metrics, checkpoint definitions, sampling, and the 5,000-bootstrap analysis are
+unchanged.
+
+The exclusive receipt records direct analysis job `10390517` as `submitted`
+with `no_preflight: true`. Its first scheduler state was `PENDING` for cluster
+capacity; it later started on `cn-m003` and was `RUNNING` at the latest check.
+Final-paper acceptance is still **not passed**. Require scheduler
+state `COMPLETED`, exit `0:0`, the final analysis manifest and summary, eight
+CSV tables with metadata, six figures, and `paper_analysis_ready: true` before
+claiming completion.
+
 ## Current preserved-stage recovery state (2026-08-16)
 
 Recovery commit `95a434ce7ab3d03619f7aad49993dd9745dab533` is deployed at

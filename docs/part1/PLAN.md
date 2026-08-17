@@ -1,5 +1,23 @@
 # Part 1 implementation plan
 
+## Current execution checkpoint (2026-08-17)
+
+The canonical merged datasets are published. The first final-analysis attempt,
+job `10385971`, spent `10:21:23` before failing on a global checkpoint-label
+uniqueness check that conflicts with the intentional per-parent reuse of
+`cp-00` through `cp-10`. Scoped recovery commit
+`c2b10f6107ccc43620f9cb865dc3916577f91a3d` corrects that requirement while
+retaining per-parent label/index consistency and global record-identity checks.
+
+The user explicitly waived a separate preflight under the time constraint.
+The exclusive direct launcher submitted the complete 5,000-bootstrap analysis
+as job `10390517`; the durable receipt records `no_preflight: true` and status
+`submitted`. The job was initially pending for cluster capacity, then started
+on `cn-m003` and was running at the latest check. The only next operational
+step is read-only monitoring followed, after terminal success, by
+validation of the final manifest, eight CSV tables, six figures, metadata, and
+`paper_analysis_ready: true`. Do not resubmit the launcher.
+
 ## Authority and current phase
 
 **Current execution plan (2026-08-16):** recovery commit
@@ -61,7 +79,8 @@ checkout stays clean and pinned at
 `ffa998a7ee1f156e150c8da33b258165ee53e032`. Submitted jobs are waiver
 preparation `10383205`, merge/check `10383206` (`afterok:10383205`), and final
 analysis `10383207` (`afterok:10383206`). Preparation completed `0:0` in four
-seconds; merge was running on `cn-h004`; analysis remained dependency-held.
+seconds; merge later failed on the zero-byte guard rule described above and
+analysis was cancelled.
 
 The older phase narrative below is retained as historical implementation
 context and is superseded where it says production has not launched.

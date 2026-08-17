@@ -2,6 +2,26 @@
 
 ## Executive status
 
+**Authoritative direct-analysis checkpoint (2026-08-17):** recovery commit
+`c2b10f6107ccc43620f9cb865dc3916577f91a3d` is pushed and deployed in clean
+worktree `/home/mila/c/chenje/my-project-recovery-c2b10f6`. The exclusive
+direct-analysis receipt is `submitted` for job `10390517`, with 5,000 bootstrap
+replicates and `no_preflight: true`. At the first scheduler reconciliation the
+job was `PENDING` because suitable nodes were unavailable or reserved for
+higher-priority jobs. It then started on `cn-m003` and was `RUNNING` at the
+latest check. The initial Matplotlib cache warning fell back automatically to
+a writable `/tmp` cache and is not a job failure. Do not resubmit or alter it.
+
+Merge finalize `10385970` completed and atomically published the canonical
+production datasets: 5,000 natural, 55,000 checkpoint, and 120,003 audit rows.
+Analysis `10385971` then failed `2:0` after `10:21:23` on an invalid global
+`checkpoint_id` uniqueness assertion: protocol labels `cp-00` through `cp-10`
+are intentionally reused under each natural parent. The recovery retains global
+`checkpoint_record_id` uniqueness and per-parent checkpoint consistency. It
+does not change generation, metrics, sampling, checkpoints, or the 5,000
+bootstrap analysis. `paper_analysis_ready` remains false until job `10390517`
+finishes and the final publications validate.
+
 **Authoritative recovery checkpoint (2026-08-16):** commit
 `95a434ce7ab3d03619f7aad49993dd9745dab533` is pushed and deployed at
 `/home/mila/c/chenje/my-project-recovery-95a434c`; the production checkout is

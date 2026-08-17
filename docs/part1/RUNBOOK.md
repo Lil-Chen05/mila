@@ -1,5 +1,43 @@
 # Part 1 runbook
 
+## Active direct-analysis recovery (2026-08-17)
+
+The direct full-analysis job is already submitted. Do **not** rerun
+`scripts/submit_part1_direct_analysis_recovery.py` or submit the job script
+manually. The exclusive receipt is:
+
+```text
+/home/mila/c/chenje/my-project/results/part1/6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c/validation/direct_analysis_recovery_receipt.json
+```
+
+It binds execution commit
+`c2b10f6107ccc43620f9cb865dc3916577f91a3d`, merge-stage recovery ID
+`e5e0281eb2f01293d510bd9da10b16195aae7afa7d43c5a8878744173e031de4`,
+5,000 bootstrap replicates, and analysis job `10390517`. Use only read-only
+monitoring:
+
+```bash
+ssh mila
+squeue --jobs=10390517 --format='%i|%j|%T|%M|%l|%R'
+sacct -j 10390517 --format=JobIDRaw,JobName,State,ExitCode,Elapsed,Start,End,NodeList --parsable2
+tail -n 100 /home/mila/c/chenje/my-project-recovery-c2b10f6/logs/part1-direct-analysis-10390517.out
+```
+
+At submission reconciliation the job was `PENDING` for cluster capacity. It
+subsequently started on `cn-m003` and was `RUNNING` at the latest check. The
+initial Matplotlib cache warning used an automatic writable `/tmp` fallback and
+does not require intervention. Once it is terminal, require `COMPLETED` and
+exit `0:0`, then validate the immutable analysis publication under:
+
+```text
+/home/mila/c/chenje/my-project/results/part1/6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c/analysis/final-r5000/
+```
+
+Completion requires the final analysis manifest and summary, eight CSV tables
+with same-stem metadata, six figures, and `paper_analysis_ready: true`. A
+nonzero terminal state is evidence to diagnose; it does not authorize deleting
+the merged data, replacing the receipt, or rerunning generation.
+
 ## Current merge-stage recovery procedure (2026-08-16)
 
 The active recovery checkout is
@@ -99,7 +137,7 @@ CPU `srun` must specify `--cpu-bind=none`, and dependencies must be:
 waiver verification -> merge (afterok) -> analysis (afterok)
 ```
 
-From the clean recovery worktree, submit exactly once:
+Historical first-waiver submission command (do not run again):
 
 ```bash
 uv run python scripts/submit_part1_prompt_hash_waiver_recovery.py \
@@ -161,8 +199,9 @@ analysis: 10383207  afterok:10383206
 Do not run the launcher again. Preparation completed `0:0` in four seconds and
 published waiver ID
 `dc6d50b0a4712eedac891bb55b794b532ea5e9232f6712b85536c196851f9163`.
-At the last check merge was running on `cn-h004`, while analysis remained held
-by its exact dependency. Monitor only these IDs and the exclusive receipt.
+Merge later failed on the zero-byte guard validation rule described above, and
+analysis was cancelled by its dependency. Retain these IDs and the exclusive
+receipt as historical evidence.
 
 Do not declare completion until the recovery chain produces three canonical
 Parquet datasets, the final analysis manifest and summary, eight CSV tables,
