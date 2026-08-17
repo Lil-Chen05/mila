@@ -985,6 +985,27 @@ def test_deterministic_artifacts_sidecars_summary_and_plot_series(tmp_path: Path
         assert payload.startswith(b"\x89PNG\r\n\x1a\n") and len(payload) > 100
 
 
+def test_within_question_distribution_accepts_fixed_study_subject_order(
+    tmp_path: Path,
+) -> None:
+    import part1_analysis as analysis
+
+    source, _ = _fixture_source(tmp_path)
+    computation = analysis.compute_analysis(source, bootstrap_replicates=2)
+    tables = {
+        name: [dict(row) for row in rows]
+        for name, rows in computation.tables.items()
+    }
+    distribution = tables["within_question_distribution"]
+    for feature in analysis.FIXED_PRIMARY_AUROC_FEATURE_REGISTRY:
+        feature_rows = [row for row in distribution if row["feature"] == feature]
+        assert len(feature_rows) == 2
+        feature_rows[0]["subject"] = "high_school_physics"
+        feature_rows[1]["subject"] = "high_school_chemistry"
+
+    analysis._validate_table_semantics(tables, computation.summary)
+
+
 @pytest.mark.parametrize(
     ("case", "mutate"),
     [

@@ -1923,7 +1923,14 @@ def _validate_table_semantics(
         _validate_interval_counts(row, label="within-question summary")
     distribution = tables["within_question_distribution"]
     distribution_keys = [(row["feature"], row["subject"], row["question_id"]) for row in distribution]
-    if len(set(distribution_keys)) != len(distribution_keys) or distribution_keys != sorted(distribution_keys, key=lambda key: (list(FIXED_PRIMARY_AUROC_FEATURE_REGISTRY).index(key[0]), key[1], key[2])):
+    if len(set(distribution_keys)) != len(distribution_keys) or distribution_keys != sorted(
+        distribution_keys,
+        key=lambda key: (
+            list(FIXED_PRIMARY_AUROC_FEATURE_REGISTRY).index(key[0]),
+            FIXED_SUBJECTS.index(key[1]),
+            key[2],
+        ),
+    ):
         raise ValueError("analysis within-question distribution key contract differs")
     for row in distribution:
         if row["analysis_label"] != "within_question_paired_difference" or row["study_id"] != manifest["study_id"] or row["model_run_id"] != manifest["model_run_id"] or row["target"] != "natural_correct" or row["feature"] not in FIXED_PRIMARY_AUROC_FEATURE_REGISTRY or row["subject"] not in FIXED_SUBJECTS or row["correct_run_count"] <= 0 or row["incorrect_run_count"] <= 0 or not math.isclose(row["paired_difference"], row["correct_run_mean"] - row["incorrect_run_mean"], rel_tol=0.0, abs_tol=1e-15):
