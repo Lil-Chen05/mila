@@ -1,7 +1,7 @@
 [project]
-name = "my-project"
-version = "0.1.0"
-description = "Add your description here"
+name = "beyond-endpoint-confidence"
+version = "1.0.0"
+description = "Reproducibility artifacts for uncertainty signals across SmolLM3-3B reasoning trajectories on MMLU"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

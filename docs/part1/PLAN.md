@@ -1,6 +1,25 @@
 # Part 1 implementation plan
 
-## Active publication recovery (2026-08-17)
+## Final state
+
+All three implementation phases and their production lifecycle are complete.
+The fixed study generated 5,000 trajectories, recovery validation published
+the canonical 5,000/55,000/120,003-row merge, the immutable 5,000-bootstrap
+`final-r5000` analysis records `paper_analysis_ready: true`, and the reviewed
+paper is available at [../../report/main.pdf](../../report/main.pdf). No plan
+step remains active and no historical job may be resubmitted.
+
+Final reporting preserves three provenance classes: **fixed** exports,
+**repaired** verbalized confidence, and the **reconstructed intended analysis**
+of prefix reasoning entropy. Their definitions and caveats are in the final
+[results validation summary](../../analysis/final-r5000/RESULTS_VALIDATION_SUMMARY.md).
+
+The dated material below is the preserved implementation/recovery record. Any
+statement that work was pending or production absent describes that historical
+checkpoint and is superseded by this final state. The exact operational
+chronology is centralized in [OPERATIONS_HISTORY.md](OPERATIONS_HISTORY.md).
+
+## Historical publication recovery (2026-08-17)
 
 The full direct analysis completed all calculations and wrote all 24 expected
 artifacts, then failed its final reload because the validator sorted subjects
@@ -30,9 +49,9 @@ as job `10390517`; the durable receipt records `no_preflight: true` and status
 writing the complete stage. Publication recovery `10391026` validated and
 published that stage successfully. Do not resubmit the launcher.
 
-## Authority and current phase
+## Historical authority and phase record
 
-**Current execution plan (2026-08-16):** recovery commit
+**Execution plan as of 2026-08-16:** recovery commit
 `95a434ce7ab3d03619f7aad49993dd9745dab533` is deployed separately while the
 production checkout remains clean at
 `ffa998a7ee1f156e150c8da33b258165ee53e032`. Merge `10383206` completed the
@@ -49,7 +68,7 @@ Both were pending at submission; the latest check has finalize running on
 `cn-h001` and analysis dependency-held. Completion still requires the canonical
 merge and all final analysis artifacts with `paper_analysis_ready: true`.
 
-**Current recovery phase (2026-08-15):** the authorized `%16` production
+**Recovery phase as of 2026-08-15:** the authorized `%16` production
 generation is complete at commit
 `ffa998a7ee1f156e150c8da33b258165ee53e032` for model run
 `6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c`.
@@ -64,10 +83,10 @@ validator compares it against the manifest-level prompt-contract hash, the
 55,000 checkpoints cascade from rejected parents, and the final error is the
 aggregate physical-count consequence. Zero warnings were recorded.
 
-The remaining execution plan is deliberately narrow. Steps 1 and 2 are
-complete in reviewed recovery commit
-`1a4b6039758cd8fd84b68f74c0828e6c5f382dae`; the submitted chain is now
-performing steps 3 through 6:
+The remaining execution plan at that checkpoint was deliberately narrow. Steps
+1 and 2 were complete in reviewed recovery commit
+`1a4b6039758cd8fd84b68f74c0828e6c5f382dae`; the submitted chain covered steps
+3 through 6:
 
 1. finish and independently verify the recovery-only waiver implementation;
 2. bind a waiver sidecar to the exact failed-report bytes/ID, model run,
@@ -100,9 +119,8 @@ context and is superseded where it says production has not launched.
 The first unattended chain ended safely: full-shape acceptance `10347033`
 timed out after 12 hours during merge, exact-`afterok` gate `10347034` was
 cancelled, and no production job was submitted. The full-shape rehearsal is
-explicitly waived rather than repeated. Recovery uses the focused-readiness
-bootstrap in root `HANDOFF.md`; its receipt and exact deployed commit become
-authoritative when submitted.
+explicitly waived rather than repeated. The later focused-readiness recovery is
+preserved in [OPERATIONS_HISTORY.md](OPERATIONS_HISTORY.md).
 
 This plan implements the fixed Part 1 contract in [DECISIONS.md](DECISIONS.md).
 The executable data contract is summarized in [SCHEMA.md](SCHEMA.md), operator
@@ -110,20 +128,20 @@ procedures are in [RUNBOOK.md](RUNBOOK.md), and acceptance evidence is in
 [VALIDATION.md](VALIDATION.md). Scientific changes require explicit approval and
 a versioned manifest change.
 
-**Current phase: Phase 3 Task 8 is in progress.** CPU materialization and
+**Historical Phase 3 snapshot:** CPU materialization and
 manifest validation, GPU preflight, Mila filesystem/scheduler checks,
 same-environment reproducibility, both Phase 2 bounded GPU smokes, and reviewed
 Phase 3 implementation Tasks 1–7 are complete. Final bounded Phase 3 smoke job
 `10324103` completed `0:0` in `01:27:13`; its stable shard contains exactly 10
 natural results, 110 checkpoint results, and 240 audit events, and direct
 integrity validation passed. The hardened CLI validator is implemented,
-independently approved, and locally regression-tested; its retained-smoke Mila
-execution is pending. The corrected full-shape synthetic acceptance completed
+independently approved, and locally regression-tested. The corrected
+full-shape synthetic acceptance completed
 strict coverage on Mila but timed out during merge. The timeout exposed
 conservative resource limits, not a scientific or schema defect. The user
-waived a repeat in favor of a short focused-readiness job. No production
-model-run manifest exists, production readiness has not been established, and
-the full experiment is unsubmitted.
+waived a repeat in favor of a short focused-readiness job. At that checkpoint
+the production model-run manifest did not yet exist and the experiment was
+unsubmitted; the production and analysis lifecycle subsequently completed.
 
 Historical root documentation, old 20q/200q code, results, and analyses remain
 pilot artifacts. They are not instructions or evidence for Part 1.
@@ -358,18 +376,18 @@ reproducibility, Smoke A, and Smoke B criteria are passed. The full
 2026-08-11 authorization applies only after every remaining Phase 3 gate
 passes.
 
-## Phase 3 — completion
+## Phase 3 — completed
 
-Phase 3 Tasks 1–7 are implemented, independently reviewed, and deployed to Mila
-at `a7e1135e85476f5fc43986949f467b10ba450623`. Task 8 is in progress. Its one
+Phase 3 Tasks 1–7 were implemented, independently reviewed, and deployed to Mila
+at `a7e1135e85476f5fc43986949f467b10ba450623`. Its one
 authorized final bounded smoke, job `10324103`, completed `0:0` in `01:27:13`.
 The terminal artifacts contain exactly 10 natural results, 110 checkpoint
 results, and 240 audit events; direct shape, provenance, hierarchy, and
-lifecycle integrity validation passed. This is bounded non-production evidence,
-not production readiness. Hardened CLI-validator acceptance remains pending,
-and no production array has been submitted.
+lifecycle integrity validation passed. This was bounded non-production
+evidence; the later production and recovery completion is summarized at the
+top of this file.
 
-Task 8 uses this fail-closed order:
+Task 8 used this fail-closed order:
 
 1. retain completed real-model smokes as historical evidence, and use strict
    validation on the actual production shards after generation;
@@ -390,5 +408,5 @@ Task 8 uses this fail-closed order:
 8. operate the authorized chain to the four-day deadline without advancing the
    tracked Mila checkout.
 
-No step above is presently evidence that hardened CLI acceptance, production
-manifest creation, readiness, or launch has passed.
+The ordered lifecycle subsequently completed. This list explains the
+fail-closed launch design and is not a checklist to rerun.

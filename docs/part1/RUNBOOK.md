@@ -1,5 +1,38 @@
 # Part 1 runbook
 
+## Current maintenance mode
+
+The operational lifecycle is complete. Production generation, recovery merge,
+`final-r5000` analysis, and paper readiness all passed; there is no active job
+to monitor or continue. This runbook now serves two purposes only: login-safe,
+read-only verification of tracked contracts and preservation of historical
+procedures. Do not execute any submission/recovery launcher or submit its job
+script manually.
+
+The immutable endpoint is model run
+`6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c`,
+canonical merged shape 5,000 natural / 55,000 checkpoint / 120,003 audit, and
+analysis manifest hash
+`ea1e182034bd66fee2c7300e67f4db2a583965474d5e510a2f176136265cce9c`
+with `paper_analysis_ready: true`. The full no-resubmission ledger is in
+[OPERATIONS_HISTORY.md](OPERATIONS_HISTORY.md).
+
+When inspecting or exporting results, preserve the final provenance labels:
+**fixed** exports, **repaired** verbalized confidence, and **reconstructed
+intended analysis** prefix reasoning entropy. These are not interchangeable.
+
+Safe repository checks are limited to pure/synthetic paths such as:
+
+```bash
+uv run python scripts/validate_part1_manifests.py
+uv run python scripts/part1_dry_run.py
+uv run pytest -q
+```
+
+Do not pass `--dataset-cache` on a Mila login node because that option loads a
+Hugging Face dataset. Never load a model, tokenizer, or dataset on a login
+node.
+
 ## Completed publication-only recovery (2026-08-17)
 
 Job `10391026` completed `0:0` in nine seconds from clean recovery commit
@@ -52,14 +85,15 @@ published the exact stage under:
 /home/mila/c/chenje/my-project/results/part1/6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c/analysis/final-r5000/
 ```
 
-Completion requires the final analysis manifest and summary, eight CSV tables
-with same-stem metadata, six figures, and `paper_analysis_ready: true`. A
+Acceptance required—and the published analysis now contains—the final analysis
+manifest and summary, eight CSV tables with same-stem metadata, six figures,
+and `paper_analysis_ready: true`. A
 nonzero terminal state is evidence to diagnose; it does not authorize deleting
 the merged data, replacing the receipt, or rerunning generation.
 
-## Current merge-stage recovery procedure (2026-08-16)
+## Historical merge-stage recovery procedure (2026-08-16)
 
-The active recovery checkout is
+The recovery checkout at that time was
 `/home/mila/c/chenje/my-project-recovery-95a434c` at
 `95a434ce7ab3d03619f7aad49993dd9745dab533`. Keep the production checkout
 clean and pinned at `ffa998a7ee1f156e150c8da33b258165ee53e032`.
@@ -85,8 +119,9 @@ finalize: 10385970
 analysis: 10385971  afterok:10385970
 ```
 
-At the latest check, finalize was running on `cn-h001`; analysis remained
-dependency-held.
+At that checkpoint, finalize was running on `cn-h001`; analysis remained
+dependency-held. Finalize later completed, and publication recovery `10391026`
+published the final analysis.
 
 Use only read-only checks:
 
@@ -260,7 +295,7 @@ production manifest or GPU job was created. Do not resubmit either historical
 job. Use only the focused-readiness bootstrap below and treat its receipts as
 the operational source of truth.
 
-## Current Phase 3 continuation checkpoint (2026-08-11)
+## Historical Phase 3 continuation checkpoint (2026-08-11)
 
 The reviewed Phase 3 tree is deployed on Mila at
 `a7e1135e85476f5fc43986949f467b10ba450623`. All submission preflights passed,
@@ -290,7 +325,7 @@ checks passed; and no production root was created. Abnormal successful output
 remains data. Hardened CLI-validator acceptance is a separate remaining gate
 and has **not** passed merely because these direct checks passed.
 
-Continue Phase 3 Task 8 in this exact order:
+Phase 3 Task 8 used this exact order:
 
 1. finish and verify the hardened CLI validator;
 2. retain completed Smoke A/B/Phase 3 jobs and counts as immutable historical
@@ -332,9 +367,8 @@ and atomically records all six job IDs under
 receipt blocks automatic resubmission. It is safe to disconnect only after the
 launcher prints `status=submitted`; confirm its two job IDs with `squeue`.
 
-The launch-plan report prints the exact self-contained production command with
-the immutable model-run ID embedded. Its shape, which remains unrun until step
-8, is:
+The launch-plan report printed the exact self-contained production command with
+the immutable model-run ID embedded. Its historical shape was:
 
 ```bash
 sbatch --export=ALL,MODEL_RUN_ID=<model-run-id> \
@@ -384,29 +418,28 @@ kill-prevention ceilings, not expected runtimes. Validation of real outputs,
 canonical merge, and final analysis remain mandatory; the waived work is only
 the duplicate pre-launch synthetic rehearsal.
 
-This authorization does not establish hardened CLI acceptance, create the
-production manifest, pass launch readiness, or prove that submission occurred.
+At that checkpoint, authorization alone did not establish hardened CLI
+acceptance, create the production manifest, pass launch readiness, or prove
+submission. The later operations history records their completion.
 
-## Status and safety boundary
+## Historical pre-production status and enduring safety boundary
 
 Phase 1's login-safe infrastructure remains implemented and Phase 2 is
 complete. Authoritative Smoke A job `10284742` completed `0:0` in `01:26:28`
 on `cn-l018`; authoritative Smoke B job `10292530` completed `0:0` in
 `00:25:14` on `cn-l072`. Both non-production smokes reached terminal runner
 state `complete` and passed manifest, dry-run, and lifecycle validation with 0
-errors and 0 warnings. Phase 3 Tasks 1–7 are implemented and reviewed; Task 8
-continues after bounded smoke job `10324103` completed `0:0` in `01:27:13` with
-the exact 10 natural/110 checkpoint/240 audit shape and passing direct integrity
-validation. Hardened CLI-validator acceptance is still pending. No production
-root/model-run manifest exists, launch readiness has not passed, and the full
-500-question job remains unrun.
+errors and 0 warnings. At this historical checkpoint, Phase 3 Tasks 1–7 were
+implemented and reviewed, Task 8 followed bounded smoke job `10324103`, and
+production had not yet launched. The current completed state is recorded at the
+top of this runbook.
 
 Never load a model, tokenizer, or Hugging Face dataset on a login node. Dataset
 materialization runs in a CPU SLURM job. Model/tokenizer preflight and generation
 run in a GPU SLURM job. The user explicitly authorized the post-readiness full
-run on 2026-08-11, with target concurrency `%16` and a four-day deadline. This
-runbook records that eventual command but marks it unrun until every ordered
-gate passes. The authorization changes none of the 500 × 10 × 11 protocol.
+run on 2026-08-11, with target concurrency `%16` and a four-day deadline. At
+this historical checkpoint the command remained unrun until every ordered gate
+passed. The authorization changed none of the 500 × 10 × 11 protocol.
 
 Scientific settings are in [DECISIONS.md](DECISIONS.md), exact record contracts
 in [SCHEMA.md](SCHEMA.md), phase gates in [PLAN.md](PLAN.md), current state in
@@ -421,14 +454,17 @@ in [SCHEMA.md](SCHEMA.md), phase gates in [PLAN.md](PLAN.md), current state in
   `HF_HOME=$SCRATCH/hf_cache` before access.
 - `results/part1-smoke/` and `results/part1/` are separate, narrow ignored
   roots. Phase 1 allows only smoke-mode configuration validation and performs no
-  generation.
+  generation. The completed production operational manifest remains an
+  external ignored artifact bound to the immutable model-run ID; it is not a
+  tracked repository file.
 - Tracked question JSONL/sidecar and study manifest live under
   `manifests/part1/`. They are authoritative, are not ignored, and were
   validated and committed in `2e0bcae`. The saved dataset under `data/part1/`
   is an ignored reproducible cache.
 - Operational model-run manifests and raw shards are generated and ignored.
-  No production model-run manifest exists; its Phase 3 creation follows the
-  final production commit and clean-worktree gate.
+  The completed production model-run manifest was created only after the final
+  production commit and clean-worktree gate and remains external to the tracked
+  repository.
 
 Configuration validation refuses an omitted/mismatched root, smoke/production
 aliasing, `/tmp`, `/private/tmp`, literal `$SLURM_TMPDIR`, and paths under its
@@ -918,14 +954,16 @@ effective generation settings, confidence boundary/null matrices, and the
 structured final-10%-of-reasoning tail-entropy rule. Recomputing IDs and hashes
 does not make drifted science compatible.
 
-## Remaining Phase 3 lifecycle
+## Completed Phase 3 lifecycle
+
+The following is the historical fail-closed order, now fully complete:
 
 1. CPU materialization, tracked-manifest validation/commit, GPU preflight,
    filesystem/scheduler checks, corrected reproducibility, Smoke A, and Smoke
    B are complete.
 2. Analysis, complete raw validation, validate-before-publish merge, and SLURM
-   launch-readiness machinery are implemented and independently reviewed at
-   `a7e1135`; operational launch readiness has not passed.
+   launch-readiness machinery were implemented and independently reviewed at
+   `a7e1135`.
 3. Bounded Phase 3 smoke job `10324103` completed `0:0` in `01:27:13`; its
    exact 10 natural/110 checkpoint/240 audit shape and direct integrity checks
    passed.
@@ -941,5 +979,7 @@ does not make drifted science compatible.
 7. Pass production launch-readiness/launch-plan validation for `0-499%16` under
    the unchanged 500 × 10 × 11 protocol.
 8. Only then use the explicit 2026-08-11 authorization to launch and operate to
-   the four-day deadline. The production manifest, readiness result, and launch
-   remain absent at this checkpoint.
+   the four-day deadline.
+
+This sequence culminated in completed generation, merge, analysis, and paper
+readiness. It is retained for audit and must not be replayed.

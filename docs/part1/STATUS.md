@@ -1,6 +1,28 @@
 # Part 1 status
 
-## Executive status
+## Final repository state
+
+Part 1 is complete: 500 fixed questions produced 5,000 natural trajectories
+and 55,000 checkpoint records; merge finalize `10385970` published the
+canonical 5,000 natural, 55,000 checkpoint, and 120,003 audit rows; publication
+job `10391026` validated the immutable 5,000-bootstrap `final-r5000` analysis;
+and the final paper is [../../report/main.pdf](../../report/main.pdf).
+Correctness analysis uses 3,550 evaluable trajectories (3,172 correct, 378
+incorrect), with 84 mixed-outcome questions in the within-question cohort.
+
+The analysis manifest hash is
+`ea1e182034bd66fee2c7300e67f4db2a583965474d5e510a2f176136265cce9c`
+and records `paper_analysis_ready: true`. Outputs remain explicitly labeled
+**fixed**, **repaired** (verbalized confidence), or **reconstructed intended
+analysis** (prefix reasoning entropy). No production, recovery, merge, or
+analysis job may be resubmitted.
+
+The dated checkpoints below are a historical ledger. Statements that a job was
+pending, readiness had not passed, or production was absent describe the state
+at that timestamp and are superseded by this final repository state. See
+[OPERATIONS_HISTORY.md](OPERATIONS_HISTORY.md) for the consolidated chronology.
+
+## Final publication checkpoint
 
 **Authoritative publication-recovery checkpoint (2026-08-17):** commit
 `054d02d4dc4d1a7c24e7806fe3424ab69b899f6f` is pushed and deployed cleanly at
@@ -19,6 +41,8 @@ expected artifacts, because its final validator expected alphabetical subject
 order while the producer correctly used the fixed study order. The preserved
 summary and manifest record `paper_analysis_ready: true`; publication recovery
 validated and promoted that exact stage successfully.
+
+## Historical execution ledger
 
 **Earlier direct-analysis checkpoint (2026-08-17):** recovery commit
 `c2b10f6107ccc43620f9cb865dc3916577f91a3d` is pushed and deployed in clean
@@ -91,8 +115,9 @@ launcher submitted waiver preparation `10383205`, merge/check `10383206` with
 `afterok:10383205`, and final analysis `10383207` with `afterok:10383206`.
 Preparation completed `0:0` in four seconds and published waiver ID
 `dc6d50b0a4712eedac891bb55b794b532ea5e9232f6712b85536c196851f9163`;
-merge subsequently failed as described above and analysis was cancelled.
-`paper_analysis_ready` is not yet true; do not resubmit this chain.
+merge subsequently failed as described above and analysis was cancelled. At
+that checkpoint `paper_analysis_ready` was not yet true; the later publication
+recovery passed it. Do not resubmit this chain.
 
 The historical chronology below predates this checkpoint where it says that no
 production manifest, production root, or array exists.
@@ -105,12 +130,13 @@ production model-run manifest, production receipt, or GPU array was created.
 Historical operational evidence remains under
 `results/part1-submission/96822f88c0a38bac4a35f29e90caf601831e7f50/`.
 The user explicitly waived another full-shape synthetic rehearsal. Recovery
-uses a one-hour CPU-only focused regression job followed by the existing exact
-`afterok` production gate. See root `HANDOFF.md` for continuation.
+used a one-hour CPU-only focused regression job followed by the existing exact
+`afterok` production gate. See [OPERATIONS_HISTORY.md](OPERATIONS_HISTORY.md)
+for the completed continuation.
 
-**Phase 3 implementation is complete through Tasks 1–7 on branch
-`codex/phase1-infrastructure`; Task 8 remains in progress after the successful
-final bounded Phase 3 smoke.** The reviewed generation, validation, merge,
+**Historical Phase 3 snapshot:** Tasks 1–7 were complete on branch
+`codex/phase1-infrastructure`, and Task 8 followed the successful final bounded
+Phase 3 smoke. The reviewed generation, validation, merge,
 trajectory, statistics, bootstrap, and analysis code was deployed on Mila at
 `a7e1135e85476f5fc43986949f467b10ba450623`. Job `10324103` completed `0:0` in
 `01:27:13`. Its generated smoke model-run ID is
@@ -119,8 +145,8 @@ The stable shard contains exactly 10 natural results, 110 checkpoint results,
 and 240 audit events, and direct integrity validation passed. The hardened CLI
 validator is implemented, independently approved, and passed 57 focused plus
 291 regression tests. All completed smokes retain their historical acceptance;
-strict live validation targets the actual production shards after generation.
-Production readiness has not yet passed.
+strict live validation later targeted the actual production shards. Production
+readiness had not yet passed at this historical checkpoint.
 
 Pre-submission gates passed on Mila: the tracked tree was clean at the exact
 commit above; `uv.lock` matched preflight SHA-256
@@ -142,9 +168,9 @@ as historical evidence and is no longer a launch gate. The replacement
 `jobs/part1_launch_readiness.sh` runs focused regressions while explicitly
 excluding the full-shape marker; the conditional gate submits the `%16` chain
 only after readiness passes. The exact local readiness command passed 797 tests
-with one full-shape test deselected in `943.13s`. No production model-run
-manifest or production root exists, and the full array has not yet been
-submitted.
+with one full-shape test deselected in `943.13s`. At that checkpoint no
+production model-run manifest or production root existed and the full array had
+not yet been submitted.
 
 Recovery readiness job `10357631` exposed one cross-platform test-fixture
 assumption: pytest places `tmp_path` under `/tmp` on Mila, so the ephemeral-root
@@ -390,11 +416,12 @@ artifacts while retaining the production gate:
 1. The tracked question JSONL, question sidecar, and model-independent study
    manifest exist under `manifests/part1/`, were produced by job `10284018`,
    independently validated, and were committed in `2e0bcae`.
-2. Non-production model-run manifests exist under
-   `results/part1-smoke/model-runs/` for preflight/reproducibility/smoke use.
-   No production instance exists. Phase 3 may create one only after the final
-   production commit and a clean tracked-worktree gate, under the ignored
-   persistent production root.
+2. Non-production model-run manifests remain under
+   `results/part1-smoke/model-runs/` as historical preflight/reproducibility
+   evidence. The completed production instance is model run
+   `6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c`,
+   bound to generation commit `ffa998a7ee1f156e150c8da33b258165ee53e032`
+   under the ignored persistent production root.
 
 Smoke and production roots are distinct and ignored. Phase 1 configuration
 rejects production mode, ambiguous roots, explicit/expanded ephemeral roots,
@@ -442,7 +469,7 @@ The evidence listed in this subsection is the historical Phase 1 synthetic
 evidence. The separate Phase 2 operational ledger above records the completed
 Mila dataset, GPU, filesystem, scheduler, and reproducibility gates.
 
-## Current output contract
+## Persisted output contract
 
 A bound active shard may contain:
 

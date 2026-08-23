@@ -1,5 +1,20 @@
 # Part 1 scientific and engineering decisions
 
+## Completion status
+
+This immutable contract was executed to completion. The study generated 5,000
+natural trajectories and 55,000 checkpoint records, published the canonical
+merge, completed the 5,000-bootstrap `final-r5000` analysis with
+`paper_analysis_ready: true`, and produced the reviewed paper at
+[../../report/main.pdf](../../report/main.pdf). Completion does not relax or
+retroactively change any decision below.
+
+Final reporting distinguishes **fixed** analysis exports, **repaired**
+verbalized confidence, and the **reconstructed intended analysis** of prefix
+reasoning entropy. Those provenance labels are part of the interpretation
+boundary; see the final
+[results validation summary](../../analysis/final-r5000/RESULTS_VALIDATION_SUMMARY.md).
+
 ## Authority
 
 This file records the immutable scientific protocol established in Prompt 1.
@@ -13,14 +28,15 @@ The 20-question and 200-question code, documentation, results, and analyses are
 historical pilots. Their greedy one-run design and cohort rules do not define
 Part 1.
 
-## Production authorization and unchanged protocol
+## Historical production authorization and unchanged protocol
 
 On 2026-08-11, the user explicitly authorized the full production run after all
-readiness gates pass, with target array concurrency `%16` and a four-day
-deadline. This is operational authorization only: it does not establish
-hardened CLI-validator acceptance, production-manifest creation, readiness, or
-launch, and it does not waive final verification, independent review, the
-final-commit/clean-tree gate, or immutable provenance.
+readiness gates passed, with target array concurrency `%16` and a four-day
+deadline. This was operational authorization only: by itself it did not
+establish hardened CLI-validator acceptance, production-manifest creation,
+readiness, or launch, and it did not waive final verification, independent
+review, the final-commit/clean-tree gate, or immutable provenance. Those gates
+subsequently passed through the recorded production/recovery lifecycle.
 
 The authorization changes no scientific decision. Production remains exactly
 the fixed 500-question manifest, 10 stochastic natural runs per model-question
@@ -45,11 +61,11 @@ predicts whether the model's naturally generated final answer is correct.
 - Natural generation is stochastic and checkpoint probing is greedy. A valid
   disagreement between the natural answer and checkpoint 1.0 is data, not an
   invariant violation, retry condition, or invalid record.
-- The current implementation scope is only
+- The completed implementation scope is only
   `HuggingFaceTB/SmolLM3-3B` in thinking mode. Later models must reuse the same
   study through a shared Hugging Face interface and model-specific adapters.
-- Later models and the later answerable-versus-unanswerable MMLU study are out
-  of scope for the current four-prompt sequence.
+- Later models and the later answerable-versus-unanswerable MMLU study were out
+  of scope for the completed Part 1 sequence and require a new versioned study.
 
 ## Fixed question design
 

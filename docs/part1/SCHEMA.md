@@ -2,6 +2,22 @@
 
 ## Status and authority
 
+The schema and identity lifecycle was executed to completion: production
+generation, canonical merge, `final-r5000` analysis, and paper readiness all
+completed. The tracked question/study bundle remains immutable; production
+model run `6b29188239ffa494ddb5f409f6dba2db510bcb9c3b6f8f7ada81c524af4d1e7c`
+is bound to generation commit
+`ffa998a7ee1f156e150c8da33b258165ee53e032`; the canonical merge contains
+5,000 natural, 55,000 checkpoint, and 120,003 audit rows; and the published
+analysis manifest records `paper_analysis_ready: true`. Operational manifests
+and raw/merged data remain ignored external artifacts; their absence from a
+fresh checkout does not mean production was never created.
+
+Downstream reporting distinguishes **fixed** exports, **repaired** verbalized
+confidence, and **reconstructed intended analysis** prefix reasoning entropy.
+Those labels describe analysis provenance; they do not redefine raw record,
+identity, manifest, or lifecycle schemas in this file.
+
 Phase 1 implements the base contract in `scripts/part1_contract.py`,
 `scripts/part1_store.py`, `scripts/part1_failure_policy.py`, and
 `scripts/part1_runtime.py`. Phase 2 local preparation adds question/study
@@ -18,19 +34,18 @@ resolved the immutable MMLU revision to
 `c30699e8356da336a370243923dbaf21066bb9fe`; completed GPU preflight resolved
 the real model/tokenizer revision to
 `a07cc9a04f16550a088caea529712d1d335b0ac1`. Non-production model-run
-instances exist only under the ignored smoke root. No production model-run
-instance exists; Phase 3 owns its post-commit lifecycle. Bounded Phase 3 smoke
-job `10324103` completed `0:0` in `01:27:13` with exactly 10 natural terminal
-records, 110 checkpoint terminal records, and 240 audit events, and direct
-integrity validation passed. That non-production evidence does not create or
-validate a production instance; hardened CLI-validator acceptance remains
-pending.
+instances remain under the ignored smoke root as historical evidence. Bounded
+Phase 3 smoke job `10324103` completed `0:0` in `01:27:13` with exactly 10
+natural terminal records, 110 checkpoint terminal records, and 240 audit
+events, and direct integrity validation passed. The later production lifecycle
+created and validated the separate production instance identified above.
 
 The user's explicit 2026-08-11 post-readiness production authorization, target
 array concurrency `%16`, and four-day deadline are operational controls, not
 schema or identity inputs. They do not alter the fixed 500-question × 10-run ×
-11-checkpoint protocol, any manifest payload, or any stable hash. No production
-manifest, readiness result, or launch is implied by recording them here.
+11-checkpoint protocol, any manifest payload, or any stable hash. The later
+production evidence comes from immutable receipts and artifacts, not from
+recording authorization here.
 
 Historical 20q/200q JSON is legacy and incompatible. It must not be upgraded by
 silently filling missing provenance.

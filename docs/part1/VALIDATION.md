@@ -1,5 +1,29 @@
 # Part 1 validation ledger and acceptance matrix
 
+## Final acceptance state
+
+All final gates are closed. Production generation completed with 500 finalized
+shards and exact 5,000-natural/55,000-checkpoint shape; recovery merge published
+5,000 natural, 55,000 checkpoint, and 120,003 audit rows; publication job
+`10391026` validated and atomically promoted the 24-artifact `final-r5000`
+analysis; the analysis manifest hash
+`ea1e182034bd66fee2c7300e67f4db2a583965474d5e510a2f176136265cce9c`
+records `paper_analysis_ready: true`; and the reviewed paper is
+[../../report/main.pdf](../../report/main.pdf).
+
+The final correctness cohort is 3,550 evaluable trajectories (3,172 correct,
+378 incorrect), including 84 mixed-outcome questions for within-question
+analysis. Final outputs retain explicit **fixed**, **repaired** verbalized
+confidence, and **reconstructed intended analysis** prefix-entropy provenance.
+No historical submission, validation, recovery, merge, or analysis job may be
+rerun.
+
+The dated sections below preserve evidence as it was known at each checkpoint.
+Any statement that readiness was pending or production absent is historical and
+superseded by this final acceptance state. Exact job dependencies, receipts,
+hashes, and no-resubmission warnings are consolidated in
+[OPERATIONS_HISTORY.md](OPERATIONS_HISTORY.md).
+
 ## Publication-only recovery state (2026-08-17)
 
 Direct analysis job `10390517` completed all 5,000 bootstrap calculations and
@@ -44,7 +68,7 @@ because of the fixed-order validator defect. Publication recovery `10391026`
 subsequently validated and published the complete stage; final-paper acceptance
 is recorded in the authoritative section above.
 
-## Current preserved-stage recovery state (2026-08-16)
+## Historical preserved-stage recovery state (2026-08-16)
 
 Recovery commit `95a434ce7ab3d03619f7aad49993dd9745dab533` is deployed at
 `/home/mila/c/chenje/my-project-recovery-95a434c`, separate from the clean
@@ -71,9 +95,9 @@ manifest, Parquet bytes/counts/schemas, waiver and failed-report provenance,
 clean commits, and publication state before atomic rename. Exclusive receipt
 `validation/merge_stage_recovery_submission_receipt.json` records finalize
 `10385970` and analysis `10385971` with exact `afterok:10385970`; both were
-pending at submission. At the latest check, finalize was running on `cn-h001`
-and analysis was dependency-held. Final-paper readiness remains **not passed**
-until both jobs complete and all published artifacts validate.
+pending at submission. At that checkpoint, finalize was running on `cn-h001`
+and analysis was dependency-held. Finalize later published the merge, and
+publication recovery `10391026` completed final-paper acceptance.
 
 ## Production validation and exact-waiver state (2026-08-15)
 
@@ -130,9 +154,9 @@ merge/check `10383206` (`afterok:10383205`), and final analysis `10383207`
 (`afterok:10383206`) were submitted through the exclusive launcher. Preparation
 completed `0:0` in four seconds and published waiver ID
 `dc6d50b0a4712eedac891bb55b794b532ea5e9232f6712b85536c196851f9163`.
-Merge subsequently failed as described above and analysis was cancelled.
-Final-paper readiness remains **not passed** until the preserved-stage chain
-completes and its publications are validated.
+Merge subsequently failed as described above and analysis was cancelled. At
+that checkpoint final-paper readiness had not passed; the later preserved-stage
+and publication recoveries completed it.
 
 ## Full-shape timeout and approved recovery
 
@@ -153,10 +177,10 @@ Phase 3 Tasks 1–7 are implemented and independently reviewed at
 `a23087c8c0897bbf9f075b3edaa28c75b5087cffbcd203e2fea4bf16093b6dcf`.
 Its stable shard contains exactly 10 natural results, 110 checkpoint results,
 and 240 audit events, and direct terminal-state, shape, immutable provenance,
-schema, hierarchy, lifecycle, and policy-complete audit validation passed. The
-hardened CLI-validator acceptance gate remains pending. Therefore Phase 3,
-production launch readiness, and final-paper readiness are still explicitly
-**not yet passed**.
+schema, hierarchy, lifecycle, and policy-complete audit validation passed. At
+that historical checkpoint the hardened CLI-validator acceptance gate was
+still pending, so Phase 3, production launch readiness, and final-paper
+readiness had not yet passed. All later final gates subsequently completed.
 
 The submission gate itself passed on Mila:
 
@@ -180,11 +204,10 @@ The submission gate itself passed on Mila:
 | Final launch-critical local suite | **PASSED** — 257 tests in `570.14s`, excluding only the explicit full-shape marker prepared for CPU SLURM |
 | Unattended submission review | **PASSED BEFORE RECOVERY** — exact `afterok` bootstrap, exclusive receipts, race/crash reconciliation, and `%16` dependencies were independently approved; focused-readiness recovery requires fresh tests and review before submission |
 
-Continuation starts with focused readiness and the production gate in
-[RUNBOOK.md](RUNBOOK.md), not with another smoke submission. No production
-manifest or array may be created until focused readiness, immutable-manifest
-validation, final documentation, review, final commit, and clean-tree checks
-pass. Actual production shards are strictly validated after generation.
+At that checkpoint, continuation started with focused readiness and the
+production gate in [RUNBOOK.md](RUNBOOK.md), not another smoke submission. The
+later chain passed its launch gates and strictly validated the production
+artifacts; this paragraph is not a resubmission instruction.
 
 The full-shape flow is retained but no longer resubmitted. Measured runtime
 raised the post-generation CPU ceilings to 12 hours for validation, 24 hours
@@ -194,8 +217,8 @@ changes only and do not alter any metric or scientific contract.
 The user explicitly authorized the post-readiness full production run on
 2026-08-11, with target array `0-499%16` and a four-day deadline. The protocol
 remains exactly 500 questions × 10 natural runs × 11 requested checkpoints per
-successful natural run. Authorization is not acceptance evidence: no production
-manifest exists, readiness has not passed, and production has not launched.
+successful natural run. Authorization alone was not acceptance evidence; the
+subsequent production and recovery records provide that evidence.
 
 ## Evidence rules
 
@@ -519,15 +542,15 @@ full experiment remained unrun and unauthorized at that gate. The later
 2026-08-11 authorization applies only after the remaining Phase 3 readiness
 sequence passes.
 
-## Phase 3 and production-manifest gate
+## Historical Phase 3 and production-manifest gate
 
 Analysis, bootstrap/calibration, complete raw validation, validate-before-
 publish merge, and SLURM readiness hardening are implemented and independently
 reviewed. End-to-end bounded Phase 3 smoke job `10324103` completed `0:0` in
 `01:27:13`; its exact 10 natural/110 checkpoint/240 audit shape and direct
-integrity validation passed. Hardened CLI-validator execution and focused
-readiness remain pending; the duplicate synthetic full-shape rehearsal is
-explicitly waived. Phase 3 production readiness has not yet passed.
+integrity validation passed. At that checkpoint hardened CLI-validator
+execution and focused readiness remained pending; the duplicate synthetic
+full-shape rehearsal was explicitly waived. The later final gates passed.
 
 Only after focused readiness, immutable-manifest and clean-commit validation,
 with completed smokes retained as historical evidence, final documentation,
