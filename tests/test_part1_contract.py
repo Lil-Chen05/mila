@@ -1459,9 +1459,14 @@ def test_configured_generated_result_roots_are_narrowly_ignored(generated_path: 
     assert result.returncode == 0
 
 
-def test_historical_result_roots_are_not_newly_ignored() -> None:
+def test_archived_historical_results_are_not_ignored() -> None:
     result = subprocess.run(
-        ["git", "check-ignore", "-q", "results/20q/new-untracked-summary.json"],
+        [
+            "git",
+            "check-ignore",
+            "-q",
+            "archive/pilots/20q-200q/results/20q/new-untracked-summary.json",
+        ],
         cwd=Path(__file__).resolve().parents[1],
         check=False,
     )

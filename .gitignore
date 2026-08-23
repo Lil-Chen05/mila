@@ -20,9 +20,26 @@ data/
 results/*/*.shard*.jsonl
 
 # Generated Part 1 operational manifests, raw shards, events, and reports.
-# Historical results/20q and results/200q remain tracked and unaffected.
+# Historical pilot results are tracked under archive/pilots/20q-200q/.
 results/part1-smoke/
 results/part1/
 
 # Interrupted CPU materialization staging; finalized manifests remain tracked.
 manifests/.part1.materialize-*/
+
+# macOS metadata
+.DS_Store
+
+# LaTeX build artifacts (main.tex and main.pdf are tracked; the rest regenerate)
+report/*.aux
+report/*.bbl
+report/*.blg
+report/*.fdb_latexmk
+report/*.fls
+report/*.log
+report/*.out
+report/build.log
+
+# Recovered-confidence parquet artifacts: regenerable from the merged run via
+# scripts/confidence_repair.py, and too large to version.
+analysis/final-r5000/confidence/*.parquet
