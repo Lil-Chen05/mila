@@ -1,0 +1,39 @@
+analysis,subset,statistic,n,n_questions,estimate,ci_lower,ci_upper,n_boot,seed,notes
+length_descriptive,incorrect_minus_correct,median_length_difference_tokens,3550,472,304.5,193.0,398.0,5000,42,
+primary_correlation,all_evaluable,pearson_raw_length_vs_mean_entropy,3550,472,-0.12942452994528525,-0.17866169637864093,-0.07921238197565868,5000,42,
+primary_correlation,all_evaluable,pearson_log_length_vs_mean_entropy,3550,472,-0.16633642723506628,-0.22835177892004765,-0.10574964719238748,5000,42,
+primary_correlation,all_evaluable,spearman_length_vs_mean_entropy,3550,472,-0.17401704610949803,-0.24251547157663408,-0.10762210041429486,5000,42,
+secondary_correlation,all_evaluable,pearson_within_subject_log_length_vs_mean_entropy,3550,472,0.187114062769084,0.12505026189309404,0.24981213560921206,5000,42,both variables centred within subject
+secondary_correlation,all_evaluable,pearson_log_length_vs_tail_entropy,3550,472,-0.2381726968655976,-0.2890786647676301,-0.18683167220079266,5000,42,
+correlation_by_outcome,correct,pearson_log_length_vs_mean_entropy,3172,444,-0.21343089328056983,-0.2770952755879355,-0.14954385304624324,5000,42,
+correlation_by_outcome,incorrect,pearson_log_length_vs_mean_entropy,378,112,-0.36013127044569415,-0.49802738802812,-0.2125273951491778,5000,42,
+correlation_by_subject,Mathematics,pearson_log_length_vs_mean_entropy,598,91,0.2517666637397269,0.07401522593654065,0.410828271245353,5000,42,n_incorrect=10
+correlation_by_subject,Physics,pearson_log_length_vs_mean_entropy,647,93,0.2089143795236753,0.07313116633024057,0.338957957908103,5000,42,n_incorrect=98
+correlation_by_subject,Chemistry,pearson_log_length_vs_mean_entropy,578,91,0.11637595001567165,-0.028325176207157035,0.2607706251738955,5000,42,n_incorrect=75
+correlation_by_subject,Biology,pearson_log_length_vs_mean_entropy,847,99,0.16272995584584313,0.02832225243705013,0.2986420667368108,5000,42,n_incorrect=100
+correlation_by_subject,Psychology,pearson_log_length_vs_mean_entropy,880,98,0.24578095655534685,0.0813346161838421,0.4004891761446327,5000,42,n_incorrect=95
+adjusted_ols,all_evaluable,coef:intercept,3550,472,0.25196761906960213,0.15080375849907468,0.3507838564858552,5000,42,mean_entropy ~ log_length + natural_correct + C(subject); subject reference = Mathematics
+adjusted_ols,all_evaluable,coef:log_length,3550,472,0.026037785450749484,0.013381875411797329,0.03928323800765569,5000,42,mean_entropy ~ log_length + natural_correct + C(subject); subject reference = Mathematics
+adjusted_ols,all_evaluable,coef:natural_correct,3550,472,-0.08096140047238026,-0.1103066199765195,-0.0505208594588417,5000,42,mean_entropy ~ log_length + natural_correct + C(subject); subject reference = Mathematics
+adjusted_ols,all_evaluable,coef:subject[Physics],3550,472,0.17441862354564933,0.14306997445369313,0.20545293938448636,5000,42,mean_entropy ~ log_length + natural_correct + C(subject); subject reference = Mathematics
+adjusted_ols,all_evaluable,coef:subject[Chemistry],3550,472,0.23872928708527055,0.20717252360434577,0.26891123045530246,5000,42,mean_entropy ~ log_length + natural_correct + C(subject); subject reference = Mathematics
+adjusted_ols,all_evaluable,coef:subject[Biology],3550,472,0.3224429252396694,0.29494559450231767,0.3494571302562516,5000,42,mean_entropy ~ log_length + natural_correct + C(subject); subject reference = Mathematics
+adjusted_ols,all_evaluable,coef:subject[Psychology],3550,472,0.3987688276085823,0.37038371531389136,0.4258487694975287,5000,42,mean_entropy ~ log_length + natural_correct + C(subject); subject reference = Mathematics
+adjusted_ols,all_evaluable,r_squared,3550,472,0.5770538320343832,,,5000,42,
+unadjusted_ols,all_evaluable,coef:log_length,3550,472,-0.043040467720354136,-0.058709550758700636,-0.027569439444255786,5000,42,mean_entropy ~ log_length only
+interaction_ols,all_evaluable,coef:log_length_x_natural_correct,3550,472,0.0511007510642545,0.022688706056365377,0.07730546779975095,5000,42,secondary; mean_entropy ~ log_length * natural_correct + C(subject)
+auroc,mean_reasoning_entropy,auroc_natural_correct,3550,472,0.7025143951373459,0.6425539309672961,0.7577882343522281,5000,42,predictor negated so higher predicts correct
+auroc,log_reasoning_length,auroc_natural_correct,3550,472,0.7061231876805647,0.6594206599185074,0.7515647091151613,5000,42,predictor negated so higher predicts correct
+auroc,length_residualized_mean_entropy,auroc_natural_correct,3550,472,0.7440517891337564,0.6892531924917801,0.7944246749687627,5000,42,predictor negated so higher predicts correct
+auroc_paired_difference,mean_entropy_minus_log_reasoning_length,auroc_difference,3550,472,-0.003608792543218775,-0.09156049085978242,0.07984208105938839,5000,42,
+auroc_paired_difference,mean_entropy_minus_length_residualized_mean_entropy,auroc_difference,3550,472,-0.04153739399641043,-0.05301125996097324,-0.03174080374062421,5000,42,
+auroc,length_and_subject_residualized_mean_entropy,auroc_natural_correct,3550,472,0.6649310768163227,0.6030586752025259,0.7217705491794146,5000,42,"variant: residualized on log_length + C(subject), no correctness"
+auroc,length_residualized_mean_entropy_refit,auroc_natural_correct,3550,472,0.7440517891337564,0.6895338515462621,0.7938663617418831,5000,42,robustness: residualization refit within each bootstrap replicate
+joint_logistic_in_sample,all_evaluable,coef:intercept,3550,472,14.864216603758328,12.730474820186942,17.869794971907368,5000,42,in-sample descriptive; ridge=1e-6; not cross-validated
+joint_logistic_in_sample,all_evaluable,coef:mean_entropy,3550,472,-6.117022150628818,-8.366063584584687,-4.036972251893352,5000,42,in-sample descriptive; ridge=1e-6; not cross-validated
+joint_logistic_in_sample,all_evaluable,coef:log_length,3550,472,-1.1878256709365873,-1.486152117504124,-0.9385018046139556,5000,42,in-sample descriptive; ridge=1e-6; not cross-validated
+joint_logistic_in_sample,all_evaluable,coef:subject[Physics],3550,472,-1.4836667263894274,-2.785958145404546,-0.5499930323264715,5000,42,in-sample descriptive; ridge=1e-6; not cross-validated
+joint_logistic_in_sample,all_evaluable,coef:subject[Chemistry],3550,472,-0.8808330051448988,-2.2533344464704737,0.12855261318815253,5000,42,in-sample descriptive; ridge=1e-6; not cross-validated
+joint_logistic_in_sample,all_evaluable,coef:subject[Biology],3550,472,-1.065550790601988,-2.4559005059303187,-0.01005616132725169,5000,42,in-sample descriptive; ridge=1e-6; not cross-validated
+joint_logistic_in_sample,all_evaluable,coef:subject[Psychology],3550,472,-0.8210780881197596,-2.2775332235758174,0.3457301589219212,5000,42,in-sample descriptive; ridge=1e-6; not cross-validated
+joint_logistic_in_sample,all_evaluable,in_sample_auroc,3550,472,0.8214177292046144,0.7822984095805006,0.8570434824234977,5000,42,IN-SAMPLE ONLY; coefficients fit on the full cohort then scored on it

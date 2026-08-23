@@ -1,0 +1,16 @@
+\begin{table*}[t]\centering
+\begin{tabular}{lrrr r}
+\toprule
+Subject & Evaluable, $n$ (\%) & Correct / Incorrect & Acc.\ (\%) & Mixed-outcome Q \\
+\midrule
+Mathematics & 598 (59.8) & 588 / 10 & 98.3 & 6 \\
+Physics & 647 (64.7) & 549 / 98 & 84.9 & 21 \\
+Chemistry & 578 (57.8) & 503 / 75 & 87.0 & 21 \\
+Biology & 847 (84.7) & 747 / 100 & 88.2 & 18 \\
+Psychology & 880 (88.0) & 785 / 95 & 89.2 & 18 \\
+\midrule \textbf{Total} & 3,550 (71.0) & 3,172 / 378 & 89.4 & 84 \\
+\bottomrule
+\end{tabular}
+\caption{Final natural-run cohort and evaluability by subject. Each subject contributed 100 questions $\times$ 10 stochastic trajectories (1{,}000 runs; 5{,}000 total), and every run completed, but a natural final answer could be parsed for only 3{,}550 (71.0\%), unevenly across subjects. \emph{Acc.} is accuracy \emph{among evaluable runs} only; because evaluability is subject- and length-selected, per-subject accuracies are not directly comparable (e.g.\ Mathematics is 98.3\% on a cohort missing 40\% of its runs). \emph{Mixed-outcome Q} counts questions with at least one naturally correct and one naturally incorrect evaluable run --- the within-question base cohort for RQ2.}
+\label{tab:cohort}
+\end{table*}

@@ -1,0 +1,92 @@
+{
+  "auroc": {
+    "Inverse log trajectory length (baseline)": {
+      "auc": 0.7061231876805647,
+      "lo": 0.6594206599185074,
+      "hi": 0.7515647091151613,
+      "n": 3550
+    },
+    "Mean reasoning-token entropy": {
+      "auc": 0.7025143951373459,
+      "lo": 0.6440649316109024,
+      "hi": 0.7573977070740314,
+      "n": 3550
+    },
+    "Endpoint answer-choice entropy": {
+      "auc": 0.6799108102299591,
+      "lo": 0.6236503132527267,
+      "hi": 0.7340753050662516,
+      "n": 3468
+    },
+    "Verbalized confidence": {
+      "auc": 0.6293325190521633,
+      "lo": 0.5796155662129231,
+      "hi": 0.6768846853745738,
+      "n": 3542
+    },
+    "Tail reasoning-token entropy": {
+      "auc": 0.5839788626673873,
+      "lo": 0.5327212492452131,
+      "hi": 0.6305360578056062,
+      "n": 3550
+    },
+    "Stabilization": {
+      "auc": 0.5605366151937591,
+      "lo": 0.4915628046845437,
+      "hi": 0.6315500092235391,
+      "n": 3467
+    },
+    "Answer switching": {
+      "auc": 0.5047747486272076,
+      "lo": 0.4611730248003873,
+      "hi": 0.5488581570572832,
+      "n": 3550
+    }
+  },
+  "calibration": {
+    "target": "natural final-answer correctness",
+    "common_cohort_n": 3466,
+    "endpoint_matches_natural_fraction": 1.0,
+    "selected_answer_prob_ECE": 0.09963847459737157,
+    "endpoint_checkpoint_confidence_ECE": 0.04404212348528554
+  },
+  "paired_diff_common_cohort_n": 3459,
+  "paired_diff_mean_entropy_minus": {
+    "Endpoint answer-choice entropy": {
+      "diff": 0.02656091888725176,
+      "lo": -0.06434474356440557,
+      "hi": 0.11756439406787346
+    },
+    "Verbalized confidence": {
+      "diff": 0.07633900832608431,
+      "lo": 0.026689373482996392,
+      "hi": 0.12848763482446646
+    },
+    "Answer switching": {
+      "diff": 0.2005481190860836,
+      "lo": 0.12460782203667586,
+      "hi": 0.27300804893769
+    },
+    "Stabilization": {
+      "diff": 0.14743249480729292,
+      "lo": 0.048585953495517684,
+      "hi": 0.24185022291248767
+    }
+  },
+  "length_baseline": {
+    "predictor": "inverse log reasoning_token_count",
+    "cohort": "evaluable natural trajectories (natural_correct.notna())",
+    "n": 3550,
+    "n_boot": 5000,
+    "seed": 42,
+    "auroc": 0.7061231876805647,
+    "lo": 0.6594206599185074,
+    "hi": 0.7515647091151613,
+    "paired_diff_mean_entropy_minus_length": {
+      "diff": -0.003608792543218775,
+      "lo": -0.09156049085978242,
+      "hi": 0.07984208105938839
+    },
+    "note": "paired difference reported in text only, not drawn on the figure"
+  }
+}

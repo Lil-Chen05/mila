@@ -1,0 +1,191 @@
+{
+  "rule": "strip one trailing <|im_end|> sentinel + optional <..> wrap; accept int in [0,100]",
+  "natural": {
+    "total_rows": 5000,
+    "status_counts": {
+      "before": {
+        "malformed": 4354,
+        "missing": 637,
+        "parsed": 9
+      },
+      "after": {
+        "recovered": 4352,
+        "missing": 639,
+        "parsed": 9
+      }
+    },
+    "malformed_total": 4354,
+    "malformed_recovered": 4352,
+    "malformed_not_recovered": 2,
+    "parsed_values_unchanged": true,
+    "all_final_in_range_0_100": true,
+    "nonrecovered_forms": {
+      "100%<|im_end|>": 2
+    },
+    "evaluable_natural_answers": 3550,
+    "usable_confidence_among_evaluable": 3542,
+    "usable_confidence_among_evaluable_correct": 3166,
+    "usable_confidence_among_evaluable_incorrect": 376,
+    "distribution_final": {
+      "n": 4361,
+      "mean": 93.45,
+      "median": 95.0,
+      "min": 0,
+      "max": 100,
+      "pct_ge_90": 74.7,
+      "pct_eq_100": 36.5
+    },
+    "examples_recovered": [
+      [
+        "100<|im_end|>",
+        "100"
+      ],
+      [
+        "100<|im_end|>",
+        "100"
+      ],
+      [
+        "100<|im_end|>",
+        "100"
+      ],
+      [
+        "99<|im_end|>",
+        "99"
+      ],
+      [
+        "100<|im_end|>",
+        "100"
+      ],
+      [
+        "100<|im_end|>",
+        "100"
+      ]
+    ],
+    "examples_not_recovered": [
+      [
+        "100%<|im_end|>"
+      ],
+      [
+        "100%<|im_end|>"
+      ]
+    ]
+  },
+  "checkpoint": {
+    "total_rows": 55000,
+    "status_counts": {
+      "before": {
+        "malformed": 48497,
+        "parsed": 5252,
+        "missing": 1251
+      },
+      "after": {
+        "recovered": 47227,
+        "parsed": 5252,
+        "missing": 2521
+      }
+    },
+    "malformed_total": 48497,
+    "malformed_recovered": 47227,
+    "malformed_not_recovered": 1270,
+    "parsed_values_unchanged": true,
+    "all_final_in_range_0_100": true,
+    "nonrecovered_forms": {
+      "<integer 0-100><|im_end|>": 1053,
+      "<integer 0-100>": 131,
+      "": 35,
+      "<integer 100><|im_end|>": 14,
+      "<": 13,
+      "<integer 0-100>\"": 9,
+      "50%<|im_end|>": 3,
+      "<integer 90><|im_end|>": 2
+    },
+    "per_fraction_coverage": {
+      "0.0": {
+        "n": 5000,
+        "parsed": 3435,
+        "recovered": 1175,
+        "usable": 4610,
+        "coverage_pct": 92.2
+      },
+      "0.1": {
+        "n": 5000,
+        "parsed": 846,
+        "recovered": 3868,
+        "usable": 4714,
+        "coverage_pct": 94.3
+      },
+      "0.2": {
+        "n": 5000,
+        "parsed": 348,
+        "recovered": 4372,
+        "usable": 4720,
+        "coverage_pct": 94.4
+      },
+      "0.3": {
+        "n": 5000,
+        "parsed": 186,
+        "recovered": 4504,
+        "usable": 4690,
+        "coverage_pct": 93.8
+      },
+      "0.4": {
+        "n": 5000,
+        "parsed": 142,
+        "recovered": 4589,
+        "usable": 4731,
+        "coverage_pct": 94.6
+      },
+      "0.5": {
+        "n": 5000,
+        "parsed": 100,
+        "recovered": 4653,
+        "usable": 4753,
+        "coverage_pct": 95.1
+      },
+      "0.6": {
+        "n": 5000,
+        "parsed": 68,
+        "recovered": 4688,
+        "usable": 4756,
+        "coverage_pct": 95.1
+      },
+      "0.7": {
+        "n": 5000,
+        "parsed": 62,
+        "recovered": 4718,
+        "usable": 4780,
+        "coverage_pct": 95.6
+      },
+      "0.8": {
+        "n": 5000,
+        "parsed": 41,
+        "recovered": 4808,
+        "usable": 4849,
+        "coverage_pct": 97.0
+      },
+      "0.9": {
+        "n": 5000,
+        "parsed": 22,
+        "recovered": 4876,
+        "usable": 4898,
+        "coverage_pct": 98.0
+      },
+      "1.0": {
+        "n": 5000,
+        "parsed": 2,
+        "recovered": 4976,
+        "usable": 4978,
+        "coverage_pct": 99.6
+      }
+    },
+    "distribution_final": {
+      "n": 52479,
+      "mean": 91.69,
+      "median": 95.0,
+      "min": 0,
+      "max": 100,
+      "pct_ge_90": 60.3,
+      "pct_eq_100": 28.8
+    }
+  }
+}
