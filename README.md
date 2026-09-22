@@ -6,9 +6,7 @@ examines how reasoning-token entropy, answer-choice entropy, and verbalized
 confidence evolve during reasoning, and how their relationship with natural
 final-answer correctness changes across and within questions.
 
-Read the reviewed paper: **[report/main.pdf](report/main.pdf)**. The paper
-source is [report/main.tex](report/main.tex), and the numerical audit is
-[analysis/final-r5000/RESULTS_VALIDATION_SUMMARY.md](analysis/final-r5000/RESULTS_VALIDATION_SUMMARY.md).
+The numerical audit is [analysis/final-r5000/RESULTS_VALIDATION_SUMMARY.md](analysis/final-r5000/RESULTS_VALIDATION_SUMMARY.md).
 
 ## Study design and cohort
 
